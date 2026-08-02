@@ -39,20 +39,20 @@ You almost certainly have real config directories already. Move them into a prof
 this prints every path it touches, and the command that undoes it:
 
 ```sh
-ccp migrate claude default
-ccp migrate codex default
+ccp migrate claude work
+ccp migrate codex work
 ```
 
-`migrate` moves *and* links in one step; there is no `init` to run afterwards. Use
-`ccp init` only on a machine with nothing to migrate.
+Any name will do — no name is special. `migrate` moves *and* links in one step, so
+there is nothing to run afterwards. `ccp init` creates no profiles; it only repairs
+links that have drifted, and `reinit` is the same command.
 
 ## Use
 
 ```
 ccp                            everything, active entries marked
 ccp list                       same thing
-ccp init                       create the config-dir symlinks
-ccp reinit                     recreate/repair the symlinks
+ccp init, ccp reinit           repair the symlinks (same command)
 ccp new     <what> <name>      create an empty profile or history set
 ccp migrate <what> <name>      move existing real dirs into one
 ccp switch  <what> <name>      point the symlink at <name>

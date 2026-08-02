@@ -335,11 +335,9 @@ def has_entry(d: Dim, name: str) -> bool:
     return config_dir(d, name).is_dir()
 
 
-def _init_target(d: Dim) -> str | None:
-    """Entry init/reinit should link to, or None when it is ambiguous."""
+def _sole_entry(d: Dim) -> str | None:
+    """The only entry, when there is exactly one. No name is treated as special."""
     names = entries(d)
-    if "default" in names or not names:
-        return "default"
     return names[0] if len(names) == 1 else None
 
 
@@ -357,13 +355,19 @@ def ensure_outer(t: Dim) -> Path:
     return link
 
 
-def cmd_init(force: bool) -> int:
-    """Create the symlinks. `reinit` (force) also repoints ones already present."""
+def cmd_init() -> int:
+    """Repair the symlinks for whatever profiles already exist.
+
+    Creates nothing: a profile comes from `migrate` or `new`, both of which link
+    as they go, so this is only needed to repair drift - an installer that
+    replaced a symlink, or a profile root that moved.
+    """
     rc = 0
     for t in PROFILES:
         link = outer_link(t)
         if link is None:
-            print(f"{PROG}: {t.env} is not set - export it first", file=sys.stderr)
+            print(f"{PROG}: {t.key}: {t.env} is not set - export it first",
+                  file=sys.stderr)
             rc = 1
             continue
         if not link.is_symlink() and link.exists():
@@ -374,14 +378,18 @@ def cmd_init(force: bool) -> int:
             continue
 
         name = current(t)
-        if name is None or force or not has_entry(t, name):
-            name = _init_target(t)
+        if name is None or not has_entry(t, name):
+            name = _sole_entry(t)
             if name is None:
-                print(f"{PROG}: {t.key}: several profiles and no 'default' - pick one:\n"
-                      f"    {PROG} switch {t.key} <name>", file=sys.stderr)
+                found = entries(t)
+                print(f"{PROG}: {t.key}: " + (
+                    f"no profiles yet\n    {PROG} migrate {t.key} <name>"
+                    f"   moves your existing config dir into one"
+                    if not found else
+                    f"{len(found)} profiles, none selected - pick one\n"
+                    f"    {PROG} switch {t.key} <name>"), file=sys.stderr)
                 rc = 1
                 continue
-            config_dir(t, name).mkdir(parents=True, exist_ok=True)
             relink(sel_link(t), entry(t, name))
             print(f"{t.key}: current -> {name}")
         ensure_outer(t)
@@ -626,8 +634,8 @@ HELP = f"""\
 usage:
   {PROG}                              everything, active entries marked
   {PROG} list                         same thing
-  {PROG} init                         create the config-dir symlinks
-  {PROG} reinit                       recreate/repair the symlinks
+  {PROG} init, {PROG} reinit              repair the symlinks (same command;
+                                      creates no profiles)
   {PROG} new     <what> <name>        create an empty profile or history set
   {PROG} migrate <what> <name>        move existing real dirs into one
   {PROG} switch  <what> <name>        point the symlink at <name>
@@ -676,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "list" and not rest:
         return cmd_status()
     if cmd in ("init", "reinit") and not rest:
-        return cmd_init(force=cmd == "reinit")
+        return cmd_init()
     if cmd == "rename":
         if len(rest) != 3:
             die(f"usage: {PROG} rename <{'|'.join(DIMS)}> <name> <newname>")

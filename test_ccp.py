@@ -58,6 +58,13 @@ def cfg_of(d: Path, tool: str, name: str) -> Path:
     return d / "prof" / tool / name / "config"
 
 
+def bootstrap(*tools: str, name: str = "work") -> None:
+    """Create and select a profile. init no longer invents one."""
+    for t in tools or ("claude", "codex"):
+        cp.main(["new", t, name])
+        cp.main(["switch", t, name])
+
+
 def xdev() -> OSError:
     """Force the cross-device path that rename cannot take."""
     return OSError(errno.EXDEV, "Invalid cross-device link")
@@ -76,6 +83,7 @@ def test_name_validation_rejects_traversal():
 def test_requires_claude_config_dir():
     """Claude is reported and skipped; codex still makes progress."""
     with sandbox(claude_env=False) as d, quiet() as out:
+        cp.main(["new", "codex", "work"])
         assert cp.main(["init"]) == 1
         assert "CLAUDE_CONFIG_DIR" in out.getvalue()
         assert not (d / "prof" / "claude").exists(), "must not set claude up"
@@ -127,10 +135,11 @@ def test_links_into_a_config_dir_whose_parent_is_missing():
     """A custom CLAUDE_CONFIG_DIR can nest below directories that do not exist."""
     with sandbox(CLAUDE_CONFIG_DIR="") as d, quiet():
         os.environ["CLAUDE_CONFIG_DIR"] = str(d / "nested" / "deeper" / "claude")
-        assert cp.main(["init"]) == 0
+        cp.main(["new", "claude", "work"])
+        cp.main(["switch", "claude", "work"])
         link = d / "nested" / "deeper" / "claude"
         assert link.is_symlink()
-        assert link.resolve() == cfg_of(d, "claude", "default").resolve()
+        assert link.resolve() == cfg_of(d, "claude", "work").resolve()
 
 
 def test_relink_refuses_to_clobber_a_real_directory():
@@ -149,19 +158,31 @@ def test_relink_refuses_to_clobber_a_real_directory():
 
 # --- init / reinit ---------------------------------------------------------
 
-def test_init_creates_default_and_links_both_tools():
-    with sandbox() as d, quiet():
-        assert cp.main(["init"]) == 0
-        for tool, link in (("claude", d / ".claude"), ("codex", d / ".codex")):
-            assert link.is_symlink()
-            assert link.resolve() == cfg_of(d, tool, "default").resolve()
-            assert cp.current(cp.DIMS[tool]) == "default"
+def test_init_invents_no_profile_and_says_what_to_run():
+    with sandbox() as d, quiet() as out:
+        assert cp.main(["init"]) == 1
+        assert not (d / "prof").exists(), "must create nothing"
+        assert "migrate claude" in out.getvalue()
+
+
+def test_init_selects_a_sole_profile_but_not_one_of_several():
+    with sandbox() as d, quiet() as out:
+        cp.main(["new", "claude", "onlyone"])
+        assert cp.main(["init"]) == 1          # codex still has none
+        assert cp.current(cp.DIMS["claude"]) == "onlyone", "sole entry is unambiguous"
+        assert (d / ".claude").is_symlink()
+        cp.main(["new", "claude", "second"])
+        (d / "prof" / "claude" / "current").unlink()
+        assert cp.main(["init"]) == 1
+        assert "switch claude" in out.getvalue(), "must ask rather than guess"
+        assert cp.current(cp.DIMS["claude"]) is None
 
 
 def test_init_refuses_real_dir_and_leaves_it_intact():
     with sandbox() as d, quiet() as out:
         (d / ".codex").mkdir()
         (d / ".codex" / "auth.json").write_text("secret")
+        bootstrap("claude")
         assert cp.main(["init"]) == 1
         assert not (d / ".codex").is_symlink()
         assert (d / ".codex" / "auth.json").read_text() == "secret"
@@ -172,12 +193,12 @@ def test_init_refuses_real_dir_and_leaves_it_intact():
 
 def test_reinit_repairs_a_dangling_link():
     with sandbox() as d, quiet():
-        cp.main(["init"])
-        cp.main(["new", "claude", "work"])
-        cp.main(["switch", "claude", "work"])
+        bootstrap("claude")
+        cp.main(["new", "claude", "spare"])
         shutil.rmtree(d / "prof" / "claude" / "work")
         assert not (d / ".claude").resolve().exists()
-        assert cp.main(["reinit"]) == 0
+        assert cp.main(["reinit"]) == 1        # codex has no profile
+        assert cp.current(cp.DIMS["claude"]) == "spare"
         assert (d / ".claude").resolve().is_dir()
 
 
@@ -276,24 +297,24 @@ def test_migrate_refuses_existing_profile():
 
 def test_switch_repoints_and_link_is_never_absent():
     with sandbox() as d, quiet():
-        cp.main(["init"])
-        cp.main(["new", "claude", "work"])
-        assert cp.main(["switch", "claude", "work"]) == 0
+        bootstrap()
+        cp.main(["new", "claude", "spare"])
+        assert cp.main(["switch", "claude", "spare"]) == 0
         assert (d / ".claude").is_symlink()
+        assert cp.current(cp.DIMS["claude"]) == "spare"
+        cp.main(["switch", "claude", "work"])
         assert cp.current(cp.DIMS["claude"]) == "work"
-        cp.main(["switch", "claude", "default"])
-        assert cp.current(cp.DIMS["claude"]) == "default"
 
 
 def test_switch_refuses_missing_profile_and_real_dir():
     with sandbox() as d, quiet():
-        cp.main(["init"])
+        bootstrap()
         assert exits(cp.main, ["switch", "claude", "ghost"])
         (d / ".claude").unlink()
         (d / ".claude").mkdir()
         (d / ".claude" / "keep").write_text("x")
-        cp.main(["new", "claude", "work"])
-        assert exits(cp.main, ["switch", "claude", "work"])
+        cp.main(["new", "claude", "spare"])
+        assert exits(cp.main, ["switch", "claude", "spare"])
         assert (d / ".claude" / "keep").read_text() == "x"
 
 
@@ -310,16 +331,16 @@ def test_current_is_none_for_link_outside_profile_root():
 
 def test_rename_follows_the_active_profile():
     with sandbox() as d, quiet():
-        cp.main(["init"])
-        assert cp.main(["rename", "claude", "default", "work"]) == 0
-        assert cp.current(cp.DIMS["claude"]) == "work"
-        assert (d / ".claude").resolve() == cfg_of(d, "claude", "work").resolve()
-        assert not (d / "prof" / "claude" / "default").exists()
+        bootstrap()
+        assert cp.main(["rename", "claude", "work", "personal"]) == 0
+        assert cp.current(cp.DIMS["claude"]) == "personal"
+        assert (d / ".claude").resolve() == cfg_of(d, "claude", "personal").resolve()
+        assert not (d / "prof" / "claude" / "work").exists()
 
 
 def test_rename_moves_contents_and_leaves_inactive_links_alone():
     with sandbox() as d, quiet():
-        cp.main(["init"])
+        bootstrap()
         cp.main(["new", "claude", "spare"])
         (cfg_of(d, "claude", "spare") / "settings.json").write_text('{"k":1}')
         before = os.readlink(d / ".claude")
@@ -339,14 +360,14 @@ def test_rename_follows_the_active_history_set():
 
 def test_rename_refuses_collisions_bad_names_and_missing_entries():
     with sandbox(), quiet():
-        cp.main(["init"])
+        bootstrap()
         cp.main(["new", "claude", "other"])
-        assert exits(cp.main, ["rename", "claude", "default", "other"])   # exists
-        assert exits(cp.main, ["rename", "claude", "ghost", "x"])         # missing
-        assert exits(cp.main, ["rename", "claude", "default", "a/b"])     # traversal
-        assert exits(cp.main, ["rename", "claude", "default", "current"]) # reserved
-        assert exits(cp.main, ["rename", "claude", "default", "default"]) # same
-        assert cp.current(cp.DIMS["claude"]) == "default", "nothing moved"
+        assert exits(cp.main, ["rename", "claude", "work", "other"])   # exists
+        assert exits(cp.main, ["rename", "claude", "ghost", "x"])      # missing
+        assert exits(cp.main, ["rename", "claude", "work", "a/b"])     # traversal
+        assert exits(cp.main, ["rename", "claude", "work", "current"]) # reserved
+        assert exits(cp.main, ["rename", "claude", "work", "work"])    # same
+        assert cp.current(cp.DIMS["claude"]) == "work", "nothing moved"
 
 
 # --- history as an independent dimension -----------------------------------
@@ -399,7 +420,7 @@ def test_new_profile_joins_the_shared_history():
 
 def test_new_profile_gets_a_real_dir_when_history_is_not_enabled():
     with sandbox() as d, quiet():
-        cp.main(["init"])
+        bootstrap()
         cp.main(["new", "claude", "solo"])
         assert not (cfg_of(d, "claude", "solo") / "projects").is_symlink()
 
@@ -463,11 +484,11 @@ def test_run_passes_flags_through_untouched():
 
 def test_run_leaves_the_active_profile_alone():
     with sandbox() as d, quiet():
-        cp.main(["init"])
-        cp.main(["new", "claude", "work"])
+        bootstrap()
+        cp.main(["new", "claude", "spare"])
         before = os.readlink(d / ".claude")
         with mock.patch.object(os, "execvp"):
-            cp.main(["run", "claude", "work"])
+            cp.main(["run", "claude", "spare"])
         assert os.readlink(d / ".claude") == before
 
 
@@ -483,12 +504,11 @@ def test_run_rejects_missing_profile_before_exec():
 def test_no_metadata_files_are_written():
     """State is derived from readlink/listdir; nothing else may appear."""
     with sandbox() as d, quiet():
-        cp.main(["init"])
-        cp.main(["new", "claude", "work"])
-        cp.main(["switch", "claude", "work"])
+        bootstrap()
+        cp.main(["new", "claude", "spare"])
         root = d / "prof"
         allowed = {(t, n, "config") for t in ("claude", "codex")
-                   for n in ("default", "work")}
+                   for n in ("work", "spare")}
         for p in root.rglob("*"):
             parts = p.relative_to(root).parts
             assert p.is_dir(), f"unexpected file {p}"
@@ -502,7 +522,9 @@ def main() -> int:
         try:
             t()
             print(f"  ok    {t.__name__}")
-        except Exception as e:  # noqa: BLE001 - report and keep going
+        # BaseException: a stray die() raises SystemExit, which must fail the
+        # test rather than silently end the whole run.
+        except BaseException as e:  # noqa: BLE001 - report and keep going
             failed.append(t.__name__)
             print(f"  FAIL  {t.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(tests) - len(failed)}/{len(tests)} passed")
