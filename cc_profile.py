@@ -372,6 +372,30 @@ def cmd_switch(d: Dim, name: str) -> int:
     return 0
 
 
+def cmd_rename(d: Dim, name: str, new: str) -> int:
+    old_dir, new_dir = store(d) / valid(name), store(d) / valid(new)
+    if name == new:
+        die(f"{name!r} is already the name")
+    if not has_entry(d, name):
+        die(f"no {d.key} {name!r} at {disp(old_dir)}")
+    if new_dir.exists():
+        die(f"{d.key} {new!r} already exists at {disp(new_dir)}")
+
+    was_active = current(d) == name
+    os.rename(old_dir, new_dir)          # same store, so never cross-device
+    print(f"renamed {d.key} {name!r} -> {new!r}")
+    print(f"  from  {disp(old_dir)}")
+    print(f"    to  {disp(new_dir)}")
+    if was_active:
+        # The selecting symlink still names the old directory, so it dangles
+        # until this repoint. Profiles linking a history set go by way of
+        # `current` rather than the name, so they need no adjustment.
+        link = require_link(d)
+        relink(link, target(d, new))
+        print(f"  link  {disp(link)} -> {disp(target(d, new))}")
+    return 0
+
+
 def cmd_new(d: Dim, name: str) -> int:
     base = store(d) / valid(name)
     if base.exists():
@@ -573,6 +597,7 @@ usage:
   {PROG} new     <what> <name>        create an empty profile or history set
   {PROG} migrate <what> <name>        move existing real dirs into one
   {PROG} switch  <what> <name>        point the symlink at <name>
+  {PROG} rename  <what> <name> <new>  rename one, following it if it is active
   {PROG} run     <tool> <name> [--] [args...]
                                       run <tool> under <name> for one
                                       invocation, leaving the active profile
@@ -618,6 +643,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status()
     if cmd in ("init", "reinit") and not rest:
         return cmd_init(force=cmd == "reinit")
+    if cmd == "rename":
+        if len(rest) != 3:
+            die(f"usage: {PROG} rename <{'|'.join(DIMS)}> <name> <newname>")
+        return cmd_rename(dim_of(rest[0]), rest[1], rest[2])
     if cmd in ("new", "migrate", "switch"):
         if len(rest) != 2:
             die(f"usage: {PROG} {cmd} <{'|'.join(DIMS)}> <name>")

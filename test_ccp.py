@@ -282,6 +282,49 @@ def test_current_is_none_for_link_outside_profile_root():
         assert cp.cmd_status() == 0  # must not crash
 
 
+# --- rename ----------------------------------------------------------------
+
+def test_rename_follows_the_active_profile():
+    with sandbox() as d, quiet():
+        cp.main(["init"])
+        assert cp.main(["rename", "claude", "default", "work"]) == 0
+        assert cp.current(cp.DIMS["claude"]) == "work"
+        assert (d / ".claude").resolve() == cfg_of(d, "claude", "work").resolve()
+        assert not (d / "prof" / "claude" / "default").exists()
+
+
+def test_rename_moves_contents_and_leaves_inactive_links_alone():
+    with sandbox() as d, quiet():
+        cp.main(["init"])
+        cp.main(["new", "claude", "spare"])
+        (cfg_of(d, "claude", "spare") / "settings.json").write_text('{"k":1}')
+        before = os.readlink(d / ".claude")
+        assert cp.main(["rename", "claude", "spare", "backup"]) == 0
+        assert (cfg_of(d, "claude", "backup") / "settings.json").read_text() == '{"k":1}'
+        assert os.readlink(d / ".claude") == before, "active link must not move"
+
+
+def test_rename_follows_the_active_history_set():
+    with sandbox() as d, quiet():
+        _with_history(d)
+        assert cp.main(["rename", "claude-history", "main", "archive"]) == 0
+        assert cp.current(cp.DIMS["claude-history"]) == "archive"
+        # profiles link by way of `current`, so they need no adjustment
+        assert (d / ".claude" / "projects" / "-repo" / "a.jsonl").read_text() == "chat"
+
+
+def test_rename_refuses_collisions_bad_names_and_missing_entries():
+    with sandbox(), quiet():
+        cp.main(["init"])
+        cp.main(["new", "claude", "other"])
+        assert exits(cp.main, ["rename", "claude", "default", "other"])   # exists
+        assert exits(cp.main, ["rename", "claude", "ghost", "x"])         # missing
+        assert exits(cp.main, ["rename", "claude", "default", "a/b"])     # traversal
+        assert exits(cp.main, ["rename", "claude", "default", "current"]) # reserved
+        assert exits(cp.main, ["rename", "claude", "default", "default"]) # same
+        assert cp.current(cp.DIMS["claude"]) == "default", "nothing moved"
+
+
 # --- history as an independent dimension -----------------------------------
 
 def hist_of(d: Path, tool: str, name: str) -> Path:

@@ -56,6 +56,7 @@ ccp reinit                     recreate/repair the symlinks
 ccp new     <what> <name>      create an empty profile or history set
 ccp migrate <what> <name>      move existing real dirs into one
 ccp switch  <what> <name>      point the symlink at <name>
+ccp rename  <what> <name> <new>  rename one, following it if active
 ccp run     <tool> <name> [--] [args...]
 ```
 
