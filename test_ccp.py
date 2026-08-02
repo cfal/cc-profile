@@ -68,8 +68,8 @@ def xdev() -> OSError:
 def test_name_validation_rejects_traversal():
     with sandbox(), quiet():
         for bad in ("..", ".", "", "a/b", "x/../y", "../../etc", "a b", "-x/.."):
-            assert exits(cp.config_dir, cp.TOOLS["claude"], bad), f"accepted {bad!r}"
-        ok = cp.config_dir(cp.TOOLS["claude"], "work-1_X")
+            assert exits(cp.config_dir, cp.DIMS["claude"], bad), f"accepted {bad!r}"
+        ok = cp.config_dir(cp.DIMS["claude"], "work-1_X")
         assert ok.parent.name == "work-1_X"
 
 
@@ -82,7 +82,7 @@ def test_requires_claude_config_dir():
 def test_rejects_env_var_pointing_inside_profile_root():
     with sandbox() as d, quiet():
         os.environ["CLAUDE_CONFIG_DIR"] = str(cfg_of(d, "claude", "work"))
-        assert exits(cp.require_link, cp.TOOLS["claude"])
+        assert exits(cp.require_link, cp.DIMS["claude"])
 
 
 # --- the atomic swap -------------------------------------------------------
@@ -97,6 +97,16 @@ def test_relink_replaces_existing_symlink_without_debris():
         assert os.readlink(link) == str(b)
         assert link.is_symlink() and link.is_dir()
         assert not list(d.glob(".*ccp*")), "temp link left behind"
+
+
+def test_links_into_a_config_dir_whose_parent_is_missing():
+    """A custom CLAUDE_CONFIG_DIR can nest below directories that do not exist."""
+    with sandbox(CLAUDE_CONFIG_DIR="") as d, quiet():
+        os.environ["CLAUDE_CONFIG_DIR"] = str(d / "nested" / "deeper" / "claude")
+        assert cp.main(["init"]) == 0
+        link = d / "nested" / "deeper" / "claude"
+        assert link.is_symlink()
+        assert link.resolve() == cfg_of(d, "claude", "default").resolve()
 
 
 def test_relink_refuses_to_clobber_a_real_directory():
@@ -121,7 +131,7 @@ def test_init_creates_default_and_links_both_tools():
         for tool, link in (("claude", d / ".claude"), ("codex", d / ".codex")):
             assert link.is_symlink()
             assert link.resolve() == cfg_of(d, tool, "default").resolve()
-            assert cp.current(cp.TOOLS[tool]) == "default"
+            assert cp.current(cp.DIMS[tool]) == "default"
 
 
 def test_init_refuses_real_dir_and_leaves_it_intact():
@@ -246,9 +256,9 @@ def test_switch_repoints_and_link_is_never_absent():
         cp.main(["new", "claude", "work"])
         assert cp.main(["switch", "claude", "work"]) == 0
         assert (d / ".claude").is_symlink()
-        assert cp.current(cp.TOOLS["claude"]) == "work"
+        assert cp.current(cp.DIMS["claude"]) == "work"
         cp.main(["switch", "claude", "default"])
-        assert cp.current(cp.TOOLS["claude"]) == "default"
+        assert cp.current(cp.DIMS["claude"]) == "default"
 
 
 def test_switch_refuses_missing_profile_and_real_dir():
@@ -268,8 +278,95 @@ def test_current_is_none_for_link_outside_profile_root():
         elsewhere = d / "elsewhere"
         elsewhere.mkdir()
         os.symlink(elsewhere, d / ".codex")
-        assert cp.current(cp.TOOLS["codex"]) is None
+        assert cp.current(cp.DIMS["codex"]) is None
         assert cp.cmd_status() == 0  # must not crash
+
+
+# --- history as an independent dimension -----------------------------------
+
+def hist_of(d: Path, tool: str, name: str) -> Path:
+    return d / "prof" / f"{tool}-history" / name
+
+
+def _with_history(d: Path):
+    """A claude profile 'work' whose transcripts have been lifted into 'main'."""
+    (d / ".claude" / "projects" / "-repo").mkdir(parents=True)
+    (d / ".claude" / "projects" / "-repo" / "a.jsonl").write_text("chat")
+    cp.main(["migrate", "claude", "work"])
+    cp.main(["migrate", "claude-history", "main"])
+
+
+def test_history_survives_a_profile_switch():
+    """The whole point: transcripts follow the work, not the account."""
+    with sandbox() as d, quiet():
+        _with_history(d)
+        cp.main(["new", "claude", "personal"])
+        seen = d / ".claude" / "projects" / "-repo" / "a.jsonl"
+        assert seen.read_text() == "chat"
+        cp.main(["switch", "claude", "personal"])
+        assert cp.current(cp.DIMS["claude"]) == "personal"
+        assert seen.read_text() == "chat", "history must follow across accounts"
+
+
+def test_history_switch_changes_transcripts_but_not_the_profile():
+    with sandbox() as d, quiet():
+        _with_history(d)
+        cp.main(["new", "claude-history", "clean"])
+        before = cp.current(cp.DIMS["claude"])
+        cp.main(["switch", "claude-history", "clean"])
+        assert cp.current(cp.DIMS["claude-history"]) == "clean"
+        assert cp.current(cp.DIMS["claude"]) == before, "profile must not move"
+        assert not (d / ".claude" / "projects" / "-repo").exists()
+        cp.main(["switch", "claude-history", "main"])
+        assert (d / ".claude" / "projects" / "-repo" / "a.jsonl").read_text() == "chat"
+
+
+def test_new_profile_joins_the_shared_history():
+    with sandbox() as d, quiet():
+        _with_history(d)
+        cp.main(["new", "claude", "later"])
+        link = cfg_of(d, "claude", "later") / "projects"
+        assert link.is_symlink()
+        assert link.resolve() == (hist_of(d, "claude", "main") / "projects").resolve()
+
+
+def test_new_profile_gets_a_real_dir_when_history_is_not_enabled():
+    with sandbox() as d, quiet():
+        cp.main(["init"])
+        cp.main(["new", "claude", "solo"])
+        assert not (cfg_of(d, "claude", "solo") / "projects").is_symlink()
+
+
+def test_migrate_history_never_clobbers_another_profiles_transcripts():
+    """Only the active profile donates; the rest keep theirs and are reported."""
+    with sandbox() as d, quiet() as out:
+        (d / ".claude" / "projects").mkdir(parents=True)
+        (d / ".claude" / "projects" / "mine.jsonl").write_text("active")
+        cp.main(["migrate", "claude", "work"])
+        other = cfg_of(d, "claude", "other") / "projects"
+        other.mkdir(parents=True)
+        (other / "theirs.jsonl").write_text("precious")
+        cp.main(["migrate", "claude-history", "main"])
+        assert (other / "theirs.jsonl").read_text() == "precious"
+        assert not other.is_symlink(), "must not be relinked over real data"
+        assert "other" in out.getvalue()
+
+
+def test_migrate_history_needs_an_active_profile():
+    with sandbox(), quiet():
+        assert exits(cp.main, ["migrate", "claude-history", "main"])
+
+
+def test_current_is_a_reserved_name():
+    with sandbox(), quiet():
+        assert exits(cp.main, ["new", "claude-history", "current"])
+
+
+def test_run_rejects_a_history_set():
+    with sandbox(), quiet():
+        with mock.patch.object(os, "execvp") as ex:
+            assert exits(cp.main, ["run", "claude-history", "main"])
+        assert not ex.called
 
 
 # --- run -------------------------------------------------------------------

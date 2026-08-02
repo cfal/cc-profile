@@ -1,7 +1,7 @@
 # cc-profile (`ccp`)
 
-Switch Claude Code and Codex between named profiles — separate accounts, project
-histories, MCP servers and settings.
+Switch Claude Code and Codex between named profiles — separate accounts, MCP servers
+and settings — with chat history as a **second, independent** dimension.
 
 Both CLIs keep all their state in one config directory and honour an environment
 variable pointing at it. `ccp` makes that path a symlink and repoints it, so switching
@@ -49,21 +49,60 @@ ccp migrate codex default
 ## Use
 
 ```
-ccp                            active profile for each tool
-ccp list                       list all profiles
+ccp                            everything, active entries marked
+ccp list                       same thing
 ccp init                       create the config-dir symlinks
 ccp reinit                     recreate/repair the symlinks
-ccp new     <tool> <name>      create an empty profile
-ccp migrate <tool> <name>      move an existing real config dir into a profile
-ccp switch  <tool> <name>      point the symlink at <name>
+ccp new     <what> <name>      create an empty profile or history set
+ccp migrate <what> <name>      move existing real dirs into one
+ccp switch  <what> <name>      point the symlink at <name>
 ccp run     <tool> <name> [--] [args...]
 ```
 
+`<what>` is `claude`, `codex`, `claude-history` or `codex-history`.
+
+## Two dimensions
+
+A **config profile** holds the account, settings and MCP config. A **history set** holds
+the transcripts `--resume` reads — Claude's `projects/`, Codex's `sessions/`. They switch
+independently, so the same chats can follow you across accounts, or you can keep a
+separate set for a clean room:
+
+```sh
+ccp migrate claude-history main    # lift the active profile's transcripts out
+ccp switch  claude personal        # different account, same chats
+ccp new     claude-history demo
+ccp switch  claude-history demo    # same account, empty history
+```
+
+Every profile points at one `current` link, so switching history is a single atomic
+repoint rather than one per profile. New profiles join the shared set automatically;
+a profile that already holds its own transcripts is never relinked over and is
+reported instead.
+
+History sets are directories only. Codex's `logs_*.sqlite` and `memories_*.sqlite` stay
+with the profile — SQLite puts `-wal`/`-shm` beside the path it opened, so symlinking a
+database would strand its journal.
+
 ```console
-$ ccp new claude work
-$ ccp switch claude work
-claude: default -> work
-  ~/.claude -> ~/.config/cc-profile/claude/work/config
+$ ccp
+~/.config/cc-profile
+
+claude          ~/.claude -> work
+     personal
+   * work
+claude-history  main
+     demo
+   * main
+
+codex           ~/.codex -> default
+   * default
+codex-history   not enabled - sessions/ lives inside each profile
+                share it:  ccp migrate codex-history <name>
+
+$ ccp switch claude personal
+claude: work -> personal
+  ~/.claude -> ~/.config/cc-profile/claude/personal/config
 
 $ ccp run codex personal exec 'summarise this repo'   # one invocation, no switch
 ```
@@ -79,10 +118,17 @@ no `clone`.
 ## Layout
 
 ```
-~/.config/cc-profile/            override with CC_PROFILE_DIR
-├── claude/<name>/config/        <- $CLAUDE_CONFIG_DIR points here
-└── codex/<name>/config/         <- $CODEX_HOME points here
+~/.config/cc-profile/                     override with CC_PROFILE_DIR
+├── claude/<name>/config/                 <- $CLAUDE_CONFIG_DIR points here
+│                    └── projects ────────┐  (when history is enabled)
+├── codex/<name>/config/                  │  <- $CODEX_HOME points here
+└── claude-history/                       │
+    ├── current -> main  <────────────────┘  switch repoints this one link
+    └── main/projects/                       the real transcripts
 ```
+
+Each store is named for the key you type, so `ccp switch claude-history main` acts on
+`~/.config/cc-profile/claude-history/main`.
 
 No index, lockfile or state file. The active profile is `readlink()` on the config path
 and the profile list is `listdir()`, so nothing can fall out of sync — and you can move,
