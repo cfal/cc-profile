@@ -311,6 +311,26 @@ def _migrate_claude_json(t: Tool, dest: Path) -> None:
         shutil.move(str(outer), str(inner))
 
 
+def cmd_run(t: Tool, name: str, args: list[str]) -> int:
+    """Run the tool under one profile without disturbing the active symlink.
+
+    Setting the env var is enough on its own, so this touches no links at all
+    and cannot race with `switch`. execvp replaces this process, so signals,
+    exit codes and Ctrl-C behave as if the tool had been invoked directly.
+    """
+    cfg = config_dir(t, name)
+    if not cfg.is_dir():
+        die(f"no {t.name} profile {name!r} at {disp(cfg)}\n"
+            f"  create it:  {PROG} new {t.name} {name}")
+    # stderr: the tool's stdout may be piped or parsed, e.g. `codex exec --json`.
+    print(f"{PROG}: {t.env}={disp(cfg)}", file=sys.stderr)
+    os.environ[t.env] = str(cfg)
+    try:
+        os.execvp(t.exe, [t.exe, *args])
+    except FileNotFoundError:
+        die(f"{t.exe!r} not found on PATH")
+
+
 HELP = f"""\
 {PROG} - switch Claude Code and Codex config-dir profiles
 
@@ -322,6 +342,10 @@ usage:
   {PROG} new     <tool> <name>        create an empty profile
   {PROG} migrate <tool> <name>        move an existing real config dir into a profile
   {PROG} switch  <tool> <name>        point the symlink at <name>
+  {PROG} run     <tool> <name> [--] [args...]
+                                      run <tool> under <name> for one
+                                      invocation, leaving the active profile
+                                      untouched
 
   <tool> is 'claude' or 'codex'.
 
@@ -335,6 +359,17 @@ environment:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    # Sliced off before any parsing: everything after <name> belongs to the
+    # child, so `ccp run claude work --help` reaches claude rather than us.
+    if argv and argv[0] == "run":
+        if len(argv) < 3:
+            die(f"usage: {PROG} run <claude|codex> <name> [--] [args...]")
+        _, tool, name, *rest = argv
+        if rest and rest[0] == "--":
+            rest = rest[1:]
+        return cmd_run(tool_of(tool), name, rest)
+
     if not argv:
         return cmd_status()
     cmd, rest = argv[0], argv[1:]
