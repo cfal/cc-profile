@@ -9,9 +9,17 @@ is instant regardless of profile size. Nothing is copied.
 
 ## Install
 
+Symlink the `ccp` wrapper onto your PATH. It resolves back to this checkout, so it
+works from any directory and there is nothing to reinstall after an edit:
+
 ```sh
-uv tool install .
+ln -s "$PWD/ccp" ~/.local/bin/ccp
 ```
+
+The wrapper runs the project through `uv run`, which builds the environment on first
+use. `uv tool install .` works too if you would rather have a fixed install, but then
+source edits need `uv tool install --force .` to take effect — don't do both, or two
+`ccp` binaries end up shadowing each other on PATH.
 
 Then add this to your shell rc — `ccp` requires it and will tell you so:
 
