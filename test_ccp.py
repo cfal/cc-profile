@@ -9,6 +9,7 @@ reach the real ~/.claude or ~/.codex.
 from __future__ import annotations
 
 import contextlib
+import errno
 import importlib
 import io
 import json
@@ -55,6 +56,11 @@ def exits(fn, *a, **kw) -> bool:
 
 def cfg_of(d: Path, tool: str, name: str) -> Path:
     return d / "prof" / tool / name / "config"
+
+
+def xdev() -> OSError:
+    """Force the cross-device path that rename cannot take."""
+    return OSError(errno.EXDEV, "Invalid cross-device link")
 
 
 # --- input validation ------------------------------------------------------
@@ -187,17 +193,41 @@ def test_migrate_rolls_back_partial_copy_on_failure():
     with sandbox() as d, quiet():
         (d / ".codex").mkdir()
         (d / ".codex" / "auth.json").write_text("secret")
-        def half_copied(src, dst):
-            """What shutil.move really leaves behind when copytree dies."""
+        def half_copied(src, dst, **kw):
+            """What copytree leaves behind when it dies partway."""
             Path(dst).mkdir(parents=True, exist_ok=True)
             (Path(dst) / "partial.jsonl").write_text("x" * 100)
-            raise OSError("no space left on device")
+            raise OSError(errno.ENOSPC, "no space left on device")
 
-        with mock.patch.object(cp.shutil, "move", half_copied):
+        with mock.patch.object(cp.os, "rename", side_effect=xdev()), \
+             mock.patch.object(cp.shutil, "copytree", half_copied):
             assert exits(cp.main, ["migrate", "codex", "default"])
         assert (d / ".codex" / "auth.json").read_text() == "secret", "source intact"
         assert not (d / ".codex").is_symlink(), "must not link to a failed copy"
         assert not cfg_of(d, "codex", "default").exists(), "partial copy left behind"
+
+
+def test_migrate_keeps_the_copy_when_source_removal_fails():
+    """Copy done, delete failed: the destination is now the only complete copy.
+
+    Removing it here - the natural "roll back on error" reflex - would destroy
+    the data outright, since the source is already partly gone.
+    """
+    with sandbox() as d, quiet():
+        (d / ".codex").mkdir()
+        (d / ".codex" / "auth.json").write_text("secret")
+        real_rmtree = cp.shutil.rmtree
+
+        def rmtree(p, *a, **kw):
+            if Path(p) == d / ".codex":
+                raise OSError(errno.EACCES, "permission denied")
+            return real_rmtree(p, *a, **kw)
+
+        with mock.patch.object(cp.os, "rename", side_effect=xdev()), \
+             mock.patch.object(cp.shutil, "rmtree", rmtree):
+            assert exits(cp.main, ["migrate", "codex", "default"])
+        copied = cfg_of(d, "codex", "default") / "auth.json"
+        assert copied.read_text() == "secret", "the complete copy must be kept"
 
 
 def test_migrate_refuses_existing_profile():

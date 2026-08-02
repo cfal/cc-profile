@@ -2,6 +2,7 @@
 """cc-profile (ccp) - switch Claude Code and Codex config-dir profiles."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -296,21 +297,46 @@ def cmd_migrate(t: Tool, name: str) -> int:
                 f"need {_size(need)}, have {_size(free)}")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.move(str(link), str(dest))
-    except OSError as e:
-        # A cross-device move copies before deleting, so the source survives a
-        # failure but a partial copy is left behind. Removing it restores the
-        # pre-migration state and frees the profile name for a retry.
-        shutil.rmtree(dest, ignore_errors=True)
-        die(f"{e}\n"
-            f"  migration failed - {disp(link)} is unchanged\n"
-            f"  removed the partial copy at {disp(dest)}")
+    _move_dir(t, name, link, dest)
     _migrate_claude_json(t, dest)
     relink(link, dest)
     print(f"  link  {disp(link)} -> {disp(dest)}")
     print(f"done.  undo with:  rm {disp(link)} && mv {disp(dest)} {disp(link)}")
     return 0
+
+
+def _move_dir(t: Tool, name: str, src: Path, dest: Path) -> None:
+    """Move a config dir, preferring an atomic rename.
+
+    shutil.move does this too, but it reports both phases as one exception and
+    the correct recovery is opposite for each: a failed copy must be cleaned up,
+    while a failed *delete* must not be, because by then the destination is the
+    only complete copy and removing it would lose the data outright.
+    """
+    try:
+        os.rename(src, dest)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+
+    try:
+        shutil.copytree(src, dest, symlinks=True)
+    except OSError as e:
+        # Nothing has been deleted yet, so dropping the partial copy restores
+        # the pre-migration state exactly and frees the name for a retry.
+        shutil.rmtree(dest, ignore_errors=True)
+        die(f"{e}\n"
+            f"  copy failed - {disp(src)} is unchanged\n"
+            f"  removed the partial copy at {disp(dest)}")
+
+    try:
+        shutil.rmtree(src)
+    except OSError as e:
+        die(f"{e}\n"
+            f"  copied to {disp(dest)}, but could not remove {disp(src)}.\n"
+            f"  The copy is complete and has been kept - remove the original by\n"
+            f"  hand, then:  {PROG} switch {t.name} {name}")
 
 
 def _migrate_claude_json(t: Tool, dest: Path) -> None:
