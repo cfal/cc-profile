@@ -194,6 +194,63 @@ def cmd_list() -> int:
     return 0
 
 
+def _init_target(t: Tool) -> str | None:
+    """Profile init/reinit should link to, or None when it is ambiguous."""
+    names = profiles(t)
+    if "default" in names or not names:
+        return "default"
+    return names[0] if len(names) == 1 else None
+
+
+def cmd_init(force: bool) -> int:
+    """Create the config-dir symlinks. `reinit` (force) also repoints existing ones."""
+    rc = 0
+    for t in TOOLS.values():
+        link = require_link(t)
+        if not link.is_symlink() and link.exists():
+            print(f"{PROG}: {t.name}: {disp(link)} is a real directory, not a symlink\n"
+                  f"  move it into a profile first:\n"
+                  f"    {PROG} migrate {t.name} <name>", file=sys.stderr)
+            rc = 1
+            continue
+        if link.is_symlink() and not force:
+            target = Path(os.readlink(link))
+            if current(t) is None:
+                print(f"{PROG}: {t.name}: {disp(link)} points outside the profile root\n"
+                      f"  -> {disp(target)}\n"
+                      f"  run '{PROG} reinit' to repoint it", file=sys.stderr)
+                rc = 1
+                continue
+            if target.is_dir():
+                print(f"{t.name}: already linked -> {disp(target)}")
+                continue
+        name = _init_target(t)
+        if name is None:
+            print(f"{PROG}: {t.name}: several profiles and no 'default' - pick one:\n"
+                  f"    {PROG} switch {t.name} <name>", file=sys.stderr)
+            rc = 1
+            continue
+        target = config_dir(t, name)
+        target.mkdir(parents=True, exist_ok=True)
+        relink(link, target)
+        print(f"{t.name}: {disp(link)} -> {disp(target)}")
+    return rc
+
+
+def cmd_switch(t: Tool, name: str) -> int:
+    link = require_link(t)
+    target = config_dir(t, name)
+    if not target.is_dir():
+        die(f"no {t.name} profile {name!r} at {disp(target)}\n"
+            f"  create it:  {PROG} new {t.name} {name}")
+    refuse_real_dir(t, link)
+    prev = current(t)
+    relink(link, target)
+    print(f"{t.name}: {prev or '(none)'} -> {name}")
+    print(f"  {disp(link)} -> {disp(target)}")
+    return 0
+
+
 def cmd_new(t: Tool, name: str) -> int:
     target = config_dir(t, name)
     if target.exists():
@@ -260,8 +317,11 @@ HELP = f"""\
 usage:
   {PROG}                              active profile for each tool
   {PROG} list                         list all profiles
+  {PROG} init                         create the config-dir symlinks
+  {PROG} reinit                       recreate/repair the symlinks
   {PROG} new     <tool> <name>        create an empty profile
   {PROG} migrate <tool> <name>        move an existing real config dir into a profile
+  {PROG} switch  <tool> <name>        point the symlink at <name>
 
   <tool> is 'claude' or 'codex'.
 
@@ -284,10 +344,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if cmd == "list" and not rest:
         return cmd_list()
-    if cmd in ("new", "migrate"):
+    if cmd in ("init", "reinit") and not rest:
+        return cmd_init(force=cmd == "reinit")
+    if cmd in ("new", "migrate", "switch"):
         if len(rest) != 2:
             die(f"usage: {PROG} {cmd} <claude|codex> <name>")
-        fn = {"new": cmd_new, "migrate": cmd_migrate}[cmd]
+        fn = {"new": cmd_new, "migrate": cmd_migrate, "switch": cmd_switch}[cmd]
         return fn(tool_of(rest[0]), rest[1])
     die(f"unknown command {cmd!r} - try:  {PROG} --help")
 
