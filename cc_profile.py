@@ -114,6 +114,10 @@ def require_link(t: Tool) -> Path:
     return link
 
 
+def _size(n: int) -> str:
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
+
+
 def refuse_real_dir(t: Tool, link: Path) -> None:
     if not link.is_symlink() and link.exists():
         die(f"{disp(link)} is a real directory, not a symlink.\n"
@@ -273,14 +277,35 @@ def cmd_migrate(t: Tool, name: str) -> int:
     if dest.exists():
         die(f"{t.name} profile {name!r} already exists at {disp(dest)}")
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    same_fs = link.stat().st_dev == dest.parent.stat().st_dev
+    root = profiles_root()
+    root.mkdir(parents=True, exist_ok=True)
     print(f"migrating {t.name} into profile {name!r}")
     print(f"  from  {disp(link)}")
     print(f"    to  {disp(dest)}")
-    print("  " + ("(same filesystem - instant rename)" if same_fs else
-                  "(crossing filesystems - copying, this may take a while)"))
-    shutil.move(str(link), str(dest))
+    if link.stat().st_dev == root.stat().st_dev:
+        print("  (same filesystem - instant rename)")
+    else:
+        # Config dirs get large - Codex log databases run to gigabytes - so
+        # check before spending minutes on a copy that cannot finish.
+        need = sum(f.stat().st_size for f in link.rglob("*") if f.is_file())
+        free = shutil.disk_usage(root).free
+        print(f"  (crossing filesystems - copying {_size(need)}, "
+              f"{_size(free)} free at the destination)")
+        if need > free:
+            die(f"not enough space at {disp(root)}: "
+                f"need {_size(need)}, have {_size(free)}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(link), str(dest))
+    except OSError as e:
+        # A cross-device move copies before deleting, so the source survives a
+        # failure but a partial copy is left behind. Removing it restores the
+        # pre-migration state and frees the profile name for a retry.
+        shutil.rmtree(dest, ignore_errors=True)
+        die(f"{e}\n"
+            f"  migration failed - {disp(link)} is unchanged\n"
+            f"  removed the partial copy at {disp(dest)}")
     _migrate_claude_json(t, dest)
     relink(link, dest)
     print(f"  link  {disp(link)} -> {disp(dest)}")

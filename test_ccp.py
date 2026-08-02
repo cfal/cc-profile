@@ -182,6 +182,24 @@ def test_migrate_keeps_live_inner_claude_json_over_orphan():
         assert (d / ".claude.json").exists(), "orphan must not be deleted"
 
 
+def test_migrate_rolls_back_partial_copy_on_failure():
+    """A cross-device move can die mid-copy; leave nothing behind but the source."""
+    with sandbox() as d, quiet():
+        (d / ".codex").mkdir()
+        (d / ".codex" / "auth.json").write_text("secret")
+        def half_copied(src, dst):
+            """What shutil.move really leaves behind when copytree dies."""
+            Path(dst).mkdir(parents=True, exist_ok=True)
+            (Path(dst) / "partial.jsonl").write_text("x" * 100)
+            raise OSError("no space left on device")
+
+        with mock.patch.object(cp.shutil, "move", half_copied):
+            assert exits(cp.main, ["migrate", "codex", "default"])
+        assert (d / ".codex" / "auth.json").read_text() == "secret", "source intact"
+        assert not (d / ".codex").is_symlink(), "must not link to a failed copy"
+        assert not cfg_of(d, "codex", "default").exists(), "partial copy left behind"
+
+
 def test_migrate_refuses_existing_profile():
     with sandbox() as d, quiet():
         (d / ".codex").mkdir()
