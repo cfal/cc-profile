@@ -9,17 +9,15 @@ is instant regardless of profile size. Nothing is copied.
 
 ## Install
 
-Symlink the `ccp` wrapper onto your PATH. It resolves back to this checkout, so it
-works from any directory and there is nothing to reinstall after an edit:
+Symlink the script onto your PATH:
 
 ```sh
-ln -s "$PWD/ccp" ~/.local/bin/ccp
+ln -s "$PWD/cc_profile.py" ~/.local/bin/ccp
 ```
 
-The wrapper runs the project through `uv run`, which builds the environment on first
-use. `uv tool install .` works too if you would rather have a fixed install, but then
-source edits need `uv tool install --force .` to take effect — don't do both, or two
-`ccp` binaries end up shadowing each other on PATH.
+That is the whole install. It is one stdlib-only file with a `#!/usr/bin/env python3`
+shebang, so there is no package, no virtualenv and no build step — it runs from the
+checkout and picks up edits immediately. Python 3.8 or newer.
 
 Then add this to your shell rc — `ccp` requires it and will tell you so:
 

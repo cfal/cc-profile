@@ -15,6 +15,9 @@ from typing import NoReturn
 PROG = "ccp"
 NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
+if sys.version_info < (3, 8):  # Path.unlink(missing_ok=) is the binding constraint
+    raise SystemExit(f"{PROG} requires Python 3.8+, running {sys.version.split()[0]}")
+
 
 @dataclass(frozen=True)
 class Tool:
