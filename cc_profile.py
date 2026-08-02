@@ -102,23 +102,39 @@ def marker(d: Dim) -> str:
     return d.subdir if d.history else "config"
 
 
-def target(d: Dim, name: str) -> Path:
-    """What the selecting symlink points at."""
-    p = store(d) / valid(name)
-    return p if d.history else p / "config"
+def entry(d: Dim, name: str) -> Path:
+    """A named entry - what `current` points at."""
+    return store(d) / valid(name)
 
 
 def config_dir(d: Dim, name: str) -> Path:
-    return target(d, name)
+    """The directory the tool actually reads, inside an entry."""
+    return entry(d, name) / marker(d)
 
 
-def link_path(d: Dim) -> Path | None:
-    """Where the selecting symlink lives. None when a required env var is unset."""
+def sel_link(d: Dim) -> Path:
+    """The `current` symlink. Switching repoints exactly this and nothing else."""
+    return store(d) / "current"
+
+
+def outer_link(d: Dim) -> Path | None:
+    """Where the CLI looks for its config dir. None when a required var is unset."""
     if d.history:
-        return store(d) / "current"
+        return None
     if os.environ.get(d.env):
         return Path(os.environ[d.env]).expanduser()
     return None if d.required else home() / d.base
+
+
+def outer_target(d: Dim) -> Path:
+    """Set once by init and never again: it names `current`, not any profile."""
+    return sel_link(d) / marker(d)
+
+
+def link_target(link: Path) -> Path:
+    """Absolute path a symlink names, without following any further links."""
+    t = Path(os.readlink(link))
+    return t if t.is_absolute() else Path(os.path.normpath(link.parent / t))
 
 
 def entries(d: Dim) -> list[str]:
@@ -129,22 +145,16 @@ def entries(d: Dim) -> list[str]:
                   if p.name != "current" and (p / marker(d)).is_dir())
 
 
-def profiles(d: Dim) -> list[str]:
-    return entries(d)
-
-
 def current(d: Dim) -> str | None:
-    """Active entry, derived purely from the symlink. There is no state file."""
-    link = link_path(d)
-    if link is None or not link.is_symlink():
+    """Active entry, derived purely from `current`. There is no state file."""
+    link = sel_link(d)
+    if not link.is_symlink():
         return None
     try:
-        parts = Path(os.readlink(link)).relative_to(store(d)).parts
+        parts = link_target(link).relative_to(store(d)).parts
     except ValueError:
         return None
-    if d.history:
-        return parts[0] if len(parts) == 1 else None
-    return parts[0] if len(parts) == 2 and parts[1] == "config" else None
+    return parts[0] if len(parts) == 1 else None
 
 
 def hist_of(d: Dim) -> Dim:
@@ -153,7 +163,7 @@ def hist_of(d: Dim) -> Dim:
 
 def hist_link(h: Dim, cfg: Path) -> tuple:
     """(link inside a profile's config dir, its target by way of `current`)."""
-    return cfg / h.subdir, store(h) / "current" / h.subdir
+    return cfg / h.subdir, sel_link(h) / h.subdir
 
 
 def wire_history(d: Dim, cfg: Path) -> None:
@@ -163,7 +173,7 @@ def wire_history(d: Dim, cfg: Path) -> None:
     them until they are migrated deliberately.
     """
     h = hist_of(d)
-    if not (store(h) / "current").is_symlink():
+    if not sel_link(h).is_symlink():
         return
     link, tgt = hist_link(h, cfg)
     if link.is_symlink() or not link.exists():
@@ -171,8 +181,8 @@ def wire_history(d: Dim, cfg: Path) -> None:
 
 
 def require_link(d: Dim) -> Path:
-    """link_path(), refusing to proceed when it is unset or nonsensical."""
-    link = link_path(d)
+    """outer_link(), refusing to proceed when it is unset or nonsensical."""
+    link = outer_link(d)
     if link is None:
         die(f"{d.env} is not set.\n"
             f"  {d.tool} keeps state outside its config dir unless it is set, so\n"
@@ -208,7 +218,10 @@ def relink(link: Path, target: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
     tmp = link.with_name(f".{link.name}.{PROG}.{os.getpid()}")
     tmp.unlink(missing_ok=True)
-    os.symlink(target, tmp)
+    # Relative, so the whole profile root can be moved without rewriting the
+    # links inside it. `current -> work` beats naming an absolute path to a
+    # sibling directory.
+    os.symlink(os.path.relpath(target, link.parent), tmp)
     try:
         os.replace(tmp, link)
     except OSError:
@@ -234,7 +247,7 @@ def cmd_status() -> int:
     print(disp(profiles_root()))
     for t in PROFILES:
         print()
-        link, active = link_path(t), current(t)
+        link, active = outer_link(t), current(t)
 
         if link is None:
             print(f"{t.key:{W}} {t.env} is not set")
@@ -247,12 +260,21 @@ def cmd_status() -> int:
             print(f"{PAD}run:  {PROG} "
                   f"{'migrate ' + t.key + ' <name>' if link.exists() else 'init'}")
             guided = True
+        elif link_target(link) != outer_target(t):
+            # Points at some other tree, or at a profile directly rather than
+            # through `current` - most likely a root that has been moved.
+            print(f"{t.key:{W}} {disp(link)} -> {disp(link_target(link))}   [STALE]")
+            print(f"{PAD}run:  {PROG} reinit")
+            guided = True
+        elif active is None:
+            print(f"{t.key:{W}} {disp(link)}, no profile selected")
+            print(f"{PAD}run:  {PROG} " + ("init" if entries(t) else f"new {t.key} <name>"))
+            guided = True
         else:
-            tgt = Path(os.readlink(link))
-            # Outside the profile root there is no name to show, so show the path.
-            print(f"{t.key:{W}} {disp(link)} -> {active or disp(tgt)}"
-                  f"{'' if tgt.is_dir() else '   [BROKEN: profile missing]'}")
-            if not tgt.is_dir():
+            broken = not config_dir(t, active).is_dir()
+            print(f"{t.key:{W}} {disp(link)} -> {active}"
+                  f"{'   [BROKEN: profile missing]' if broken else ''}")
+            if broken:
                 print(f"{PAD}run:  {PROG} reinit")
                 guided = True
 
@@ -268,19 +290,19 @@ def cmd_status() -> int:
 
 
 def _show_history(h: Dim, profile: str | None) -> None:
-    link, active = link_path(h), current(h)
+    link, active = sel_link(h), current(h)
     if not link.is_symlink():
         print(f"{h.key:{W}} not enabled - {h.subdir}/ lives inside each profile")
         print(f"{PAD}share it:  {PROG} migrate {h.key} <name>")
         return
-    tgt = Path(os.readlink(link))
-    print(f"{h.key:{W}} {active or disp(tgt)}"
-          f"{'' if tgt.is_dir() else '   [BROKEN: set missing]'}")
+    broken = active is None or not config_dir(h, active).is_dir()
+    print(f"{h.key:{W}} {active or disp(link_target(link))}"
+          f"{'   [BROKEN: set missing]' if broken else ''}")
     _rows(h, active)
     # A profile predating the history store keeps its own transcripts and is
     # silently not following `current`; say so rather than implying it is.
     if profile:
-        lk, _ = hist_link(h, target(DIMS[h.tool], profile))
+        lk, _ = hist_link(h, config_dir(DIMS[h.tool], profile))
         if lk.exists() and not lk.is_symlink():
             print(f"{PAD}note: profile {profile!r} holds its own {h.subdir}/ "
                   f"and is not using this")
@@ -310,7 +332,7 @@ def _note_orphan(t: Dim) -> None:
 
 
 def has_entry(d: Dim, name: str) -> bool:
-    return (store(d) / valid(name) / marker(d)).is_dir()
+    return config_dir(d, name).is_dir()
 
 
 def _init_target(d: Dim) -> str | None:
@@ -321,59 +343,72 @@ def _init_target(d: Dim) -> str | None:
     return names[0] if len(names) == 1 else None
 
 
+def ensure_outer(t: Dim) -> Path:
+    """Point $CLAUDE_CONFIG_DIR / $CODEX_HOME at `current`, idempotently.
+
+    The outer link names `current`, never a profile, so it is written once and
+    survives every later switch and rename.
+    """
+    link = require_link(t)
+    refuse_real_dir(t, link)
+    if not link.is_symlink() or link_target(link) != outer_target(t):
+        relink(link, outer_target(t))
+        print(f"{t.key}: {disp(link)} -> {disp(outer_target(t))}")
+    return link
+
+
 def cmd_init(force: bool) -> int:
-    """Create the config-dir symlinks. `reinit` (force) also repoints existing ones."""
+    """Create the symlinks. `reinit` (force) also repoints ones already present."""
     rc = 0
     for t in PROFILES:
-        link = require_link(t)
+        link = outer_link(t)
+        if link is None:
+            print(f"{PROG}: {t.env} is not set - export it first", file=sys.stderr)
+            rc = 1
+            continue
         if not link.is_symlink() and link.exists():
             print(f"{PROG}: {t.key}: {disp(link)} is a real directory, not a symlink\n"
                   f"  move it into a profile first:\n"
                   f"    {PROG} migrate {t.key} <name>", file=sys.stderr)
             rc = 1
             continue
-        if link.is_symlink() and not force:
-            tgt = Path(os.readlink(link))
-            if current(t) is None:
-                print(f"{PROG}: {t.key}: {disp(link)} points outside the profile root\n"
-                      f"  -> {disp(tgt)}\n"
-                      f"  run '{PROG} reinit' to repoint it", file=sys.stderr)
+
+        name = current(t)
+        if name is None or force or not has_entry(t, name):
+            name = _init_target(t)
+            if name is None:
+                print(f"{PROG}: {t.key}: several profiles and no 'default' - pick one:\n"
+                      f"    {PROG} switch {t.key} <name>", file=sys.stderr)
                 rc = 1
                 continue
-            if tgt.is_dir():
-                print(f"{t.key}: already linked -> {disp(tgt)}")
-                wire_history(t, tgt)
-                continue
-        name = _init_target(t)
-        if name is None:
-            print(f"{PROG}: {t.key}: several profiles and no 'default' - pick one:\n"
-                  f"    {PROG} switch {t.key} <name>", file=sys.stderr)
-            rc = 1
-            continue
-        tgt = config_dir(t, name)
-        tgt.mkdir(parents=True, exist_ok=True)
-        relink(link, tgt)
-        wire_history(t, tgt)
-        print(f"{t.key}: {disp(link)} -> {disp(tgt)}")
+            config_dir(t, name).mkdir(parents=True, exist_ok=True)
+            relink(sel_link(t), entry(t, name))
+            print(f"{t.key}: current -> {name}")
+        ensure_outer(t)
+        wire_history(t, config_dir(t, name))
     return rc
 
 
 def cmd_switch(d: Dim, name: str) -> int:
-    link = require_link(d)
-    if not has_entry(d, name):
-        die(f"no {d.key} {name!r} at {disp(store(d) / name)}\n"
-            f"  create it:  {PROG} new {d.key} {name}")
     if not d.history:
-        refuse_real_dir(d, link)
-    prev, tgt = current(d), target(d, name)
-    relink(link, tgt)
+        require_link(d)      # fail before moving `current`, not after
+    if not has_entry(d, name):
+        die(f"no {d.key} {name!r} at {disp(entry(d, name))}\n"
+            f"  create it:  {PROG} new {d.key} {name}")
+    prev = current(d)
+    # Only `current` moves. The outer link names `current`, so it stays valid
+    # and switching never touches anything outside the profile root.
+    relink(sel_link(d), entry(d, name))
     print(f"{d.key}: {prev or '(none)'} -> {name}")
-    print(f"  {disp(link)} -> {disp(tgt)}")
+    print(f"  {disp(sel_link(d))} -> {name}")
+    if not d.history:
+        ensure_outer(d)
+        wire_history(d, config_dir(d, name))
     return 0
 
 
 def cmd_rename(d: Dim, name: str, new: str) -> int:
-    old_dir, new_dir = store(d) / valid(name), store(d) / valid(new)
+    old_dir, new_dir = entry(d, name), entry(d, new)
     if name == new:
         die(f"{name!r} is already the name")
     if not has_entry(d, name):
@@ -387,25 +422,23 @@ def cmd_rename(d: Dim, name: str, new: str) -> int:
     print(f"  from  {disp(old_dir)}")
     print(f"    to  {disp(new_dir)}")
     if was_active:
-        # The selecting symlink still names the old directory, so it dangles
-        # until this repoint. Profiles linking a history set go by way of
-        # `current` rather than the name, so they need no adjustment.
-        link = require_link(d)
-        relink(link, target(d, new))
-        print(f"  link  {disp(link)} -> {disp(target(d, new))}")
+        # `current` still names the old directory. Nothing else does - the outer
+        # link and every profile's history link go by way of `current`.
+        relink(sel_link(d), new_dir)
+        print(f"  link  {disp(sel_link(d))} -> {new}")
     return 0
 
 
 def cmd_new(d: Dim, name: str) -> int:
-    base = store(d) / valid(name)
+    base = entry(d, name)
     if base.exists():
         die(f"{d.key} {name!r} already exists at {disp(base)}")
     (base / marker(d)).mkdir(parents=True)
     print(f"created {d.key} {name!r}")
     print(f"  {disp(base / marker(d))}")
     if not d.history:
-        wire_history(d, target(d, name))
-        lk, ht = hist_link(hist_of(d), target(d, name))
+        wire_history(d, config_dir(d, name))
+        lk, ht = hist_link(hist_of(d), config_dir(d, name))
         if lk.is_symlink():
             print(f"  {disp(lk)} -> {disp(ht)}")
     return 0
@@ -419,7 +452,7 @@ def _migrate_profile(t: Dim, name: str) -> int:
     link = require_link(t)
     dest = config_dir(t, name)
     if link.is_symlink():
-        die(f"{disp(link)} is already a symlink -> {disp(Path(os.readlink(link)))}\n"
+        die(f"{disp(link)} is already a symlink -> {disp(link_target(link))}\n"
             f"  nothing to migrate")
     if not link.exists():
         die(f"{disp(link)} does not exist - nothing to migrate\n"
@@ -434,8 +467,9 @@ def _migrate_profile(t: Dim, name: str) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     _move_dir(t, name, link, dest)
     _migrate_claude_json(t, dest)
-    relink(link, dest)
-    print(f"  link  {disp(link)} -> {disp(dest)}")
+    relink(sel_link(t), entry(t, name))
+    print(f"  link  {disp(sel_link(t))} -> {name}")
+    ensure_outer(t)
     wire_history(t, dest)
     print(f"done.  undo with:  rm {disp(link)} && mv {disp(dest)} {disp(link)}")
     return 0
@@ -470,8 +504,8 @@ def _migrate_history(h: Dim, name: str) -> int:
     if active is None:
         die(f"no active {h.tool} profile to take {h.subdir}/ from\n"
             f"  run this first:  {PROG} migrate {h.tool} <name>")
-    src = target(t, active) / h.subdir
-    base = store(h) / valid(name)
+    src = config_dir(t, active) / h.subdir
+    base = entry(h, name)
     if base.exists():
         die(f"{h.key} {name!r} already exists at {disp(base)}")
     if src.is_symlink():
@@ -489,12 +523,12 @@ def _migrate_history(h: Dim, name: str) -> int:
         (base / h.subdir).mkdir()
         print("  (nothing there yet - created empty)")
 
-    relink(store(h) / "current", base)
-    print(f"  link  {disp(store(h) / 'current')} -> {disp(base)}")
+    relink(sel_link(h), base)
+    print(f"  link  {disp(sel_link(h))} -> {name}")
 
     kept = []
     for p in entries(t):
-        cfg = target(t, p)
+        cfg = config_dir(t, p)
         lk, tgt = hist_link(h, cfg)
         if lk.is_symlink() or not lk.exists():
             relink(lk, tgt)

@@ -119,17 +119,36 @@ no `clone`.
 ## Layout
 
 ```
-~/.config/cc-profile/                     override with CC_PROFILE_DIR
-├── claude/<name>/config/                 <- $CLAUDE_CONFIG_DIR points here
-│                    └── projects ────────┐  (when history is enabled)
-├── codex/<name>/config/                  │  <- $CODEX_HOME points here
-└── claude-history/                       │
-    ├── current -> main  <────────────────┘  switch repoints this one link
-    └── main/projects/                       the real transcripts
+~/.config/cc-profile/                override with CC_PROFILE_DIR
+├── claude/
+│   ├── current -> work              <- `ccp switch claude` repoints this
+│   ├── work/config/
+│   │        └── projects -> ../../../claude-history/current/projects
+│   └── personal/config/
+├── codex/
+│   ├── current -> default
+│   └── default/config/
+└── claude-history/
+    ├── current -> main              <- `ccp switch claude-history` repoints this
+    └── main/projects/                  the real transcripts
+
+~/.claude -> .config/cc-profile/claude/current/config     written once by init
+~/.codex  -> .config/cc-profile/codex/current/config
 ```
 
 Each store is named for the key you type, so `ccp switch claude-history main` acts on
 `~/.config/cc-profile/claude-history/main`.
+
+**Every link is relative**, and the outer two name `current` rather than any profile.
+So switching or renaming touches one link inside the tree and nothing in `$HOME`, and
+the whole root can be moved — everything inside keeps resolving, and a single
+`ccp reinit` repoints the two outer links:
+
+```console
+$ mv ~/.config/cc-profile ~/profiles
+$ CC_PROFILE_DIR=~/profiles ccp reinit
+claude: ~/.claude -> ~/profiles/claude/current/config
+```
 
 No index, lockfile or state file. The active profile is `readlink()` on the config path
 and the profile list is `listdir()`, so nothing can fall out of sync — and you can move,

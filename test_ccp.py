@@ -74,9 +74,19 @@ def test_name_validation_rejects_traversal():
 
 
 def test_requires_claude_config_dir():
+    """Claude is reported and skipped; codex still makes progress."""
+    with sandbox(claude_env=False) as d, quiet() as out:
+        assert cp.main(["init"]) == 1
+        assert "CLAUDE_CONFIG_DIR" in out.getvalue()
+        assert not (d / "prof" / "claude").exists(), "must not set claude up"
+        assert (d / ".codex").is_symlink(), "the other tool still proceeds"
+
+
+def test_switch_requires_the_env_var_before_touching_anything():
     with sandbox(claude_env=False) as d, quiet():
-        assert exits(cp.main, ["init"])
-        assert not (d / "prof").exists(), "must not create anything"
+        (d / "prof" / "claude" / "work" / "config").mkdir(parents=True)
+        assert exits(cp.main, ["switch", "claude", "work"])
+        assert not (d / "prof" / "claude" / "current").exists(), "must not move first"
 
 
 def test_rejects_env_var_pointing_inside_profile_root():
@@ -92,11 +102,25 @@ def test_relink_replaces_existing_symlink_without_debris():
         a, b, link = d / "a", d / "b", d / "link"
         a.mkdir(); b.mkdir()
         cp.relink(link, a)
-        assert os.readlink(link) == str(a)
+        assert cp.link_target(link) == a
         cp.relink(link, b)
-        assert os.readlink(link) == str(b)
+        assert cp.link_target(link) == b
         assert link.is_symlink() and link.is_dir()
         assert not list(d.glob(".*ccp*")), "temp link left behind"
+        assert not os.readlink(link).startswith("/"), "links must be relative"
+
+
+def test_links_are_relative_so_the_root_can_be_moved():
+    with sandbox() as d, quiet():
+        _with_history(d)
+        cp.main(["new", "claude", "other"])
+        moved = d / "relocated"
+        (d / "prof").rename(moved)
+        # Everything inside the tree still resolves; only the outer link,
+        # which necessarily names an absolute location, needs repointing.
+        assert (moved / "claude" / "current").resolve().name == "work"
+        chat = moved / "claude" / "work" / "config" / "projects" / "-repo" / "a.jsonl"
+        assert chat.resolve().read_text() == "chat"
 
 
 def test_links_into_a_config_dir_whose_parent_is_missing():
