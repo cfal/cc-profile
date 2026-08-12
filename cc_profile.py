@@ -2,12 +2,16 @@
 """cc-profile (ccp) - switch Claude Code and Codex config-dir profiles."""
 from __future__ import annotations
 
+import base64
 import errno
 import json
 import os
 import re
 import shutil
 import sys
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -628,6 +632,150 @@ def cmd_run(t: Dim, name: str, args: list[str]) -> int:
         die(f"{t.exe!r} not found on PATH")
 
 
+USAGE_TIMEOUT = 20
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+
+
+def _read_json(p: Path):
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _get(url: str, headers: dict) -> tuple:
+    """(status, body). status None means the request never completed."""
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=USAGE_TIMEOUT) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception as e:                       # transport, DNS, timeout
+        return None, str(e)
+
+
+def _left(seconds: float) -> str:
+    if seconds <= 0:
+        return "now"
+    value, unit = ((seconds / 86400, "d") if seconds >= 86400
+                   else (seconds / 3600, "h"))
+    return f"{value:.1f}".rstrip("0").rstrip(".") + unit
+
+
+def _jwt_exp(token: str):
+    """`exp` from a JWT payload. Read locally so a dead token is never sent."""
+    try:
+        part = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["exp"]
+    except Exception:
+        return None
+
+
+def _window(label: str, w, reset_key: str = "resets_at"):
+    if not isinstance(w, dict) or w.get("utilization") is None:
+        return None
+    out = f"{label} {w['utilization']:.0f}%"
+    raw = w.get(reset_key)
+    if isinstance(raw, str):
+        try:
+            from datetime import datetime, timezone
+            left = datetime.fromisoformat(raw) - datetime.now(timezone.utc)
+            out += f" (resets in {_left(left.total_seconds())})"
+        except ValueError:
+            pass
+    return out
+
+
+def _http_note(status, body) -> str:
+    if status == 401:
+        return "unauthorized - log in again"
+    if status == 429:
+        return "rate limited by the provider, try again shortly"
+    if status is None:
+        return f"unreachable: {body}"
+    return f"HTTP {status}"
+
+
+def _claude_usage(cfg: Path) -> str:
+    oauth = (_read_json(cfg / ".credentials.json") or {}).get("claudeAiOauth") or {}
+    token = oauth.get("accessToken")
+    if not token:
+        return "not logged in"
+    exp = oauth.get("expiresAt")
+    if isinstance(exp, (int, float)) and exp / 1000 <= time.time():
+        return "token expired - use this profile once to refresh it"
+    status, body = _get(CLAUDE_USAGE_URL, {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        # Undocumented endpoint: Claude Code's own beta header and agent string.
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": "claude-code/2.1.227",
+    })
+    if status != 200:
+        return _http_note(status, body)
+    parts = [p for p in (_window("5h", body.get("five_hour")),
+                         _window("7d", body.get("seven_day")),
+                         _window("7d-opus", body.get("seven_day_opus"))) if p]
+    return "   ".join(parts) or "no limits reported"
+
+
+def _codex_usage(cfg: Path) -> str:
+    tokens = (_read_json(cfg / "auth.json") or {}).get("tokens") or {}
+    token = tokens.get("access_token")
+    if not token:
+        return "not logged in"
+    exp = _jwt_exp(token)
+    if exp and exp <= time.time():
+        return "token expired - use this profile once to refresh it"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
+               "User-Agent": f"{PROG}"}
+    if tokens.get("account_id"):
+        headers["ChatGPT-Account-Id"] = tokens["account_id"]
+    status, body = _get(CODEX_USAGE_URL, headers)
+    if status != 200:
+        return _http_note(status, body)
+    rl = body.get("rate_limit") or {}
+    parts = []
+    for label, key in (("primary", "primary_window"), ("secondary", "secondary_window")):
+        w = rl.get(key)
+        if isinstance(w, dict) and w.get("used_percent") is not None:
+            span = _left(w.get("limit_window_seconds") or 0)
+            left = w.get("reset_after_seconds")
+            parts.append(f"{span} {w['used_percent']:.0f}%" +
+                         (f" (resets in {_left(left)})" if left else ""))
+    for extra in body.get("additional_rate_limits") or []:
+        w = (extra.get("rate_limit") or {}).get("primary_window") or {}
+        if w.get("used_percent"):
+            parts.append(f"{extra.get('limit_name', '?')} {w['used_percent']:.0f}%")
+    if body.get("plan_type"):
+        parts.append(f"({body['plan_type']})")
+    return "   ".join(parts) or "no limits reported"
+
+
+def cmd_usage(only: str = "") -> int:
+    """Per-profile quota, read straight from each profile's stored credentials.
+
+    Never refreshes: a rotated refresh token would be written back into a
+    profile another process may be using, and Anthropic's rotate-on-refresh
+    would invalidate the copy that process holds. Reading is enough while a
+    token is live - Codex tokens last about a week, Claude's about six hours.
+    """
+    fetch = {"claude": _claude_usage, "codex": _codex_usage}
+    for t in PROFILES:
+        if only and t.key != only:
+            continue
+        active, names = current(t), entries(t)
+        print(f"{t.key}")
+        if not names:
+            print(f"{PAD}no profiles")
+            continue
+        for n in names:
+            print(f"   {'*' if n == active else ' '} {n:12} {fetch[t.tool](config_dir(t, n))}")
+    return 0
+
+
 HELP = f"""\
 {PROG} - switch Claude Code and Codex config dirs and chat history
 
@@ -640,6 +788,8 @@ usage:
   {PROG} migrate <what> <name>        move existing real dirs into one
   {PROG} switch  <what> <name>        point the symlink at <name>
   {PROG} rename  <what> <name> <new>  rename one, following it if it is active
+  {PROG} usage   [<tool>]             quota for every profile (read-only; never
+                                      refreshes a token)
   {PROG} run     <tool> <name> [--] [args...]
                                       run <tool> under <name> for one
                                       invocation, leaving the active profile
@@ -685,6 +835,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status()
     if cmd in ("init", "reinit") and not rest:
         return cmd_init()
+    if cmd == "usage":
+        if len(rest) > 1 or (rest and rest[0] not in ("claude", "codex")):
+            die(f"usage: {PROG} usage [claude|codex]")
+        return cmd_usage(rest[0] if rest else "")
     if cmd == "rename":
         if len(rest) != 3:
             die(f"usage: {PROG} rename <{'|'.join(DIMS)}> <name> <newname>")

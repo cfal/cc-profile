@@ -58,6 +58,7 @@ ccp migrate <what> <name>      move existing real dirs into one
 ccp switch  <what> <name>      point the symlink at <name>
 ccp rename  <what> <name> <new>  rename one, following it if active
 ccp run     <tool> <name> [--] [args...]
+ccp usage   [<tool>]           quota for every profile
 ```
 
 `<what>` is `claude`, `codex`, `claude-history` or `codex-history`.
@@ -115,6 +116,32 @@ are safe. Everything after `<name>` goes to the child untouched — `ccp run cla
 
 A new profile is empty, so the tool onboards from scratch and you log in again. There is
 no `clone`.
+
+## Usage
+
+```console
+$ ccp usage
+claude
+     personal     token expired - use this profile once to refresh it
+   * work         5h 38% (resets in 1.9h)   7d 57% (resets in 3.4d)
+codex
+   * work         7d 15% (resets in 5.2d)   (pro)
+```
+
+Reads each profile's own stored credentials and asks the provider — so you can compare
+accounts without switching. This is the only command that touches the network or reads
+credential *contents*; bare `ccp` stays offline.
+
+**It never refreshes a token.** Anthropic rotates the refresh token on every use, so
+refreshing would invalidate the copy a running session holds and write new tokens into a
+profile another process may be using. A profile whose token has lapsed is reported as
+such — use it once and it refreshes itself. Codex tokens last about a week, Claude's
+about six hours, so an idle Claude profile often needs that nudge.
+
+Endpoints are Claude Code's and Codex's own (`api.anthropic.com/api/oauth/usage`,
+`chatgpt.com/backend-api/wham/usage`). They are undocumented and may change. On macOS
+Claude keeps credentials in the Keychain rather than in the profile, so this reports
+Codex only there.
 
 ## Layout
 

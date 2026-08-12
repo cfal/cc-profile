@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -497,6 +498,74 @@ def test_run_rejects_missing_profile_before_exec():
         with mock.patch.object(os, "execvp") as ex:
             assert exits(cp.main, ["run", "claude", "ghost"])
         assert not ex.called
+
+
+# --- usage -----------------------------------------------------------------
+
+CLAUDE_USAGE_BODY = {
+    "five_hour": {"utilization": 29.0, "resets_at": "2099-01-01T00:00:00+00:00"},
+    "seven_day": {"utilization": 55.0, "resets_at": "2099-01-08T00:00:00+00:00"},
+    "seven_day_opus": None,
+}
+CODEX_USAGE_BODY = {
+    "plan_type": "pro",
+    "rate_limit": {"primary_window": {"used_percent": 14,
+                                      "limit_window_seconds": 604800,
+                                      "reset_after_seconds": 452520},
+                   "secondary_window": None},
+    "additional_rate_limits": [],
+}
+
+
+def _creds(d: Path, name: str, expires_in_h: float = 6) -> None:
+    cfg = cfg_of(d, "claude", name)
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "tok", "expiresAt": int((time.time() + expires_in_h * 3600) * 1000)}}))
+
+
+def test_usage_reports_each_profiles_windows():
+    with sandbox() as d, quiet() as out:
+        _creds(d, "work")
+        cfg = cfg_of(d, "codex", "work"); cfg.mkdir(parents=True)
+        (cfg / "auth.json").write_text(json.dumps({"tokens": {"access_token": "a.b.c"}}))
+        with mock.patch.object(cp, "_get", lambda url, h: (
+                200, CLAUDE_USAGE_BODY if "anthropic" in url else CODEX_USAGE_BODY)):
+            assert cp.main(["usage"]) == 0
+        text = out.getvalue()
+        assert "5h 29%" in text and "7d 55%" in text, text
+        assert "7d 14%" in text and "(pro)" in text, text
+
+
+def test_usage_never_sends_an_expired_token():
+    """Expiry is read locally, so a dead token is never put on the wire."""
+    with sandbox() as d, quiet() as out:
+        _creds(d, "stale", expires_in_h=-1)
+        with mock.patch.object(cp, "_get") as g:
+            cp.main(["usage", "claude"])
+        assert not g.called, "must not call out with an expired token"
+        assert "expired" in out.getvalue()
+
+
+def test_usage_reports_missing_credentials_and_http_errors():
+    with sandbox() as d, quiet() as out:
+        cfg_of(d, "claude", "empty").mkdir(parents=True)
+        _creds(d, "denied")
+        with mock.patch.object(cp, "_get", lambda url, h: (401, None)):
+            cp.main(["usage", "claude"])
+        text = out.getvalue()
+        assert "not logged in" in text and "unauthorized" in text, text
+
+
+def test_usage_writes_nothing():
+    with sandbox() as d, quiet():
+        _creds(d, "work")
+        before = sorted(p.relative_to(d) for p in d.rglob("*"))
+        stamps = {p: p.stat().st_mtime for p in d.rglob("*") if p.is_file()}
+        with mock.patch.object(cp, "_get", lambda url, h: (200, CLAUDE_USAGE_BODY)):
+            cp.main(["usage"])
+        assert sorted(p.relative_to(d) for p in d.rglob("*")) == before
+        assert {p: p.stat().st_mtime for p in d.rglob("*") if p.is_file()} == stamps
 
 
 # --- invariants ------------------------------------------------------------
