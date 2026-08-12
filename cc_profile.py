@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -698,13 +699,51 @@ def _http_note(status, body) -> str:
     return f"HTTP {status}"
 
 
-def _claude_usage(cfg: Path) -> str:
+# Commands that make the CLI renew its own credentials. Delegating means we
+# never parse or write the credential files ourselves, and only one party ever
+# holds the refresh token - which matters because both providers rotate it.
+#
+# claude doctor: verified to attempt a refresh and to be the quickest that does
+#   (`mcp list` also works but takes ~18s). `auth status` reads local state only
+#   and never refreshes.
+# codex: nothing equivalent found - login status, doctor, mcp list and plugin
+#   list all leave auth.json untouched on an expired token. Codex appears to
+#   renew only when it actually calls the API, which would cost quota, so an
+#   expired Codex profile is reported instead. Its tokens last about a week.
+REFRESH_CMD = {"claude": ["doctor"]}
+REFRESH_TIMEOUT = 60
+
+
+def _refresh(d: Dim, cfg: Path) -> bool:
+    """Ask the CLI to renew its own token. True if the command ran at all.
+
+    A dead refresh token makes Claude clear the credentials, which reads as a
+    logout - but they were already unusable at that point, so nothing recoverable
+    is lost. A network failure leaves them untouched.
+    """
+    args = REFRESH_CMD.get(d.tool)
+    if not args:
+        return False
+    print(f"{PROG}: refreshing {d.key}/{cfg.parent.name} ({d.exe} {' '.join(args)})",
+          file=sys.stderr)
+    try:
+        subprocess.run([d.exe, *args], env={**os.environ, d.env: str(cfg)},
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=REFRESH_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def _claude_usage(cfg: Path, retry: bool = True) -> str:
     oauth = (_read_json(cfg / ".credentials.json") or {}).get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
     if not token:
         return "not logged in"
     exp = oauth.get("expiresAt")
     if isinstance(exp, (int, float)) and exp / 1000 <= time.time():
+        if retry and _refresh(DIMS["claude"], cfg):
+            return _claude_usage(cfg, retry=False)      # bounded: one attempt
         return "token expired - use this profile once to refresh it"
     status, body = _get(CLAUDE_USAGE_URL, {
         "Authorization": f"Bearer {token}",
@@ -721,13 +760,15 @@ def _claude_usage(cfg: Path) -> str:
     return "   ".join(parts) or "no limits reported"
 
 
-def _codex_usage(cfg: Path) -> str:
+def _codex_usage(cfg: Path, retry: bool = True) -> str:
     tokens = (_read_json(cfg / "auth.json") or {}).get("tokens") or {}
     token = tokens.get("access_token")
     if not token:
         return "not logged in"
     exp = _jwt_exp(token)
     if exp and exp <= time.time():
+        if retry and _refresh(DIMS["codex"], cfg):
+            return _codex_usage(cfg, retry=False)
         return "token expired - use this profile once to refresh it"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
                "User-Agent": f"{PROG}"}

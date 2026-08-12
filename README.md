@@ -132,11 +132,23 @@ Reads each profile's own stored credentials and asks the provider — so you can
 accounts without switching. This is the only command that touches the network or reads
 credential *contents*; bare `ccp` stays offline.
 
-**It never refreshes a token.** Anthropic rotates the refresh token on every use, so
-refreshing would invalidate the copy a running session holds and write new tokens into a
-profile another process may be using. A profile whose token has lapsed is reported as
-such — use it once and it refreshes itself. Codex tokens last about a week, Claude's
-about six hours, so an idle Claude profile often needs that nudge.
+**Refreshing is delegated to the CLI, never done here.** When a Claude token has
+lapsed, `ccp` runs `claude doctor` scoped to that profile and re-reads the result — so
+the credential file is only ever written by Claude itself. That matters because both
+providers rotate the refresh token: whoever renews it must own it, or the copy another
+process holds silently stops working.
+
+`claude doctor` is the cheapest command verified to renew (~2.4s). `claude auth status`
+reads local state and never refreshes; `claude mcp list` works but takes ~18s.
+
+**Codex is reported, not refreshed.** No Codex command renews without calling the API —
+`login status`, `doctor`, `mcp list` and `plugin list` all leave `auth.json` untouched on
+an expired token — and anything that would renew it costs quota. Its tokens last about a
+week, so this rarely comes up.
+
+If the refresh token is genuinely dead, Claude clears the credentials and the profile
+shows `not logged in`. Nothing recoverable is lost: they were already unusable. A network
+failure leaves them untouched.
 
 Endpoints are Claude Code's and Codex's own (`api.anthropic.com/api/oauth/usage`,
 `chatgpt.com/backend-api/wham/usage`). They are undocumented and may change. On macOS

@@ -547,6 +547,49 @@ def test_usage_never_sends_an_expired_token():
         assert "expired" in out.getvalue()
 
 
+def test_usage_delegates_refresh_to_the_cli_then_retries():
+    """We never write credentials; the CLI renews its own and we re-read."""
+    with sandbox() as d, quiet() as out:
+        _creds(d, "stale", expires_in_h=-1)
+        cfg = cfg_of(d, "claude", "stale")
+
+        def fake_cli(argv, **kw):
+            assert argv == ["claude", "doctor"], argv
+            assert kw["env"]["CLAUDE_CONFIG_DIR"] == str(cfg), "must scope to the profile"
+            _creds(d, "stale", expires_in_h=6)          # the CLI renews it
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(cp.subprocess, "run", fake_cli), \
+             mock.patch.object(cp, "_get", lambda url, h: (200, CLAUDE_USAGE_BODY)):
+            assert cp.main(["usage", "claude"]) == 0
+        assert "5h 29%" in out.getvalue(), out.getvalue()
+
+
+def test_usage_refreshes_at_most_once():
+    with sandbox() as d, quiet() as out:
+        _creds(d, "dead", expires_in_h=-1)
+        calls = []
+        with mock.patch.object(cp.subprocess, "run",
+                               lambda a, **k: calls.append(a) or mock.Mock(returncode=0)), \
+             mock.patch.object(cp, "_get") as g:
+            cp.main(["usage", "claude"])
+        assert len(calls) == 1, f"one attempt only, got {len(calls)}"
+        assert not g.called, "still expired, so nothing goes on the wire"
+        assert "expired" in out.getvalue()
+
+
+def test_usage_does_not_shell_out_for_codex():
+    """No codex command renews without calling the API, so none is run."""
+    with sandbox() as d, quiet() as out:
+        cfg = cfg_of(d, "codex", "stale"); cfg.mkdir(parents=True)
+        dead = f"{'x' * 4}.{cp.base64.urlsafe_b64encode(b'{\"exp\":1}').decode().rstrip('=')}.s"
+        (cfg / "auth.json").write_text(json.dumps({"tokens": {"access_token": dead}}))
+        with mock.patch.object(cp.subprocess, "run") as run:
+            cp.main(["usage", "codex"])
+        assert not run.called
+        assert "expired" in out.getvalue()
+
+
 def test_usage_reports_missing_credentials_and_http_errors():
     with sandbox() as d, quiet() as out:
         cfg_of(d, "claude", "empty").mkdir(parents=True)
