@@ -703,14 +703,20 @@ def _http_note(status, body) -> str:
 # never parse or write the credential files ourselves, and only one party ever
 # holds the refresh token - which matters because both providers rotate it.
 #
-# claude doctor: verified to attempt a refresh and to be the quickest that does
-#   (`mcp list` also works but takes ~18s). `auth status` reads local state only
-#   and never refreshes.
-# codex: nothing equivalent found - login status, doctor, mcp list and plugin
-#   list all leave auth.json untouched on an expired token. Codex appears to
-#   renew only when it actually calls the API, which would cost quota, so an
-#   expired Codex profile is reported instead. Its tokens last about a week.
-REFRESH_CMD = {"claude": ["doctor"]}
+# Nothing qualifies yet. Ruled out against genuinely expired profiles:
+#   claude auth status  - reads local state, no network
+#   claude doctor       - clears credentials it considers malformed, but does
+#                         not renew a live one; looked like a refresh in a
+#                         synthetic test only because the wipe was mistaken for
+#                         a server rejection
+#   claude mcp list     - same, and ~18s
+#   codex login status / doctor / mcp list / plugin list
+#                       - all leave auth.json untouched when expired
+# Both CLIs appear to renew only when they are about to call the API, which
+# costs quota. Until a command is confirmed to renew without one, expired
+# profiles are reported rather than poked: a useless subprocess still costs
+# seconds and can clear credentials.
+REFRESH_CMD: dict = {}
 REFRESH_TIMEOUT = 60
 
 
@@ -742,9 +748,14 @@ def _claude_usage(cfg: Path, retry: bool = True) -> str:
         return "not logged in"
     exp = oauth.get("expiresAt")
     if isinstance(exp, (int, float)) and exp / 1000 <= time.time():
+        # A lapsed refresh token cannot be renewed by anything, so say so rather
+        # than suggesting a nudge that cannot work.
+        ref = oauth.get("refreshTokenExpiresAt")
+        if isinstance(ref, (int, float)) and ref / 1000 <= time.time():
+            return f"login expired - re-run:  {PROG} run claude {cfg.parent.name}"
         if retry and _refresh(DIMS["claude"], cfg):
             return _claude_usage(cfg, retry=False)      # bounded: one attempt
-        return "token expired - use this profile once to refresh it"
+        return f"token expired - use it once:  {PROG} run claude {cfg.parent.name}"
     status, body = _get(CLAUDE_USAGE_URL, {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",

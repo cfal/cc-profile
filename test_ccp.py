@@ -548,28 +548,47 @@ def test_usage_never_sends_an_expired_token():
 
 
 def test_usage_delegates_refresh_to_the_cli_then_retries():
-    """We never write credentials; the CLI renews its own and we re-read."""
+    """When a renewing command is known, the CLI runs it and we re-read.
+
+    Exercised with a stand-in because no real command qualifies yet; this keeps
+    the delegation wired and scoped so adding one is a single-line change.
+    """
     with sandbox() as d, quiet() as out:
         _creds(d, "stale", expires_in_h=-1)
         cfg = cfg_of(d, "claude", "stale")
 
         def fake_cli(argv, **kw):
-            assert argv == ["claude", "doctor"], argv
+            assert argv == ["claude", "renew"], argv
             assert kw["env"]["CLAUDE_CONFIG_DIR"] == str(cfg), "must scope to the profile"
             _creds(d, "stale", expires_in_h=6)          # the CLI renews it
             return mock.Mock(returncode=0)
 
-        with mock.patch.object(cp.subprocess, "run", fake_cli), \
+        with mock.patch.dict(cp.REFRESH_CMD, {"claude": ["renew"]}), \
+             mock.patch.object(cp.subprocess, "run", fake_cli), \
              mock.patch.object(cp, "_get", lambda url, h: (200, CLAUDE_USAGE_BODY)):
             assert cp.main(["usage", "claude"]) == 0
         assert "5h 29%" in out.getvalue(), out.getvalue()
+
+
+def test_usage_reports_a_lapsed_refresh_token_as_needing_login():
+    """Nothing can renew it, so do not suggest a nudge that cannot work."""
+    with sandbox() as d, quiet() as out:
+        cfg = cfg_of(d, "claude", "old"); cfg.mkdir(parents=True)
+        past = int((time.time() - 86400) * 1000)
+        (cfg / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "t", "expiresAt": past, "refreshTokenExpiresAt": past}}))
+        with mock.patch.object(cp.subprocess, "run") as run:
+            cp.main(["usage", "claude"])
+        assert not run.called, "must not shell out for a dead login"
+        assert "login expired" in out.getvalue(), out.getvalue()
 
 
 def test_usage_refreshes_at_most_once():
     with sandbox() as d, quiet() as out:
         _creds(d, "dead", expires_in_h=-1)
         calls = []
-        with mock.patch.object(cp.subprocess, "run",
+        with mock.patch.dict(cp.REFRESH_CMD, {"claude": ["renew"]}), \
+             mock.patch.object(cp.subprocess, "run",
                                lambda a, **k: calls.append(a) or mock.Mock(returncode=0)), \
              mock.patch.object(cp, "_get") as g:
             cp.main(["usage", "claude"])
