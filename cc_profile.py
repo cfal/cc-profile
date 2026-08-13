@@ -10,12 +10,12 @@ import re
 import shutil
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
+
+import curl
 
 PROG = "ccp"
 NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -645,16 +645,29 @@ def _read_json(p: Path):
         return None
 
 
-def _get(url: str, headers: dict) -> tuple:
-    """(status, body). status None means the request never completed."""
-    req = urllib.request.Request(url, headers=headers)
+def _send(url: str, headers: dict, data: bytes = None) -> tuple:
+    """(status, parsed body). status None means the request never completed.
+
+    Goes through the curl binary rather than urllib: it is a TLS-impersonating
+    build here, and these endpoints sit behind bot filters that treat a
+    scripting-language fingerprint very differently from a browser's.
+    """
     try:
-        with urllib.request.urlopen(req, timeout=USAGE_TIMEOUT) as r:
-            return r.status, json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return e.code, None
-    except Exception as e:                       # transport, DNS, timeout
-        return None, str(e)
+        r = curl.request(url, "POST" if data is not None else "GET",
+                         headers=headers, data=data, timeout=USAGE_TIMEOUT)
+    except curl.CurlError as e:
+        return None, {"error": str(e)}
+    try:
+        return r.status, r.json()
+    except ValueError:
+        # Keep the text: an edge rejection is HTML, and losing it turns a
+        # diagnosable "Cloudflare denied the agent string" into a bare 403.
+        return r.status, {"error": " ".join(r.text.split())[:120]}
+
+
+def _get(url: str, headers: dict) -> tuple:
+    status, body = _send(url, headers)
+    return status, body if status == 200 else (body or {}).get("error", body)
 
 
 def _left(seconds: float) -> str:
@@ -727,20 +740,7 @@ def _post(url: str, data: dict, form: bool, agent: str = "") -> tuple:
     headers = {"Content-Type": ctype, "Accept": "application/json"}
     if agent:
         headers["User-Agent"] = agent
-    req = urllib.request.Request(url, data=body, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=USAGE_TIMEOUT) as r:
-            return r.status, json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        raw = e.read()[:200].decode("utf8", "replace")
-        try:
-            return e.code, json.loads(raw)
-        except ValueError:
-            # Keep the text: an edge rejection is HTML, and losing it turns a
-            # diagnosable "Cloudflare denied the agent string" into a bare 403.
-            return e.code, {"error": " ".join(raw.split())[:120]}
-    except Exception as e:
-        return None, {"error": str(e)}
+    return _send(url, headers, body)
 
 
 def _write_secret(path: Path, doc: dict) -> None:

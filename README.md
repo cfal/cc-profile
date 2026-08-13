@@ -146,6 +146,12 @@ and `mcp list` only clear credentials they judge malformed, and codex's `login s
 lazily when about to call the API, which costs quota. These are the same endpoints and
 client IDs CodexBar uses; they are undocumented and may change.
 
+All requests go through the `curl` binary (`curl.py`) rather than urllib, because the
+curl here is a TLS-impersonating build: these endpoints sit behind bot filters that treat
+a browser fingerprint and a scripting language's HTTP stack very differently. The wrapper
+also strips `http_proxy`/`CURL_*` from the child environment, so ambient settings cannot
+silently redirect a credential request.
+
 Both requests carry Claude Code's agent string. Anthropic sits behind Cloudflare, which
 rejects an unrecognised one with a 403 before the request reaches the API.
 
