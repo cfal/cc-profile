@@ -700,6 +700,102 @@ def test_usage_writes_nothing():
         assert {p: p.stat().st_mtime for p in d.rglob("*") if p.is_file()} == stamps
 
 
+# --- policy ----------------------------------------------------------------
+
+def _rooms(**by_name):
+    """Stub _headroom from a name -> room mapping; None means unusable."""
+    return lambda d, name: by_name.get(name)
+
+
+def test_policy_parses_tiers_and_groups():
+    with sandbox(), quiet():
+        assert cp._parse_policy("a") == [["a"]]
+        assert cp._parse_policy("a/b,c/d") == [["a"], ["b", "c"], ["d"]]
+        assert exits(cp._parse_policy, "a//b")        # empty tier
+        assert exits(cp._parse_policy, "a/b c")       # space is not a name char
+
+
+def test_headroom_is_the_fullest_window_not_the_average():
+    with sandbox() as d, quiet():
+        cfg_of(d, "claude", "p").mkdir(parents=True)
+        # 5h nearly full, 7d nearly empty: an average would call this healthy.
+        with mock.patch.dict(cp.USAGE, {"claude": lambda c, retry=True: (
+                [("5h", 95.0, None), ("7d", 10.0, None)], "", "")}):
+            assert cp._headroom(cp.DIMS["claude"], "p") == 5.0
+        with mock.patch.dict(cp.USAGE, {"claude": lambda c, retry=True: (
+                [("5h", 100.0, None), ("7d", 0.0, None)], "", "")}):
+            assert cp._headroom(cp.DIMS["claude"], "p") is None, "a full window disqualifies"
+        with mock.patch.dict(cp.USAGE, {"claude": lambda c, retry=True: (
+                [], "", "login expired")}):
+            assert cp._headroom(cp.DIMS["claude"], "p") is None
+
+
+def test_policy_prefers_earlier_tiers_and_stops_early():
+    with sandbox() as d, quiet():
+        for n in ("a", "b", "c"):
+            cfg_of(d, "claude", n).mkdir(parents=True)
+        seen = []
+
+        def rooms(dim, name):
+            seen.append(name)
+            return {"a": 5.0, "b": 90.0, "c": 80.0}[name]
+
+        with mock.patch.object(cp, "_headroom", rooms):
+            got = cp._pick(cp.DIMS["claude"], cp._parse_policy("a/b,c"))
+        assert got == "a", "a qualifies, so its tier wins even with less room"
+        assert seen == ["a"], f"must not price the later tier: {seen}"
+
+
+def test_policy_falls_through_and_balances_on_headroom():
+    with sandbox() as d, quiet():
+        for n in ("a", "b", "c", "e"):
+            cfg_of(d, "claude", n).mkdir(parents=True)
+        with mock.patch.object(cp, "_headroom", _rooms(a=None, b=30.0, c=70.0, e=99.0)):
+            assert cp._pick(cp.DIMS["claude"], cp._parse_policy("a/b,c/e")) == "c"
+        with mock.patch.object(cp, "_headroom", _rooms(a=None, b=None, c=None, e=99.0)):
+            assert cp._pick(cp.DIMS["claude"], cp._parse_policy("a/b,c/e")) == "e"
+
+
+def test_policy_breaks_ties_at_random():
+    with sandbox() as d, quiet():
+        for n in ("b", "c"):
+            cfg_of(d, "claude", n).mkdir(parents=True)
+        offered = []
+        with mock.patch.object(cp, "_headroom", _rooms(b=50.0, c=50.0)), \
+             mock.patch.object(cp.random, "choice", lambda xs: offered.extend(xs) or xs[-1]):
+            got = cp._pick(cp.DIMS["claude"], cp._parse_policy("b,c"))
+        assert sorted(offered) == ["b", "c"], f"both tied profiles must be offered: {offered}"
+        assert got == "c"
+
+
+def test_policy_rejects_unknown_profiles_before_any_request():
+    with sandbox() as d, quiet():
+        cfg_of(d, "claude", "a").mkdir(parents=True)
+        with mock.patch.object(cp, "_headroom") as h:
+            assert exits(cp._pick, cp.DIMS["claude"], cp._parse_policy("a/ghost"))
+        assert not h.called, "a typo should not cost a usage request"
+
+
+def test_run_accepts_a_policy_in_place_of_a_name():
+    with sandbox() as d, quiet() as out:
+        for n in ("a", "b"):
+            cp.main(["new", "claude", n])
+        with mock.patch.object(cp, "_headroom", _rooms(a=None, b=42.0)), \
+             mock.patch.object(os, "execvp") as ex:
+            cp.main(["run", "claude", "a/b", "--", "-p", "hi"])
+        assert ex.call_args[0][1] == ["claude", "-p", "hi"]
+        assert os.environ["CLAUDE_CONFIG_DIR"] == str(cfg_of(d, "claude", "b"))
+        assert "policy chose b" in out.getvalue()
+
+
+def test_run_with_a_plain_name_makes_no_usage_request():
+    with sandbox() as d, quiet():
+        cp.main(["new", "claude", "solo"])
+        with mock.patch.object(cp, "_headroom") as h, mock.patch.object(os, "execvp"):
+            cp.main(["run", "claude", "solo"])
+        assert not h.called, "naming a profile outright must stay offline"
+
+
 # --- invariants ------------------------------------------------------------
 
 def test_no_metadata_files_are_written():

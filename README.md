@@ -57,7 +57,7 @@ ccp new     <what> <name>      create an empty profile or history set
 ccp migrate <what> <name>      move existing real dirs into one
 ccp switch  <what> <name>      point the symlink at <name>
 ccp rename  <what> <name> <new>  rename one, following it if active
-ccp run     <tool> <name> [--] [args...]
+ccp run     <tool> <name|policy> [--] [args...]
 ccp usage   [<tool>]           quota for every profile
 ```
 
@@ -116,6 +116,32 @@ are safe. Everything after `<name>` goes to the child untouched — `ccp run cla
 
 A new profile is empty, so the tool onboards from scratch and you log in again. There is
 no `clone`.
+
+## Picking a profile by quota
+
+`run` takes a policy in place of a name, so a launch can choose whichever account
+still has room:
+
+```sh
+ccp run claude a/b,c/d/e,f -- --model opus
+```
+
+`/` falls through to the next choice, `,` balances within one — read that as *"a, else
+whichever of b and c has more room, else d, else balance e and f"*. Both characters are
+shell-safe and neither can appear in a profile name, so no quoting and no config file.
+
+A profile qualifies while **every** window it reports is below its limit. Among
+qualifying profiles the one with the most room in its **fullest** window wins — that
+window is the one that will actually stop you, so ranking by it picks the most usable
+profile rather than the best-looking average. A profile at `5h 0% / 7d 90%` scores 10 and
+loses to one at `5h 80% / 7d 10%`, which scores 20: the first is nearly out of weekly
+quota and useless for days, the second gives you real work now.
+
+Tiers are priced in order and the first with any usable profile wins, so a policy that
+leads with a healthy profile costs one usage request. Exact ties — two equally fresh
+profiles — are broken at random, so they alternate instead of the first-listed always
+taking the work. Codex per-model caps are shown but not scored: one being full still
+leaves the other models usable.
 
 ## Usage
 

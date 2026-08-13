@@ -6,6 +6,7 @@ import base64
 import errno
 import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -621,6 +622,9 @@ def cmd_run(t: Dim, name: str, args: list[str]) -> int:
     """
     if t.history:
         die(f"{t.key} is a history set, not something to run")
+    if "/" in name or "," in name:
+        name = _pick(t, _parse_policy(name))
+        print(f"{PROG}: policy chose {name}", file=sys.stderr)
     cfg = config_dir(t, name)
     if not cfg.is_dir():
         die(f"no {t.key} profile {name!r} at {disp(cfg)}\n"
@@ -686,21 +690,6 @@ def _jwt_exp(token: str):
         return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["exp"]
     except Exception:
         return None
-
-
-def _window(label: str, w, reset_key: str = "resets_at"):
-    if not isinstance(w, dict) or w.get("utilization") is None:
-        return None
-    out = f"{label} {w['utilization']:.0f}%"
-    raw = w.get(reset_key)
-    if isinstance(raw, str):
-        try:
-            from datetime import datetime, timezone
-            left = datetime.fromisoformat(raw) - datetime.now(timezone.utc)
-            out += f" (resets in {_left(left.total_seconds())})"
-        except ValueError:
-            pass
-    return out
 
 
 def _http_note(status, body) -> str:
@@ -839,53 +828,61 @@ def _refresh(d: Dim, cfg: Path) -> str:
     return (_refresh_claude if d.tool == "claude" else _refresh_codex)(cfg)
 
 
-def _claude_usage(cfg: Path, retry: bool = True) -> str:
+def _claude_usage(cfg: Path, retry: bool = True) -> tuple:
+    """(windows, extra, problem).
+
+    A window is (label, used_percent, seconds_until_reset). Only windows that
+    can actually block you belong here - they are what the policy scores on.
+    """
     oauth = (_read_json(cfg / ".credentials.json") or {}).get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
     if not token:
-        return "not logged in"
+        return [], "", "not logged in"
     exp = oauth.get("expiresAt")
     if isinstance(exp, (int, float)) and exp / 1000 <= time.time():
         # A lapsed refresh token cannot be renewed by anything, so say so rather
         # than suggesting a nudge that cannot work.
         ref = oauth.get("refreshTokenExpiresAt")
         if isinstance(ref, (int, float)) and ref / 1000 <= time.time():
-            return f"login expired - run:  {PROG} run claude {cfg.parent.name}"
+            return [], "", f"login expired - run:  {PROG} run claude {cfg.parent.name}"
         if not retry:
-            return "still expired after refresh"
+            return [], "", "still expired after refresh"
         why = _refresh(DIMS["claude"], cfg)
         if why:
-            return f"{why} - run:  {PROG} run claude {cfg.parent.name}" \
-                if why == "login expired" else why
+            return [], "", (f"{why} - run:  {PROG} run claude {cfg.parent.name}"
+                            if why == "login expired" else why)
         return _claude_usage(cfg, retry=False)          # bounded: one attempt
     status, body = _get(CLAUDE_USAGE_URL, {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        # Undocumented endpoint: Claude Code's own beta header and agent string.
+        # Undocumented endpoint, and it wants Claude Code's beta header.
         "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": USER_AGENT,
     })
     if status != 200:
-        return _http_note(status, body)
-    parts = [p for p in (_window("5h", body.get("five_hour")),
-                         _window("7d", body.get("seven_day")),
-                         _window("7d-opus", body.get("seven_day_opus"))) if p]
-    return "   ".join(parts) or "no limits reported"
+        return [], "", _http_note(status, body)
+    windows = []
+    for label, key in (("5h", "five_hour"), ("7d", "seven_day"),
+                       ("7d-opus", "seven_day_opus")):
+        w = body.get(key)
+        if isinstance(w, dict) and w.get("utilization") is not None:
+            windows.append((label, float(w["utilization"]), _until(w.get("resets_at"))))
+    return windows, "", ""
 
 
-def _codex_usage(cfg: Path, retry: bool = True) -> str:
+def _codex_usage(cfg: Path, retry: bool = True) -> tuple:
     tokens = (_read_json(cfg / "auth.json") or {}).get("tokens") or {}
     token = tokens.get("access_token")
     if not token:
-        return "not logged in"
+        return [], "", "not logged in"
     exp = _jwt_exp(token)
     if exp and exp <= time.time():
         if not retry:
-            return "still expired after refresh"
+            return [], "", "still expired after refresh"
         why = _refresh(DIMS["codex"], cfg)
         if why:
-            return f"{why} - run:  {PROG} run codex {cfg.parent.name}" \
-                if why == "login expired" else why
+            return [], "", (f"{why} - run:  {PROG} run codex {cfg.parent.name}"
+                            if why == "login expired" else why)
         return _codex_usage(cfg, retry=False)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
                "User-Agent": USER_AGENT}
@@ -893,23 +890,94 @@ def _codex_usage(cfg: Path, retry: bool = True) -> str:
         headers["ChatGPT-Account-Id"] = tokens["account_id"]
     status, body = _get(CODEX_USAGE_URL, headers)
     if status != 200:
-        return _http_note(status, body)
+        return [], "", _http_note(status, body)
     rl = body.get("rate_limit") or {}
-    parts = []
-    for label, key in (("primary", "primary_window"), ("secondary", "secondary_window")):
+    windows = []
+    for key in ("primary_window", "secondary_window"):
         w = rl.get(key)
         if isinstance(w, dict) and w.get("used_percent") is not None:
-            span = _left(w.get("limit_window_seconds") or 0)
-            left = w.get("reset_after_seconds")
-            parts.append(f"{span} {w['used_percent']:.0f}%" +
-                         (f" (resets in {_left(left)})" if left else ""))
-    for extra in body.get("additional_rate_limits") or []:
-        w = (extra.get("rate_limit") or {}).get("primary_window") or {}
-        if w.get("used_percent"):
-            parts.append(f"{extra.get('limit_name', '?')} {w['used_percent']:.0f}%")
+            windows.append((_left(w.get("limit_window_seconds") or 0),
+                            float(w["used_percent"]), w.get("reset_after_seconds")))
+    # Per-model caps are shown but not scored: one being full leaves the other
+    # models usable, so it should not disqualify the profile.
+    extra = [f"{x.get('limit_name', '?')} {w['used_percent']:.0f}%"
+             for x in body.get("additional_rate_limits") or []
+             for w in [(x.get("rate_limit") or {}).get("primary_window") or {}]
+             if w.get("used_percent")]
     if body.get("plan_type"):
-        parts.append(f"({body['plan_type']})")
+        extra.append(f"({body['plan_type']})")
+    return windows, "   ".join(extra), ""
+
+
+def _until(iso) -> float:
+    """Seconds from now until an ISO timestamp, or None if unparseable."""
+    if not isinstance(iso, str):
+        return None
+    try:
+        from datetime import datetime, timezone
+        return (datetime.fromisoformat(iso) - datetime.now(timezone.utc)).total_seconds()
+    except ValueError:
+        return None
+
+
+USAGE = {"claude": _claude_usage, "codex": _codex_usage}
+
+
+def _describe(d: Dim, cfg: Path) -> str:
+    windows, extra, problem = USAGE[d.tool](cfg)
+    if problem:
+        return problem
+    parts = [f"{label} {used:.0f}%" + (f" (resets in {_left(secs)})" if secs else "")
+             for label, used, secs in windows]
+    if extra:
+        parts.append(extra)
     return "   ".join(parts) or "no limits reported"
+
+
+def _headroom(d: Dim, name: str) -> float:
+    """Room left in whichever window is nearest its limit, or None if unusable.
+
+    The window closest to full is the one that will stop you, so ranking by how
+    much room it has picks the profile with the most guaranteed headroom.
+    """
+    windows, _, problem = USAGE[d.tool](config_dir(d, name))
+    if problem or not windows:
+        return None
+    room = min(100.0 - used for _, used, _ in windows)
+    return room if room > 0 else None
+
+
+def _parse_policy(spec: str) -> list:
+    """'A/B,C/D' -> [['A'], ['B', 'C'], ['D']]: fall back on /, balance on ,."""
+    tiers = []
+    for tier in spec.split("/"):
+        names = [valid(n) for n in tier.split(",") if n]
+        if not names:
+            die(f"empty tier in policy {spec!r}")
+        tiers.append(names)
+    return tiers
+
+
+def _pick(d: Dim, tiers: list) -> str:
+    """First profile with headroom, by policy.
+
+    Tiers are priced in order and the first with any usable profile wins, so a
+    policy that leads with a healthy profile costs one usage request rather than
+    one per profile named. Members of a balanced tier are all priced, since
+    comparing them is the point.
+    """
+    for name in [n for tier in tiers for n in tier]:
+        if not has_entry(d, name):
+            die(f"no {d.key} profile {name!r} at {disp(entry(d, name))}")
+    for tier in tiers:
+        scored = [(room, name) for name in tier
+                  for room in [_headroom(d, name)] if room is not None]
+        if scored:
+            best = max(room for room, _ in scored)
+            # Ties go to chance: equally fresh profiles would otherwise always
+            # hand the work to whichever was listed first.
+            return random.choice([n for room, n in scored if room == best])
+    die(f"no {d.key} profile in the policy has usage left")
 
 
 def cmd_usage(only: str = "") -> int:
@@ -920,7 +988,6 @@ def cmd_usage(only: str = "") -> int:
     would invalidate the copy that process holds. Reading is enough while a
     token is live - Codex tokens last about a week, Claude's about six hours.
     """
-    fetch = {"claude": _claude_usage, "codex": _codex_usage}
     for t in PROFILES:
         if only and t.key != only:
             continue
@@ -930,7 +997,7 @@ def cmd_usage(only: str = "") -> int:
             print(f"{PAD}no profiles")
             continue
         for n in names:
-            print(f"   {'*' if n == active else ' '} {n:12} {fetch[t.tool](config_dir(t, n))}")
+            print(f"   {'*' if n == active else ' '} {n:12} {_describe(t, config_dir(t, n))}")
     return 0
 
 
@@ -948,10 +1015,16 @@ usage:
   {PROG} rename  <what> <name> <new>  rename one, following it if it is active
   {PROG} usage   [<tool>]             quota for every profile (read-only; never
                                       refreshes a token)
-  {PROG} run     <tool> <name> [--] [args...]
+  {PROG} run     <tool> <name|policy> [--] [args...]
                                       run <tool> under <name> for one
                                       invocation, leaving the active profile
                                       untouched
+
+  A policy picks the profile by remaining quota instead of naming one:
+    a/b,c/d     try a; else whichever of b,c has more room; else d
+  '/' falls through to the next choice, ',' balances within one. A profile
+  qualifies while every window it has is below its limit, and the one with
+  the most room in its fullest window wins.
 
   <tool> is 'claude' or 'codex'.
   <what> is a tool, or 'claude-history' / 'codex-history'.
