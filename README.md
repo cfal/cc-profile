@@ -147,12 +147,19 @@ leaves the other models usable.
 
 ```console
 $ ccp usage
+ccp: loading usage from claude/personal
+ccp: loading usage from claude/work
+ccp: loading usage from codex/work
 claude
-     personal     token expired - use this profile once to refresh it
+     personal     login expired - run:  ccp run claude personal
    * work         5h 38% (resets in 1.9h)   7d 57% (resets in 3.4d)
 codex
    * work         7d 15% (resets in 5.2d)   (pro)
 ```
+
+Every profile is fetched before anything is printed, so the table arrives in one piece
+rather than a line at a time between progress and refresh messages. Progress goes to
+stderr, so redirecting stdout gives you just the table.
 
 Reads each profile's own stored credentials and asks the provider — so you can compare
 accounts without switching. This is the only command that touches the network or reads

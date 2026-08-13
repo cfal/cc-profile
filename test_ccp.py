@@ -40,6 +40,14 @@ def sandbox(claude_env: bool = True, **extra: str):
 
 
 @contextlib.contextmanager
+def capture():
+    """stdout and stderr separately, so their ordering can be asserted on."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        yield out, err
+
+
+@contextlib.contextmanager
 def quiet():
     """Swallow command output; tests assert on the filesystem, not on prose."""
     buf = io.StringIO()
@@ -794,6 +802,28 @@ def test_run_with_a_plain_name_makes_no_usage_request():
         with mock.patch.object(cp, "_headroom") as h, mock.patch.object(os, "execvp"):
             cp.main(["run", "claude", "solo"])
         assert not h.called, "naming a profile outright must stay offline"
+
+
+def test_usage_finishes_loading_before_printing_the_summary():
+    """The table should land in one piece, not a line at a time between fetches."""
+    with sandbox() as d:
+        with quiet():
+            for n in ("one", "two"):
+                cp.main(["new", "claude", n])
+        stdout_at_each_fetch = []
+        with capture() as (out, err):
+            def describe(dim, cfg):
+                stdout_at_each_fetch.append(out.getvalue())
+                return "5h 1%"
+            with mock.patch.object(cp, "_describe", describe):
+                cp.main(["usage", "claude"])
+        assert len(stdout_at_each_fetch) == 2, stdout_at_each_fetch
+        assert all(v == "" for v in stdout_at_each_fetch), \
+            f"summary started before loading finished: {stdout_at_each_fetch}"
+        assert "one" in out.getvalue() and "two" in out.getvalue()
+        # Progress is stderr, so a redirected stdout still gets only the table.
+        assert "loading usage from claude/one" in err.getvalue(), err.getvalue()
+        assert "loading" not in out.getvalue()
 
 
 # --- invariants ------------------------------------------------------------

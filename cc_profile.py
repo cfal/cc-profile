@@ -981,23 +981,29 @@ def _pick(d: Dim, tiers: list) -> str:
 
 
 def cmd_usage(only: str = "") -> int:
-    """Per-profile quota, read straight from each profile's stored credentials.
+    """Per-profile quota, read from each profile's own stored credentials.
 
-    Never refreshes: a rotated refresh token would be written back into a
-    profile another process may be using, and Anthropic's rotate-on-refresh
-    would invalidate the copy that process holds. Reading is enough while a
-    token is live - Codex tokens last about a week, Claude's about six hours.
+    Every profile is fetched before anything is printed, so the summary lands in
+    one piece instead of arriving a line at a time between progress and refresh
+    messages. Progress goes to stderr, so a redirected stdout still gets only
+    the table.
     """
+    fetched = []
     for t in PROFILES:
         if only and t.key != only:
             continue
-        active, names = current(t), entries(t)
+        rows = []
+        for n in entries(t):
+            print(f"{PROG}: loading usage from {t.key}/{n}", file=sys.stderr)
+            rows.append((n, _describe(t, config_dir(t, n))))
+        fetched.append((t, current(t), rows))
+
+    for t, active, rows in fetched:
         print(f"{t.key}")
-        if not names:
+        if not rows:
             print(f"{PAD}no profiles")
-            continue
-        for n in names:
-            print(f"   {'*' if n == active else ' '} {n:12} {_describe(t, config_dir(t, n))}")
+        for n, text in rows:
+            print(f"   {'*' if n == active else ' '} {n:12} {text}")
     return 0
 
 
