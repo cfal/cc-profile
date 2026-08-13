@@ -554,9 +554,12 @@ def test_refresh_renews_in_place_and_usage_retries():
         _creds(d, "stale", expires_in_h=-1)
         path = cfg_of(d, "claude", "stale") / ".credentials.json"
 
-        def fake_post(url, data, form):
+        def fake_post(url, data, form, agent=""):
             assert url == cp.CLAUDE_TOKEN_URL and form is True
             assert data["grant_type"] == "refresh_token" and data["refresh_token"] == "rt"
+            # Cloudflare returns 403 to an unrecognised agent string, so the
+            # refresh must carry the same one the usage request does.
+            assert agent == cp.CLAUDE_UA, f"missing user agent: {agent!r}"
             return 200, {"access_token": "NEW", "refresh_token": "RT2", "expires_in": 3600}
 
         with mock.patch.object(cp, "_post", fake_post), \
@@ -641,7 +644,7 @@ def test_codex_refresh_posts_json_and_preserves_account_id():
             {"auth_mode": "chatgpt",
              "tokens": {"access_token": dead, "refresh_token": "rt", "account_id": "acc-1"}}))
 
-        def fake_post(url, data, form):
+        def fake_post(url, data, form, agent=""):
             assert url == cp.CODEX_TOKEN_URL and form is False, (url, form)
             assert data["client_id"] == cp.CODEX_CLIENT_ID
             return 200, {"access_token": "NEW", "id_token": "ID2"}

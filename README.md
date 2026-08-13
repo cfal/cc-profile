@@ -146,6 +146,9 @@ and `mcp list` only clear credentials they judge malformed, and codex's `login s
 lazily when about to call the API, which costs quota. These are the same endpoints and
 client IDs CodexBar uses; they are undocumented and may change.
 
+Both requests carry Claude Code's agent string. Anthropic sits behind Cloudflare, which
+rejects an unrecognised one with a 403 before the request reaches the API.
+
 Credentials are rewritten through a 0600 temp file and renamed into place, so an
 interrupted write cannot leave a half-file where the tokens were. A failed refresh — for
 any reason — leaves the file untouched. When the provider returns no new refresh token it

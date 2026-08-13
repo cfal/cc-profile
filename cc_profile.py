@@ -709,26 +709,36 @@ def _http_note(status, body) -> str:
 # malformed, and codex's login status/doctor/mcp list/plugin list all leave
 # auth.json untouched. Both CLIs renew lazily when about to make a request.
 # These are the same endpoints and client IDs CodexBar uses.
+# Anthropic sits behind Cloudflare, which rejects an unrecognised agent string
+# with a 403 before the request ever reaches the API. Shared by both requests so
+# they cannot drift apart - the usage GET had it and the refresh POST did not,
+# which is exactly how that 403 arose.
+CLAUDE_UA = "claude-code/2.1.227"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
-def _post(url: str, data: dict, form: bool) -> tuple:
+def _post(url: str, data: dict, form: bool, agent: str = "") -> tuple:
     body, ctype = ((urllib.parse.urlencode(data).encode(),
                     "application/x-www-form-urlencoded") if form else
                    (json.dumps(data).encode(), "application/json"))
-    req = urllib.request.Request(url, data=body, headers={
-        "Content-Type": ctype, "Accept": "application/json"})
+    headers = {"Content-Type": ctype, "Accept": "application/json"}
+    if agent:
+        headers["User-Agent"] = agent
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=USAGE_TIMEOUT) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
+        raw = e.read()[:200].decode("utf8", "replace")
         try:
-            return e.code, json.loads(e.read())
-        except Exception:
-            return e.code, {}
+            return e.code, json.loads(raw)
+        except ValueError:
+            # Keep the text: an edge rejection is HTML, and losing it turns a
+            # diagnosable "Cloudflare denied the agent string" into a bare 403.
+            return e.code, {"error": " ".join(raw.split())[:120]}
     except Exception as e:
         return None, {"error": str(e)}
 
@@ -757,6 +767,8 @@ def _refresh_failure(status, body: dict) -> str:
         return "login expired"
     if status is None:
         return f"refresh unreachable: {(body or {}).get('error', '?')}"
+    if status == 429:
+        return "refresh rate limited - try again shortly"
     return f"refresh failed: HTTP {status}{f' ({code})' if code else ''}"
 
 
@@ -776,7 +788,7 @@ def _refresh_claude(cfg: Path) -> str:
     status, body = _post(CLAUDE_TOKEN_URL, {
         "grant_type": "refresh_token",
         "refresh_token": token,
-        "client_id": CLAUDE_CLIENT_ID}, form=True)
+        "client_id": CLAUDE_CLIENT_ID}, form=True, agent=CLAUDE_UA)
     if status != 200 or not body.get("access_token"):
         return _refresh_failure(status, body)
     oauth["accessToken"] = body["access_token"]
@@ -840,7 +852,7 @@ def _claude_usage(cfg: Path, retry: bool = True) -> str:
         "Accept": "application/json",
         # Undocumented endpoint: Claude Code's own beta header and agent string.
         "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": "claude-code/2.1.227",
+        "User-Agent": CLAUDE_UA,
     })
     if status != 200:
         return _http_note(status, body)
