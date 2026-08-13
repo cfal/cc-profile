@@ -132,22 +132,33 @@ Reads each profile's own stored credentials and asks the provider — so you can
 accounts without switching. This is the only command that touches the network or reads
 credential *contents*; bare `ccp` stays offline.
 
-**It never writes credentials.** Renewing is delegated to the CLI, so the credential
-file is only ever written by the tool that owns it — both providers rotate the refresh
-token, and whoever renews it must own it or the copy another process holds silently
-stops working.
+**Expired tokens are renewed automatically.** `ccp usage` posts the profile's refresh
+token to the provider and writes the result back to that same file, then retries once:
 
-**No command currently qualifies.** Ruled out against genuinely expired profiles:
-`claude auth status` (local only), `claude doctor` and `claude mcp list` (clear
-credentials they judge malformed, but do not renew a live one), and `codex login
-status` / `doctor` / `mcp list` / `plugin list` (all leave `auth.json` untouched). Both
-CLIs seem to renew only when about to call the API, which costs quota. So an expired
-profile is reported rather than poked — a useless subprocess still costs seconds and can
-clear credentials. The delegation stays wired, so adding a confirmed command is one line.
+| | endpoint |
+|---|---|
+| Claude | `POST https://platform.claude.com/v1/oauth/token` (form-encoded) |
+| Codex | `POST https://auth.openai.com/oauth/token` (JSON) |
 
-A profile whose *refresh* token has also lapsed is reported as `login expired`, since
-nothing can renew that. Codex tokens last about a week and Claude's about six hours, so
-in practice it is Claude profiles that go stale.
+No CLI subcommand can do this — `claude auth status` reads local state, `claude doctor`
+and `mcp list` only clear credentials they judge malformed, and codex's `login status`,
+`doctor`, `mcp list` and `plugin list` all leave `auth.json` untouched. Both CLIs renew
+lazily when about to call the API, which costs quota. These are the same endpoints and
+client IDs CodexBar uses; they are undocumented and may change.
+
+Credentials are rewritten through a 0600 temp file and renamed into place, so an
+interrupted write cannot leave a half-file where the tokens were. A failed refresh — for
+any reason — leaves the file untouched. When the provider returns no new refresh token it
+did not rotate, so the existing one is kept; discarding it would lock the profile out.
+
+A profile whose *refresh* token has also lapsed reads as `login expired`, since nothing
+can renew that. Codex tokens last about a week and Claude's about six hours, so in
+practice it is Claude profiles that go stale.
+
+**One race remains.** Both providers may rotate the refresh token, so if a session is
+running under the same profile when `ccp usage` renews it, that session's in-memory copy
+becomes stale. It refreshes on its own schedule and would hit the same rotation anyway,
+but the window is real.
 
 Endpoints are Claude Code's and Codex's own (`api.anthropic.com/api/oauth/usage`,
 `chatgpt.com/backend-api/wham/usage`). They are undocumented and may change. On macOS

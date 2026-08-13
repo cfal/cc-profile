@@ -521,7 +521,8 @@ def _creds(d: Path, name: str, expires_in_h: float = 6) -> None:
     cfg = cfg_of(d, "claude", name)
     cfg.mkdir(parents=True, exist_ok=True)
     (cfg / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
-        "accessToken": "tok", "expiresAt": int((time.time() + expires_in_h * 3600) * 1000)}}))
+        "accessToken": "tok", "refreshToken": "rt",
+        "expiresAt": int((time.time() + expires_in_h * 3600) * 1000)}}))
 
 
 def test_usage_reports_each_profiles_windows():
@@ -538,36 +539,70 @@ def test_usage_reports_each_profiles_windows():
 
 
 def test_usage_never_sends_an_expired_token():
-    """Expiry is read locally, so a dead token is never put on the wire."""
+    """Expiry is read locally: the usage endpoint is only reached once renewed."""
     with sandbox() as d, quiet() as out:
         _creds(d, "stale", expires_in_h=-1)
-        with mock.patch.object(cp, "_get") as g:
+        with mock.patch.object(cp, "_post", lambda *a, **k: (503, {})), \
+             mock.patch.object(cp, "_get") as g:
             cp.main(["usage", "claude"])
         assert not g.called, "must not call out with an expired token"
-        assert "expired" in out.getvalue()
+        assert "refresh failed" in out.getvalue(), out.getvalue()
 
 
-def test_usage_delegates_refresh_to_the_cli_then_retries():
-    """When a renewing command is known, the CLI runs it and we re-read.
-
-    Exercised with a stand-in because no real command qualifies yet; this keeps
-    the delegation wired and scoped so adding one is a single-line change.
-    """
+def test_refresh_renews_in_place_and_usage_retries():
     with sandbox() as d, quiet() as out:
         _creds(d, "stale", expires_in_h=-1)
-        cfg = cfg_of(d, "claude", "stale")
+        path = cfg_of(d, "claude", "stale") / ".credentials.json"
 
-        def fake_cli(argv, **kw):
-            assert argv == ["claude", "renew"], argv
-            assert kw["env"]["CLAUDE_CONFIG_DIR"] == str(cfg), "must scope to the profile"
-            _creds(d, "stale", expires_in_h=6)          # the CLI renews it
-            return mock.Mock(returncode=0)
+        def fake_post(url, data, form):
+            assert url == cp.CLAUDE_TOKEN_URL and form is True
+            assert data["grant_type"] == "refresh_token" and data["refresh_token"] == "rt"
+            return 200, {"access_token": "NEW", "refresh_token": "RT2", "expires_in": 3600}
 
-        with mock.patch.dict(cp.REFRESH_CMD, {"claude": ["renew"]}), \
-             mock.patch.object(cp.subprocess, "run", fake_cli), \
+        with mock.patch.object(cp, "_post", fake_post), \
              mock.patch.object(cp, "_get", lambda url, h: (200, CLAUDE_USAGE_BODY)):
             assert cp.main(["usage", "claude"]) == 0
+        saved = json.loads(path.read_text())["claudeAiOauth"]
+        assert saved["accessToken"] == "NEW" and saved["refreshToken"] == "RT2"
+        assert saved["expiresAt"] / 1000 > time.time()
         assert "5h 29%" in out.getvalue(), out.getvalue()
+
+
+def test_refresh_keeps_the_old_refresh_token_when_none_is_returned():
+    """Rotation is optional; dropping it would lock the profile out."""
+    with sandbox() as d, quiet():
+        _creds(d, "stale", expires_in_h=-1)
+        path = cfg_of(d, "claude", "stale") / ".credentials.json"
+        with mock.patch.object(cp, "_post",
+                               lambda *a, **k: (200, {"access_token": "N", "expires_in": 60})), \
+             mock.patch.object(cp, "_get", lambda url, h: (200, CLAUDE_USAGE_BODY)):
+            cp.main(["usage", "claude"])
+        assert json.loads(path.read_text())["claudeAiOauth"]["refreshToken"] == "rt"
+
+
+def test_refresh_leaves_credentials_alone_when_it_fails():
+    with sandbox() as d, quiet() as out:
+        _creds(d, "stale", expires_in_h=-1)
+        path = cfg_of(d, "claude", "stale") / ".credentials.json"
+        before = path.read_text()
+        for status, body, expect in ((400, {"error": "invalid_grant"}, "login expired"),
+                                     (503, {}, "refresh failed: HTTP 503"),
+                                     (None, {"error": "timed out"}, "unreachable")):
+            with mock.patch.object(cp, "_post", lambda *a, s=status, b=body, **k: (s, b)), \
+                 mock.patch.object(cp, "_get") as g:
+                cp.main(["usage", "claude"])
+            assert path.read_text() == before, f"{status} must not rewrite credentials"
+            assert not g.called
+            assert expect in out.getvalue(), (expect, out.getvalue())
+
+
+def test_secret_writes_are_atomic_and_private():
+    with sandbox() as d:
+        p = d / "secret.json"
+        cp._write_secret(p, {"a": 1})
+        assert json.loads(p.read_text()) == {"a": 1}
+        assert oct(p.stat().st_mode)[-3:] == "600", oct(p.stat().st_mode)
+        assert not list(d.glob(".*ccp*")), "temp file left behind"
 
 
 def test_usage_reports_a_lapsed_refresh_token_as_needing_login():
@@ -577,36 +612,48 @@ def test_usage_reports_a_lapsed_refresh_token_as_needing_login():
         past = int((time.time() - 86400) * 1000)
         (cfg / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
             "accessToken": "t", "expiresAt": past, "refreshTokenExpiresAt": past}}))
-        with mock.patch.object(cp.subprocess, "run") as run:
+        with mock.patch.object(cp, "_post") as post:
             cp.main(["usage", "claude"])
-        assert not run.called, "must not shell out for a dead login"
+        assert not post.called, "no request can renew a dead login"
         assert "login expired" in out.getvalue(), out.getvalue()
 
 
 def test_usage_refreshes_at_most_once():
+    """A refresh that reports success but changes nothing must not loop."""
     with sandbox() as d, quiet() as out:
         _creds(d, "dead", expires_in_h=-1)
         calls = []
-        with mock.patch.dict(cp.REFRESH_CMD, {"claude": ["renew"]}), \
-             mock.patch.object(cp.subprocess, "run",
-                               lambda a, **k: calls.append(a) or mock.Mock(returncode=0)), \
+        with mock.patch.object(cp, "_post",
+                               lambda *a, **k: calls.append(a) or (200, {"access_token": "N",
+                                                                        "expires_in": -99})), \
              mock.patch.object(cp, "_get") as g:
             cp.main(["usage", "claude"])
         assert len(calls) == 1, f"one attempt only, got {len(calls)}"
         assert not g.called, "still expired, so nothing goes on the wire"
-        assert "expired" in out.getvalue()
+        assert "still expired" in out.getvalue(), out.getvalue()
 
 
-def test_usage_does_not_shell_out_for_codex():
-    """No codex command renews without calling the API, so none is run."""
-    with sandbox() as d, quiet() as out:
+def test_codex_refresh_posts_json_and_preserves_account_id():
+    with sandbox() as d, quiet():
         cfg = cfg_of(d, "codex", "stale"); cfg.mkdir(parents=True)
-        dead = f"{'x' * 4}.{cp.base64.urlsafe_b64encode(b'{\"exp\":1}').decode().rstrip('=')}.s"
-        (cfg / "auth.json").write_text(json.dumps({"tokens": {"access_token": dead}}))
-        with mock.patch.object(cp.subprocess, "run") as run:
+        dead = f"h.{cp.base64.urlsafe_b64encode(b'{\"exp\":1}').decode().rstrip('=')}.s"
+        (cfg / "auth.json").write_text(json.dumps(
+            {"auth_mode": "chatgpt",
+             "tokens": {"access_token": dead, "refresh_token": "rt", "account_id": "acc-1"}}))
+
+        def fake_post(url, data, form):
+            assert url == cp.CODEX_TOKEN_URL and form is False, (url, form)
+            assert data["client_id"] == cp.CODEX_CLIENT_ID
+            return 200, {"access_token": "NEW", "id_token": "ID2"}
+
+        with mock.patch.object(cp, "_post", fake_post), \
+             mock.patch.object(cp, "_get", lambda url, h: (200, CODEX_USAGE_BODY)):
             cp.main(["usage", "codex"])
-        assert not run.called
-        assert "expired" in out.getvalue()
+        saved = json.loads((cfg / "auth.json").read_text())
+        assert saved["tokens"]["access_token"] == "NEW"
+        assert saved["tokens"]["refresh_token"] == "rt", "kept when not rotated"
+        assert saved["tokens"]["account_id"] == "acc-1", "untouched fields survive"
+        assert saved["auth_mode"] == "chatgpt"
 
 
 def test_usage_reports_missing_credentials_and_http_errors():

@@ -8,10 +8,10 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -703,42 +703,117 @@ def _http_note(status, body) -> str:
 # never parse or write the credential files ourselves, and only one party ever
 # holds the refresh token - which matters because both providers rotate it.
 #
-# Nothing qualifies yet. Ruled out against genuinely expired profiles:
-#   claude auth status  - reads local state, no network
-#   claude doctor       - clears credentials it considers malformed, but does
-#                         not renew a live one; looked like a refresh in a
-#                         synthetic test only because the wipe was mistaken for
-#                         a server rejection
-#   claude mcp list     - same, and ~18s
-#   codex login status / doctor / mcp list / plugin list
-#                       - all leave auth.json untouched when expired
-# Both CLIs appear to renew only when they are about to call the API, which
-# costs quota. Until a command is confirmed to renew without one, expired
-# profiles are reported rather than poked: a useless subprocess still costs
-# seconds and can clear credentials.
-REFRESH_CMD: dict = {}
-REFRESH_TIMEOUT = 60
+# Refreshing is done here rather than by nudging the CLI, because no CLI
+# subcommand renews without calling the API: `claude auth status` reads local
+# state, `claude doctor` and `mcp list` only clear credentials they judge
+# malformed, and codex's login status/doctor/mcp list/plugin list all leave
+# auth.json untouched. Both CLIs renew lazily when about to make a request.
+# These are the same endpoints and client IDs CodexBar uses.
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
-def _refresh(d: Dim, cfg: Path) -> bool:
-    """Ask the CLI to renew its own token. True if the command ran at all.
-
-    A dead refresh token makes Claude clear the credentials, which reads as a
-    logout - but they were already unusable at that point, so nothing recoverable
-    is lost. A network failure leaves them untouched.
-    """
-    args = REFRESH_CMD.get(d.tool)
-    if not args:
-        return False
-    print(f"{PROG}: refreshing {d.key}/{cfg.parent.name} ({d.exe} {' '.join(args)})",
-          file=sys.stderr)
+def _post(url: str, data: dict, form: bool) -> tuple:
+    body, ctype = ((urllib.parse.urlencode(data).encode(),
+                    "application/x-www-form-urlencoded") if form else
+                   (json.dumps(data).encode(), "application/json"))
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": ctype, "Accept": "application/json"})
     try:
-        subprocess.run([d.exe, *args], env={**os.environ, d.env: str(cfg)},
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=REFRESH_TIMEOUT, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return True
+        with urllib.request.urlopen(req, timeout=USAGE_TIMEOUT) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return None, {"error": str(e)}
+
+
+def _write_secret(path: Path, doc: dict) -> None:
+    """Replace a credential file atomically, never leaving it world-readable.
+
+    Written to a 0600 temp file and renamed over the target, so an interrupted
+    write cannot leave a half-file where the credentials used to be.
+    """
+    tmp = path.with_name(f".{path.name}.{PROG}.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _refresh_failure(status, body: dict) -> str:
+    """Terminal failures need a re-login; everything else is worth retrying."""
+    code = (body or {}).get("error", "")
+    if status in (400, 401) and code in ("invalid_grant", "invalid_request", ""):
+        return "login expired"
+    if status is None:
+        return f"refresh unreachable: {(body or {}).get('error', '?')}"
+    return f"refresh failed: HTTP {status}{f' ({code})' if code else ''}"
+
+
+def _refresh_claude(cfg: Path) -> str:
+    """Renew in place. Empty string on success, else why not.
+
+    The new refresh token is written back to the same file the CLI reads, so the
+    rotation lands where the next session will look for it. A response without a
+    new refresh token means this provider did not rotate: keep the existing one.
+    """
+    path = cfg / ".credentials.json"
+    doc = _read_json(path) or {}
+    oauth = doc.get("claudeAiOauth") or {}
+    token = oauth.get("refreshToken")
+    if not token:
+        return "no refresh token"
+    status, body = _post(CLAUDE_TOKEN_URL, {
+        "grant_type": "refresh_token",
+        "refresh_token": token,
+        "client_id": CLAUDE_CLIENT_ID}, form=True)
+    if status != 200 or not body.get("access_token"):
+        return _refresh_failure(status, body)
+    oauth["accessToken"] = body["access_token"]
+    oauth["refreshToken"] = body.get("refresh_token") or token
+    oauth["expiresAt"] = int((time.time() + float(body.get("expires_in", 0))) * 1000)
+    doc["claudeAiOauth"] = oauth
+    _write_secret(path, doc)
+    return ""
+
+
+def _refresh_codex(cfg: Path) -> str:
+    path = cfg / "auth.json"
+    doc = _read_json(path) or {}
+    tokens = doc.get("tokens") or {}
+    token = tokens.get("refresh_token")
+    if not token:
+        return "no refresh token"
+    status, body = _post(CODEX_TOKEN_URL, {
+        "client_id": CODEX_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": token,
+        "scope": "openid profile email"}, form=False)
+    if status != 200 or not body.get("access_token"):
+        return _refresh_failure(status, body)
+    tokens["access_token"] = body["access_token"]
+    tokens["refresh_token"] = body.get("refresh_token") or token
+    if body.get("id_token"):
+        tokens["id_token"] = body["id_token"]
+    doc["tokens"] = tokens
+    doc["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime())
+    _write_secret(path, doc)
+    return ""
+
+
+def _refresh(d: Dim, cfg: Path) -> str:
+    print(f"{PROG}: refreshing {d.key}/{cfg.parent.name}", file=sys.stderr)
+    return (_refresh_claude if d.tool == "claude" else _refresh_codex)(cfg)
 
 
 def _claude_usage(cfg: Path, retry: bool = True) -> str:
@@ -752,10 +827,14 @@ def _claude_usage(cfg: Path, retry: bool = True) -> str:
         # than suggesting a nudge that cannot work.
         ref = oauth.get("refreshTokenExpiresAt")
         if isinstance(ref, (int, float)) and ref / 1000 <= time.time():
-            return f"login expired - re-run:  {PROG} run claude {cfg.parent.name}"
-        if retry and _refresh(DIMS["claude"], cfg):
-            return _claude_usage(cfg, retry=False)      # bounded: one attempt
-        return f"token expired - use it once:  {PROG} run claude {cfg.parent.name}"
+            return f"login expired - run:  {PROG} run claude {cfg.parent.name}"
+        if not retry:
+            return "still expired after refresh"
+        why = _refresh(DIMS["claude"], cfg)
+        if why:
+            return f"{why} - run:  {PROG} run claude {cfg.parent.name}" \
+                if why == "login expired" else why
+        return _claude_usage(cfg, retry=False)          # bounded: one attempt
     status, body = _get(CLAUDE_USAGE_URL, {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
@@ -778,9 +857,13 @@ def _codex_usage(cfg: Path, retry: bool = True) -> str:
         return "not logged in"
     exp = _jwt_exp(token)
     if exp and exp <= time.time():
-        if retry and _refresh(DIMS["codex"], cfg):
-            return _codex_usage(cfg, retry=False)
-        return "token expired - use this profile once to refresh it"
+        if not retry:
+            return "still expired after refresh"
+        why = _refresh(DIMS["codex"], cfg)
+        if why:
+            return f"{why} - run:  {PROG} run codex {cfg.parent.name}" \
+                if why == "login expired" else why
+        return _codex_usage(cfg, retry=False)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
                "User-Agent": f"{PROG}"}
     if tokens.get("account_id"):
