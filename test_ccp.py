@@ -559,7 +559,7 @@ def test_refresh_renews_in_place_and_usage_retries():
             assert data["grant_type"] == "refresh_token" and data["refresh_token"] == "rt"
             # Cloudflare returns 403 to an unrecognised agent string, so the
             # refresh must carry the same one the usage request does.
-            assert agent == cp.CLAUDE_UA, f"missing user agent: {agent!r}"
+            assert agent == cp.USER_AGENT, f"missing user agent: {agent!r}"
             return 200, {"access_token": "NEW", "refresh_token": "RT2", "expires_in": 3600}
 
         with mock.patch.object(cp, "_post", fake_post), \
@@ -584,19 +584,39 @@ def test_refresh_keeps_the_old_refresh_token_when_none_is_returned():
 
 
 def test_refresh_leaves_credentials_alone_when_it_fails():
-    with sandbox() as d, quiet() as out:
-        _creds(d, "stale", expires_in_h=-1)
-        path = cfg_of(d, "claude", "stale") / ".credentials.json"
-        before = path.read_text()
-        for status, body, expect in ((400, {"error": "invalid_grant"}, "login expired"),
-                                     (503, {}, "refresh failed: HTTP 503"),
-                                     (None, {"error": "timed out"}, "unreachable")):
+    cases = (
+        (400, {"error": "invalid_grant"}, "login expired"),
+        # OpenAI nests the code under an object; Anthropic reports it flat.
+        (401, {"error": {"code": "token_expired"}}, "login expired"),
+        (401, {"error": {"type": "invalid_request_error"}}, "login expired"),
+        (503, {}, "refresh failed: HTTP 503"),
+        (429, {}, "rate limited"),
+        (None, {"error": "timed out"}, "unreachable"),
+    )
+    for status, body, expect in cases:
+        # A fresh buffer per case: a shared one lets an earlier case's output
+        # satisfy a later assertion.
+        with sandbox() as d, quiet() as out:
+            _creds(d, "stale", expires_in_h=-1)
+            path = cfg_of(d, "claude", "stale") / ".credentials.json"
+            before = path.read_text()
             with mock.patch.object(cp, "_post", lambda *a, s=status, b=body, **k: (s, b)), \
                  mock.patch.object(cp, "_get") as g:
                 cp.main(["usage", "claude"])
             assert path.read_text() == before, f"{status} must not rewrite credentials"
             assert not g.called
-            assert expect in out.getvalue(), (expect, out.getvalue())
+            assert expect in out.getvalue(), (status, expect, out.getvalue())
+
+
+def test_requests_do_not_impersonate_the_official_client():
+    """claude-code as the agent draws a 429 from the token endpoint at once.
+
+    An absent agent draws a Cloudflare 403 and a browser string is throttled
+    too, so the name has to be present, honest and non-browser.
+    """
+    assert "claude-code" not in cp.USER_AGENT.lower(), cp.USER_AGENT
+    assert "mozilla" not in cp.USER_AGENT.lower(), cp.USER_AGENT
+    assert cp.USER_AGENT.startswith("cc-profile/"), cp.USER_AGENT
 
 
 def test_secret_writes_are_atomic_and_private():

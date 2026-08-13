@@ -18,6 +18,7 @@ from typing import NoReturn
 import curl
 
 PROG = "ccp"
+VERSION = "0.1"
 NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 if sys.version_info < (3, 8):  # Path.unlink(missing_ok=) is the binding constraint
@@ -722,11 +723,12 @@ def _http_note(status, body) -> str:
 # malformed, and codex's login status/doctor/mcp list/plugin list all leave
 # auth.json untouched. Both CLIs renew lazily when about to make a request.
 # These are the same endpoints and client IDs CodexBar uses.
-# Anthropic sits behind Cloudflare, which rejects an unrecognised agent string
-# with a 403 before the request ever reaches the API. Shared by both requests so
-# they cannot drift apart - the usage GET had it and the refresh POST did not,
-# which is exactly how that 403 arose.
-CLAUDE_UA = "claude-code/2.1.227"
+# Our own name, on every request. An absent agent string draws a Cloudflare 403,
+# and claiming to be the official client draws a 429 from the token endpoint on
+# the very first attempt - presumably because claude-code has its own enforcement
+# there. A browser string is throttled too. Anything honest and non-browser is
+# served normally, which is why CodexBar works: it never pretends.
+USER_AGENT = f"cc-profile/{VERSION}"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -760,10 +762,19 @@ def _write_secret(path: Path, doc: dict) -> None:
         raise
 
 
+# A refresh token the provider will never accept again. Anthropic reports these
+# flat (`{"error": "invalid_grant"}`), OpenAI nested under an object, so both
+# shapes are normalised before comparing.
+TERMINAL_OAUTH_ERRORS = ("", "invalid_grant", "invalid_request",
+                         "invalid_request_error", "token_expired",
+                         "refresh_token_expired", "refresh_token_reused")
+
+
 def _refresh_failure(status, body: dict) -> str:
     """Terminal failures need a re-login; everything else is worth retrying."""
-    code = (body or {}).get("error", "")
-    if status in (400, 401) and code in ("invalid_grant", "invalid_request", ""):
+    err = (body or {}).get("error", "")
+    code = (err.get("code") or err.get("type") or "") if isinstance(err, dict) else err
+    if status in (400, 401) and code in TERMINAL_OAUTH_ERRORS:
         return "login expired"
     if status is None:
         return f"refresh unreachable: {(body or {}).get('error', '?')}"
@@ -788,7 +799,7 @@ def _refresh_claude(cfg: Path) -> str:
     status, body = _post(CLAUDE_TOKEN_URL, {
         "grant_type": "refresh_token",
         "refresh_token": token,
-        "client_id": CLAUDE_CLIENT_ID}, form=True, agent=CLAUDE_UA)
+        "client_id": CLAUDE_CLIENT_ID}, form=True, agent=USER_AGENT)
     if status != 200 or not body.get("access_token"):
         return _refresh_failure(status, body)
     oauth["accessToken"] = body["access_token"]
@@ -810,7 +821,7 @@ def _refresh_codex(cfg: Path) -> str:
         "client_id": CODEX_CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": token,
-        "scope": "openid profile email"}, form=False)
+        "scope": "openid profile email"}, form=False, agent=USER_AGENT)
     if status != 200 or not body.get("access_token"):
         return _refresh_failure(status, body)
     tokens["access_token"] = body["access_token"]
@@ -852,7 +863,7 @@ def _claude_usage(cfg: Path, retry: bool = True) -> str:
         "Accept": "application/json",
         # Undocumented endpoint: Claude Code's own beta header and agent string.
         "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": CLAUDE_UA,
+        "User-Agent": USER_AGENT,
     })
     if status != 200:
         return _http_note(status, body)
@@ -877,7 +888,7 @@ def _codex_usage(cfg: Path, retry: bool = True) -> str:
                 if why == "login expired" else why
         return _codex_usage(cfg, retry=False)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
-               "User-Agent": f"{PROG}"}
+               "User-Agent": USER_AGENT}
     if tokens.get("account_id"):
         headers["ChatGPT-Account-Id"] = tokens["account_id"]
     status, body = _get(CODEX_USAGE_URL, headers)

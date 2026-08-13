@@ -152,8 +152,12 @@ a browser fingerprint and a scripting language's HTTP stack very differently. Th
 also strips `http_proxy`/`CURL_*` from the child environment, so ambient settings cannot
 silently redirect a credential request.
 
-Both requests carry Claude Code's agent string. Anthropic sits behind Cloudflare, which
-rejects an unrecognised one with a 403 before the request reaches the API.
+Requests identify themselves as `cc-profile/<version>`. That matters more than it
+sounds: an absent agent string draws a Cloudflare 403, and *claiming to be Claude Code*
+draws a 429 from the token endpoint on the very first attempt — the official client
+evidently has its own enforcement there. A browser string is throttled too. An honest,
+non-browser name is served normally, which is also why CodexBar works: it never
+pretends to be anything else.
 
 Credentials are rewritten through a 0600 temp file and renamed into place, so an
 interrupted write cannot leave a half-file where the tokens were. A failed refresh — for
