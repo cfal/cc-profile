@@ -173,10 +173,10 @@ async fn claude(c: &Config, curl: &Path, cwd: &Path) -> Fetch {
         curl_string(&format!("Authorization: Bearer {token}"))?,
         env!("CARGO_PKG_VERSION")
     );
-    if c.mode == "custom" {
-        if let Some(p) = c.https.as_ref().or(c.http.as_ref()) {
-            opts += &format!("proxy = {}\n", curl_string(p)?);
-        }
+    if c.mode == "custom"
+        && let Some(p) = c.https.as_ref().or(c.http.as_ref())
+    {
+        opts += &format!("proxy = {}\n", curl_string(p)?);
     }
     let mut child = clean_command(curl, cwd, Some(c))
         .args([

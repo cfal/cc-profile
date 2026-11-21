@@ -16,7 +16,7 @@ fn current_is_per_provider_and_disable_does_not_elect_a_replacement() {
             .edit(a.id, &json!({"revision":a.revision,"enabled":false}))
             .is_err()
     );
-    let rev = config(&*f.store.db().unwrap(), a.id).unwrap().revision;
+    let rev = config(&f.store.db().unwrap(), a.id).unwrap().revision;
     f.store
         .edit(a.id, &json!({"revision":rev,"enabled":false}))
         .unwrap();
@@ -81,4 +81,27 @@ fn immutable_owners_and_keyset_pages_survive_new_insertions() {
             .execute("UPDATE sessions SET owner=?", [b.id])
             .is_err()
     );
+}
+
+#[test]
+fn explicit_resume_and_filtered_pages_have_indexed_access_at_scale() {
+    let f = Fixture::new();
+    let a = f.add("claude", "many");
+    let db = f.store.db().unwrap();
+    db.execute(
+        "WITH RECURSIVE nums(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM nums WHERE x<100000)
+        INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
+        SELECT 'claude',printf('60000000-0000-4000-8000-%012d',x),?,'assigned','/ws',0,0 FROM nums",
+        [a.id],
+    )
+    .unwrap();
+    for q in [
+        "SELECT owner FROM sessions WHERE tool='claude' AND native_id='60000000-0000-4000-8000-000000000002'",
+        "SELECT seq FROM sessions WHERE tool='claude' AND owner=1 AND seq<99000 ORDER BY seq DESC LIMIT 26",
+    ] {
+        let plan: String = db
+            .query_row(&format!("EXPLAIN QUERY PLAN {q}"), [], |r| r.get(3))
+            .unwrap();
+        assert!(plan.contains("SEARCH sessions USING"), "{plan}");
+    }
 }

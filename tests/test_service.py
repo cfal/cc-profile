@@ -58,19 +58,23 @@ class Service(unittest.TestCase):
             bin.chmod(0o700)
         curl = paths / "curl"
         curl.write_text("#!" + sys.executable + r'''
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 home = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
 config = sys.stdin.read()
 assert 'Bearer private-test-token' in config and not any('private-test-token' in a for a in sys.argv)
 assert 'https://api.anthropic.com/api/oauth/usage' in config
-(home / "quota-count").write_text("fetch\n")
-print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\n', end="")
+with (home / "quota-count").open("a") as stream: stream.write("fetch\n")
+while (home / "hold-fetch").exists(): time.sleep(.02)
+if (home / "throttled").exists():
+    print('{"error":"fixture"}\n429\n600',end="")
+else:
+    print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\n', end="")
 ''')
         curl.chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
                     "XDG_RUNTIME_DIR": str(self.root / "run"), "XDG_STATE_HOME": str(self.root / "state")}
         if getattr(self, "native", False):
-            dirs = [str(Path(shutil.which(t)).parent) for t in ("claude", "codex", "node")]
+            dirs = [str(Path(p).parent) for p in (shutil.which(t) for t in ("claude", "codex", "node")) if p]
             self.env["PATH"] = ":".join(dirs + ["/usr/bin", "/bin"])
             self.env["HTTP_PROXY"] = self.env["HTTPS_PROXY"] = "http://127.0.0.1:9"
             self.env["NO_PROXY"] = "localhost,127.0.0.1"
@@ -189,3 +193,33 @@ print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\
             self.assertEqual(data["queued"], 0)
             self.assertEqual((Path(c["home"]) / "quota-count").read_text(), "fetch\n")
         self.assertEqual(self.api("GET", "startups")[1]["items"], [])
+
+    def test_throttled_background_refresh_keeps_last_good_and_does_not_block_launch(self):
+        import sqlite3
+        c=self.account("claude","usage")
+        home=Path(c["home"])
+        (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
+        route="accounts/%d/quota/refresh" % c["id"]
+        self.api("POST",route,{})
+        def wait_status(want):
+            for _ in range(150):
+                q=self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
+                if not q["loading"] and q["status"]==want: return q
+                time.sleep(.02)
+            self.fail("quota did not reach "+want)
+        wait_status("fresh")
+        with sqlite3.connect(self.root/"state/cc-profile/router.sqlite3") as db:
+            db.execute("UPDATE quota_cache SET retry_ms=0")
+        (home/"throttled").touch()
+        hold=home/"hold-fetch"
+        hold.touch()
+        try:
+            self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+            self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
+            self.assertEqual(self.cli("claude","-p","independent").returncode,0)
+        finally:
+            hold.unlink()
+        q=wait_status("rate_limited")
+        self.assertTrue(q["stale"])
+        self.assertEqual(q["snapshot"]["windows"][0]["used_pct"],25)
+        self.assertGreaterEqual(q["retry_ms"]-q["attempt_ms"],600000)
