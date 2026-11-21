@@ -83,6 +83,63 @@ fn simultaneous_new_chats_split_evenly_and_survive_reopen() {
         a.id
     );
 }
+
+#[test]
+fn failed_audit_insert_rolls_back_the_assignment_and_cursor() {
+    let f = Fixture::new();
+    let b = build();
+    let a = f.add("claude", "a");
+    f.store.db().unwrap().execute_batch(
+        "CREATE TRIGGER broken_log BEFORE INSERT ON launches BEGIN SELECT RAISE(ABORT,'fixture'); END;"
+    ).unwrap();
+    let r = req(&f, "claude", &[], &b);
+    assert!(launch(&f.store, &b, &r).is_err());
+    assert!(
+        f.store.page(true, &Page::default()).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let db = f.store.db().unwrap();
+    assert_eq!(
+        db.query_row("SELECT cursor FROM tools WHERE tool='claude'", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    db.execute_batch("DROP TRIGGER broken_log").unwrap();
+    drop(db);
+    assert_eq!(launch(&f.store, &b, &r).unwrap()["config_id"], a.id);
+}
+
+#[test]
+fn a_retry_cannot_resurrect_a_disabled_plan_or_change_the_native_arguments() {
+    let f = Fixture::new();
+    let b = build();
+    let c = f.add("codex", "x");
+    f.store
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE configs SET observer_stamp=? WHERE id=?",
+            rusqlite::params![b.observer_stamp(&c), c.id],
+        )
+        .unwrap();
+    let r = req(&f, "codex", &["--no-daemon", "--", "--no-daemon"], &b);
+    assert_eq!(launch(&f.store, &b, &r).unwrap()["argv"], json!(r.argv));
+    f.store
+        .edit(c.id, &json!({"enabled":false,"revision":c.revision}))
+        .unwrap();
+    assert_eq!(launch(&f.store, &b, &r).unwrap_err().1, "stale_plan");
+    let mut denied = req(&f, "codex", &[], &b);
+    denied.override_names.push("CODEX_API_KEY".into());
+    assert!(
+        launch(&f.store, &b, &denied)
+            .unwrap_err()
+            .2
+            .contains("CODEX_API_KEY")
+    );
+}
 #[test]
 fn delayed_reverse_observations_bind_the_admitted_configs() {
     let f = Fixture::new();
@@ -136,5 +193,5 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
         o.native_id = Uuid::new_v4().to_string();
         assert_eq!(observe(&f.store, &o).unwrap_err().1, "observation_conflict");
     }
-    assert!(!config(&*f.store.db().unwrap(), a.id).unwrap().enabled);
+    assert!(!config(&f.store.db().unwrap(), a.id).unwrap().enabled);
 }

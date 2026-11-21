@@ -34,6 +34,8 @@ Stop any foreground instance first. Use a systemd user override for installation
 2. **Enable** the config to admit sessions. For maintenance, select **Set current** and run the native login command through `ccp`. Disable Current and it clears; no replacement is chosen. Changing Current never changes a session owner or advances rotation.
 3. For **Codex new chats**, click **Install observer**, review the `hooks.json` entry, then approve that exact hook in the native `/hooks` screen using the scoped bootstrap command shown in Accounts. Configure native proxy variables first if required for bootstrap. Return and click **Check observer**. No hook is installed for Claude. Resume of an already mapped Codex chat does not require the observer.
 
+For a workspace with local Codex settings, the router also checks whether the approved observer is enabled **in that workspace**. It asks the native metadata service rather than interpreting project TOML. Changed layers invalidate the check; an unverified result never admits a new chat on that config.
+
 **Compatibility links** are optional. Supply an existing profile root and the absolute outer link path (e.g. `~/.codex` expanded). Accounts previews the paths and flags drift. Set current atomically updates relative links; clearing it can leave the managed outer link dangling. A real file/directory or unrecognized link is not replaced. Managed launches always use the physical home, regardless of these links. For an unwrapped `claude` using the compatibility path, explicitly export `CLAUDE_CONFIG_DIR="$HOME/.claude"` so its global JSON is stored inside that directory.
 
 ## Launch and resume

@@ -32,6 +32,7 @@ pub struct App {
     pub port: u16,
     pub pairing: Pairing,
     pub quotas: super::quotas::Jobs,
+    pub workspace: super::workspace::Checks,
 }
 impl App {
     pub fn build(&self, t: &str) -> &Build {
@@ -73,9 +74,14 @@ pub fn private(s: Shared) -> Router {
             "/v1/launch",
             post(
                 |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
-                    blocking(move || routing::launch(&s.store, s.build(&r.tool), &r))
-                        .await
-                        .map(Json)
+                    let checks = super::workspace::check(&s, &r).await?;
+                    blocking(move || {
+                        routing::launch_in(&s.store, s.build(&r.tool), &r, &|c| {
+                            checks.as_ref().is_none_or(|v| v.ready(c, &s.codex))
+                        })
+                    })
+                    .await
+                    .map(Json)
                 },
             ),
         )

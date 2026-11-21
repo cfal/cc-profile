@@ -28,7 +28,9 @@ if sys.argv[1:2] == ["app-server"]:
         result = {}
         if r["method"] == "hooks/list":
             entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
-            result = {"data": [{"errors": [], "hooks": [dict(eventName="sessionStart", handlerType="command", command=entry["command"], enabled=True, matcher="startup", source="user", sourcePath=str(home / "hooks.json"),trustStatus="trusted",currentHash="test")]}]}
+            project = pathlib.Path(r["params"]["cwds"][0]) / ".codex/config.toml"
+            enabled = not project.exists() or project.read_text() != "hooks=false"
+            result = {"data": [{"errors": [], "hooks": [dict(eventName="sessionStart", handlerType="command", command=entry["command"], enabled=enabled, matcher="startup", source="user", sourcePath=str(home / "hooks.json"),trustStatus="trusted",currentHash="test")]}]}
         if r["method"] == "account/rateLimits/read":
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":0,"resetsAt":2000000000}}}
@@ -152,8 +154,16 @@ print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\
         self.assertEqual(out["argv"], ["--no-daemon", "resume", uid])
         self.assertNotEqual(self.cli("codex", "resume", "--last").returncode, 0)
         self.assertNotEqual(self.cli("codex", "resume", str(uuid.uuid4())).returncode, 0)
+        project=self.root/"workspace"
+        layer=project/".codex/config.toml"
+        layer.parent.mkdir(parents=True)
+        layer.write_text("hooks=false")
+        self.assertNotEqual(self.cli("codex","-C",str(project),"exec","first").returncode,0)
+        layer.write_text("hooks=true")
+        self.assertEqual(self.cli("codex","-C",str(project),"exec","first").returncode,0)
 
     def test_web_authenticates_reads_and_mutations(self):
+        self.assertEqual(self.api("GET","accounts?tool=codex",extra={"Cookie":""})[0],403)
         for extra in [{"Cookie":""}, {"Host":"example.invalid"}, {"Origin":"https://example.invalid"}, {"X-CSRF-Token":""}]:
             with self.subTest(extra=extra):
                 status, _, _ = self.api("POST", "accounts", {}, extra)

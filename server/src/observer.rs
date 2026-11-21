@@ -64,36 +64,37 @@ pub fn install(c: &Config) -> Result<()> {
     data.push(b'\n');
     paths::replace(&path, &data, prior.as_deref())
 }
-pub async fn check(store: &Store, build: &Build, c: &Config, cwd: &Path) -> Result<()> {
+pub async fn trusted(build: &Build, c: &Config, neutral: &Path, workspace: &Path) -> Result<bool> {
     target(c)?;
     if !build.supported {
         return Err(crate::native::unsupported_build());
     }
-    let before = build.observer_stamp(c);
-    let response = rpc::codex(build, c, cwd, "hooks/list", json!({"cwds":[cwd]})).await;
+    let v = rpc::codex(build, c, neutral, "hooks/list", json!({"cwds":[workspace]})).await?;
     let cmd = command()?;
     let path = c.home.join("hooks.json");
-    let valid = response.as_ref().is_ok_and(|v| {
-        v["data"].as_array().is_some_and(|a| {
-            a.iter().any(|entry| {
-                entry["errors"].as_array().is_some_and(Vec::is_empty)
-                    && entry["hooks"].as_array().is_some_and(|h| {
-                        h.iter().any(|h| {
-                            h["eventName"] == "sessionStart"
-                                && h["handlerType"] == "command"
-                                && h["command"] == cmd
-                                && h["enabled"] == true
-                                && h["matcher"] == "startup"
-                                && h["source"] == "user"
-                                && h["sourcePath"].as_str() == path.to_str()
-                                && h["trustStatus"] == "trusted"
-                                && h["currentHash"].as_str().is_some_and(|s| !s.is_empty())
-                        })
+    Ok(v["data"].as_array().is_some_and(|a| {
+        a.iter().any(|entry| {
+            entry["errors"].as_array().is_some_and(Vec::is_empty)
+                && entry["hooks"].as_array().is_some_and(|h| {
+                    h.iter().any(|h| {
+                        h["eventName"] == "sessionStart"
+                            && h["handlerType"] == "command"
+                            && h["command"] == cmd
+                            && h["enabled"] == true
+                            && h["matcher"] == "startup"
+                            && h["source"] == "user"
+                            && h["sourcePath"].as_str() == path.to_str()
+                            && h["trustStatus"] == "trusted"
+                            && h["currentHash"].as_str().is_some_and(|s| !s.is_empty())
                     })
-            })
+                })
         })
-    });
-    let valid = valid && before == build.observer_stamp(c);
+    }))
+}
+pub async fn check(store: &Store, build: &Build, c: &Config, cwd: &Path) -> Result<()> {
+    let before = build.observer_stamp(c);
+    let response = trusted(build, c, cwd, cwd).await;
+    let valid = response.as_ref().is_ok_and(|v| *v) && before == build.observer_stamp(c);
     store.write(|db| {
         if db.execute(
             "UPDATE configs SET observer_stamp=? WHERE id=? AND revision=?",

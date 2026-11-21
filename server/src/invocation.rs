@@ -87,6 +87,10 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     .canonicalize()
                     .map_err(|_| Error::bad("bad_cwd", "Working directory is unavailable."))?;
             }
+            (false, "--device-auth" | "--with-api-key")
+                if inline.is_none() && words.first() == Some(&("login", true)) => {}
+            (true, "--console" | "--claudeai" | "--sso" | "--text")
+                if inline.is_none() && words.first() == Some(&("auth", true)) => {}
             (
                 true,
                 "--model"

@@ -34,6 +34,14 @@ fn check_req(r: &Request) -> Result<()> {
         || r.cwd.to_str().is_none_or(|s| s.contains('\0'))
         || r.argv.len() > 4096
         || r.argv.iter().any(|s| s.contains('\0'))
+        || r.override_names.len() > 64
+        || r.override_names.iter().any(|s| {
+            s.is_empty()
+                || s.len() > 80
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
     {
         return Err(Error::bad("bad_request", "Invalid launch envelope."));
     }
@@ -99,7 +107,12 @@ fn plan(r: &Request, c: &Config, i: &Invocation, session: Option<&str>, reason: 
             unset.retain(|k| !set.contains_key(k));
         }
     }
-    if i.interactive_codex {
+    if i.interactive_codex
+        && !args
+            .iter()
+            .take_while(|s| s.as_str() != "--")
+            .any(|s| s == "--no-daemon")
+    {
         args.insert(0, "--no-daemon".into());
     }
     json!({"v":1,"request_id":r.request_id,"tool":r.tool,"config_id":c.id,"label":c.label,"decision":reason,"env_set":set,"env_unset":unset,"argv":args})
@@ -116,69 +129,224 @@ fn insert_binding(
     db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) VALUES(?,?,?,?,?,?,?)",params![t,id,c,e,ws,ms,ms])?;
     Ok(())
 }
-pub fn launch(store: &Store, build: &Build, r: &Request) -> Result<Value> {
-    check_req(r)?;
-    let fingerprint =
-        digest(serde_json::to_vec(r).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
-    let parsed = classify(&r.tool, &r.argv, &r.cwd);
-    store.write(|db|{
-        let prior=db.query_row("SELECT digest,state,reason,native_id,config_id,revision,created_ms FROM launches WHERE request_id=?",[&r.request_id],|s|
-            Ok((s.get::<_,Vec<u8>>(0)?,s.get::<_,String>(1)?,s.get::<_,String>(2)?,s.get::<_,Option<String>>(3)?,s.get::<_,Option<i64>>(4)?,s.get::<_,Option<i64>>(5)?,s.get::<_,i64>(6)?))).optional()?;
-        if let Some((d,state,reason,id,cid,revision,at))=prior{
-            if d!=fingerprint{return Ok(Err(Error::conflict("request_conflict","Request ID already used for different inputs.")))}
-            let c=cid.map(|id|config(db,id)).transpose()?;
-            if state=="denied"{return Ok(Err(denial(&reason,c.as_ref(),id.as_deref())))}
-            let i=parsed.as_ref().map_err(Clone::clone)?;
-            if !matches!(state.as_str(),"routed"|"pending")||now()-at>30_000||!build.unchanged()||!c.as_ref().is_some_and(|c|c.present()&&c.enabled&&Some(c.revision)==revision&&(i.intent!=Intent::New||build.ready(c)=="ready")){
-                return Ok(Err(Error::conflict("stale_plan","Prior plan is no longer valid. No second config was chosen.")))
+enum Selection {
+    Allow(Config, &'static str),
+    Refuse(Option<Config>, Error),
+}
+
+fn choose(
+    db: &Connection,
+    build: &Build,
+    req: &Request,
+    i: &Invocation,
+    workspace_ready: &dyn Fn(&Config) -> bool,
+) -> Result<Selection> {
+    let reject = |code| Selection::Refuse(None, denial(code, None, i.intent.id()));
+    if !req.override_names.is_empty() {
+        return Ok(Selection::Refuse(None, override_error(req)));
+    }
+    if let Err(e) = validate_binary(build, req.binary.as_deref()) {
+        return Ok(Selection::Refuse(None, e));
+    }
+    if !build.supported && i.intent != Intent::Misc {
+        return Ok(reject("unsupported_build"));
+    }
+    match &i.intent {
+        Intent::New => {
+            let all = configs(db, &req.tool)?;
+            if !all.iter().any(|c| c.enabled) {
+                return Ok(reject("no_enabled_config"));
             }
-            return Ok(Ok(plan(r,c.as_ref().unwrap(),i,id.as_deref(),&reason)))
+            let cursor: i64 =
+                db.query_row("SELECT cursor FROM tools WHERE tool=?", [&req.tool], |r| {
+                    r.get(0)
+                })?;
+            let next = all
+                .into_iter()
+                .filter(|c| c.enabled && build.ready(c) == "ready" && workspace_ready(c))
+                .min_by_key(|c| (c.id <= cursor, c.id));
+            Ok(next
+                .map(|c| Selection::Allow(c, "round_robin"))
+                .unwrap_or_else(|| reject("no_ready_config")))
         }
-        let ms=now();let mut selected=None;let mut id=None;let mut intent="unsupported";
-        let mut ws=r.cwd.as_path();let mut state="denied";
-        let choice=(||->Result<(Value,&str)>{
-            let i=parsed.as_ref().map_err(Clone::clone)?;ws=&i.workspace;intent=i.intent.name();
-            id=i.intent.id().map(str::to_owned);
-            if !r.override_names.is_empty(){return Err(denial("identity_override",None,None))}
-            validate_binary(build,r.binary.as_deref())?;
-            if !build.supported && i.intent!=Intent::Misc{return Err(crate::native::unsupported_build())}
-            let reason=match &i.intent{
-                Intent::New=>{
-                    let all=configs(db,&r.tool)?;
-                    if !all.iter().any(|c|c.enabled){return Err(denial("no_enabled_config",None,None))}
-                    let last:i64=db.query_row("SELECT cursor FROM tools WHERE tool=?",[&r.tool],|r|r.get(0))?;
-                    selected=all.into_iter().filter(|c|c.enabled&&build.ready(c)=="ready").min_by_key(|c|(c.id<=last,c.id));
-                    let c=selected.as_ref().ok_or_else(||denial("no_ready_config",None,None))?;
-                    if r.tool=="claude"{
-                        loop{let uid=Uuid::new_v4().to_string();
-                            if !db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='claude' AND native_id=?)",[&uid],|r|r.get::<_,bool>(0))?{
-                                insert_binding(db,&r.tool,&uid,c.id,&ws.to_string_lossy(),"assigned",ms)?;id=Some(uid);break;
-                            }}
-                    }
-                    db.execute("UPDATE tools SET cursor=? WHERE tool=?",params![c.id,r.tool])?;"round_robin"
-                }
-                Intent::Resume(uid)=>{
-                    let owner=db.query_row("SELECT owner FROM sessions WHERE tool=? AND native_id=?",params![r.tool,uid],|r|r.get(0)).optional()?
-                      .ok_or_else(||denial("unknown_session",None,Some(uid)))?;
-                    selected=Some(config(db,owner)?);let c=selected.as_ref().unwrap();
-                    if !c.enabled{return Err(denial("owner_disabled",Some(c),Some(uid)))}
-                    if !c.present(){return Err(denial("owner_missing",Some(c),Some(uid)))}
-                    db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=?",params![ms,r.tool,uid])?;"sticky"
-                }
-                Intent::Misc=>{
-                    selected=configs(db,&r.tool)?.into_iter().find(|c|c.current&&c.enabled);
-                    if !selected.as_ref().is_some_and(Config::present){return Err(denial("no_current",None,None))}"current"
-                }
+        Intent::Resume(uid) => {
+            let owner = db
+                .query_row(
+                    "SELECT owner FROM sessions WHERE tool=? AND native_id=?",
+                    params![req.tool, uid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(owner) = owner else {
+                return Ok(reject("unknown_session"));
             };
-            state=if i.intent==Intent::New && r.tool=="codex"{"pending"}else{"routed"};
-            Ok((plan(r,selected.as_ref().unwrap(),i,id.as_deref(),reason),reason))
-        })();
-        // Operational write failures must roll back cursor and owner together, not become admissions.
-        if let Err(e)=&choice {if matches!(e.1,"database"|"conflict"){return Err(e.clone())}}
-        let reason=choice.as_ref().map(|(_,reason)|*reason).unwrap_or_else(|e|e.1);
-        db.execute("INSERT INTO launches(request_id,tool,intent,state,reason,native_id,config_id,revision,workspace,digest,ticket_digest,created_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-          params![r.request_id,r.tool,intent,state,reason,id,selected.as_ref().map(|c|c.id),selected.as_ref().map(|c|c.revision),ws.to_string_lossy(),fingerprint,digest(&r.ticket),ms])?;
-        Ok(choice.map(|(v,_)|v))
+            let c = config(db, owner)?;
+            let problem = if !c.enabled {
+                Some("owner_disabled")
+            } else if !c.present() {
+                Some("owner_missing")
+            } else {
+                None
+            };
+            if let Some(code) = problem {
+                let error = denial(code, Some(&c), Some(uid));
+                return Ok(Selection::Refuse(Some(c), error));
+            }
+            Ok(Selection::Allow(c, "sticky"))
+        }
+        Intent::Misc => Ok(configs(db, &req.tool)?
+            .into_iter()
+            .find(|c| c.current && c.enabled && c.present())
+            .map(|c| Selection::Allow(c, "current"))
+            .unwrap_or_else(|| reject("no_current"))),
+    }
+}
+
+fn override_error(req: &Request) -> Error {
+    Error::bad(
+        "identity_override",
+        format!(
+            "Unset inherited authentication or storage overrides: {}.",
+            req.override_names.join(", ")
+        ),
+    )
+}
+
+fn assign_claude(db: &Connection, c: &Config, workspace: &str, ms: i64) -> Result<String> {
+    loop {
+        let id = Uuid::new_v4().to_string();
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='claude' AND native_id=?)",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            insert_binding(db, "claude", &id, c.id, workspace, "assigned", ms)?;
+            return Ok(id);
+        }
+    }
+}
+
+struct Prior {
+    digest: Vec<u8>,
+    state: String,
+    reason: String,
+    native_id: Option<String>,
+    config: Option<i64>,
+    revision: Option<i64>,
+    created: i64,
+}
+impl Prior {
+    fn find(db: &Connection, request_id: &str) -> Result<Option<Self>> {
+        Ok(db.query_row(
+            "SELECT digest,state,reason,native_id,config_id,revision,created_ms FROM launches WHERE request_id=?",
+            [request_id], |s| Ok(Self {
+                digest:s.get(0)?, state:s.get(1)?, reason:s.get(2)?, native_id:s.get(3)?,
+                config:s.get(4)?, revision:s.get(5)?, created:s.get(6)?,
+            })
+        ).optional()?)
+    }
+    fn replay(
+        self,
+        db: &Connection,
+        build: &Build,
+        req: &Request,
+        fingerprint: &[u8],
+        parsed: Result<&Invocation>,
+        workspace_ready: &dyn Fn(&Config) -> bool,
+    ) -> Result<Value> {
+        if self.digest != fingerprint {
+            return Err(Error::conflict(
+                "request_conflict",
+                "Request ID already used for different inputs.",
+            ));
+        }
+        let c = self.config.map(|id| config(db, id)).transpose()?;
+        if self.state == "denied" {
+            if self.reason == "identity_override" {
+                return Err(override_error(req));
+            }
+            return Err(denial(&self.reason, c.as_ref(), self.native_id.as_deref()));
+        }
+        let i = parsed?;
+        let valid = c.as_ref().is_some_and(|c| {
+            c.present()
+                && c.enabled
+                && Some(c.revision) == self.revision
+                && (i.intent != Intent::New || (build.ready(c) == "ready" && workspace_ready(c)))
+        });
+        if !valid
+            || !matches!(self.state.as_str(), "routed" | "pending")
+            || now() - self.created > 30_000
+            || !build.unchanged()
+        {
+            return Err(Error::conflict(
+                "stale_plan",
+                "Prior plan is no longer valid. No second config was chosen.",
+            ));
+        }
+        Ok(plan(
+            req,
+            c.as_ref().unwrap(),
+            i,
+            self.native_id.as_deref(),
+            &self.reason,
+        ))
+    }
+}
+
+pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Value> {
+    launch_in(store, build, req, &|_| true)
+}
+pub fn launch_in(
+    store: &Store,
+    build: &Build,
+    req: &Request,
+    workspace_ready: &dyn Fn(&Config) -> bool,
+) -> Result<Value> {
+    check_req(req)?;
+    let fingerprint =
+        digest(serde_json::to_vec(req).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
+    let parsed = classify(&req.tool, &req.argv, &req.cwd);
+    store.write(|db| {
+        if let Some(prior) = Prior::find(db, &req.request_id)? {
+            return Ok(prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone),workspace_ready));
+        }
+        let invocation = parsed.as_ref().ok();
+        let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
+        let intent = invocation.map(|i| i.intent.name()).unwrap_or("unsupported");
+        let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);
+        let selection = match &parsed {
+            Ok(i) => choose(db, build, req, i,workspace_ready)?,
+            Err(e) => Selection::Refuse(None, e.clone()),
+        };
+        let ms = now();
+        // Refusals commit an audit row. SQL errors propagate out of the transaction.
+        let (config_id, revision, state, reason, response) = match selection {
+            Selection::Refuse(c, e) => (c.as_ref().map(|c| c.id), c.as_ref().map(|c| c.revision), "denied", e.1, Err(e)),
+            Selection::Allow(c, reason) => {
+                let i = invocation.unwrap();
+                let mut state = "routed";
+                match &i.intent {
+                    Intent::New => {
+                        if req.tool == "claude" { id = Some(assign_claude(db, &c, &workspace, ms)?); }
+                        else { state = "pending"; }
+                        db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
+                    }
+                    Intent::Resume(uid) => {
+                        db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=?", params![ms, req.tool, uid])?;
+                    }
+                    Intent::Misc => {}
+                }
+                (Some(c.id), Some(c.revision), state, reason, Ok(plan(req, &c, i, id.as_deref(), reason)))
+            }
+        };
+        db.execute(
+            "INSERT INTO launches(request_id,tool,intent,state,reason,native_id,config_id,revision,workspace,digest,ticket_digest,created_ms)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![req.request_id,req.tool,intent,state,reason,id,config_id,revision,workspace,fingerprint,digest(&req.ticket),ms],
+        )?;
+        Ok(response)
     })?
 }
 #[derive(Deserialize)]
