@@ -256,7 +256,7 @@ impl Store {
         let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(3))?;
         db.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+            "PRAGMA foreign_keys=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let v: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -276,11 +276,20 @@ impl Store {
             tx.execute_batch(
                 "ALTER TABLE configs ADD COLUMN birth_ns INTEGER; PRAGMA user_version=3;",
             )?;
-        } else if v != 3 {
+        } else if !matches!(v, 3 | 4) {
             return Err(Error::unavailable(
                 "schema",
                 "Unsupported router database version.",
             ));
+        }
+        if v < 4 {
+            tx.execute_batch(include_str!("directory_identity.sql"))?;
+            if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
+                return Err(Error::unavailable(
+                    "schema",
+                    "Config migration found inconsistent references. Restore the database from backup.",
+                ));
+            }
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS installed_observers(config_id INTEGER PRIMARY KEY REFERENCES configs(id), command TEXT NOT NULL);")?;
         // Older databases know only the device and inode. Pin creation time once,
@@ -300,6 +309,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        db.execute_batch("PRAGMA foreign_keys=ON")?;
         Ok(Self {
             db: Mutex::new(db),
             state_dir: path.parent().unwrap_or(Path::new(".")).to_owned(),

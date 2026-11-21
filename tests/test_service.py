@@ -169,6 +169,13 @@ else:
         refused=self.cli("claude","--resume",uid)
         self.assertNotEqual(refused.returncode,0)
         self.assertIn("replaced",refused.stderr)
+        replacement=self.root/"new-path"
+        home.rename(replacement)
+        status,new,_=self.api("POST","accounts",{"tool":"claude","label":"replacement","home":str(replacement)})
+        self.assertEqual(status,201,new)
+        self.stop()
+        self.start()
+        self.assertNotEqual(self.cli("claude","--resume",uid).returncode,0)
 
     def test_observer_enters_via_private_socket_and_can_resume(self):
         c = self.account("codex", "cx")

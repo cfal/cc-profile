@@ -12,7 +12,7 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
     f.store
         .db()
         .unwrap()
-        .execute_batch("ALTER TABLE configs DROP COLUMN birth_ns; PRAGMA user_version=2;")
+        .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; PRAGMA user_version=2;")
         .unwrap();
     let open = || ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     let upgraded = open();
@@ -57,9 +57,50 @@ fn current_is_per_provider_and_disable_does_not_elect_a_replacement() {
     assert!(config(&db, c.id).unwrap().current);
 }
 #[test]
+fn a_reused_inode_at_a_new_path_can_be_registered_without_inheriting_the_owner() {
+    let f = Fixture::new();
+    let original = f.add("claude", "old");
+    let next = f.root.join("replacement");
+    std::fs::rename(&original.home, &next).unwrap();
+    f.store
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE configs SET birth_ns=birth_ns-1 WHERE id=?",
+            [original.id],
+        )
+        .unwrap();
+    let new = f
+        .store
+        .register(&json!({"tool":"claude","label":"new","home":next}))
+        .unwrap();
+    assert_ne!(new.id, original.id);
+    let reopened = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    let db = reopened.db().unwrap();
+    assert!(!config(&db, original.id).unwrap().present());
+    assert!(config(&db, new.id).unwrap().present());
+    assert_eq!(
+        db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn proxy_secrets_are_write_only_and_canonical_aliases_are_rejected() {
     let f = Fixture::new();
     let a = f.add("claude", "work");
+    f.store
+        .db()
+        .unwrap()
+        .execute("UPDATE configs SET home=home||'/' WHERE id=?", [a.id])
+        .unwrap();
+    let read = config(&f.store.db().unwrap(), a.id).unwrap();
+    assert!(read.present());
+    assert_eq!(
+        ccpd::native::env_patch(&read).0["CLAUDE_CONFIG_DIR"],
+        a.home.to_str().unwrap()
+    );
     let v=f.store.edit(a.id,&json!({"revision":a.revision,"proxy_mode":"custom","https_proxy":"http://user:secret@proxy:8080"})).unwrap();
     assert!(!v.public().to_string().contains("secret"));
     assert_eq!(v.public()["https_proxy"]["credentials_saved"], true);
