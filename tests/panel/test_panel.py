@@ -23,7 +23,8 @@ class Panel(unittest.TestCase):
         config.mkdir()
         with sync_playwright() as pw:
             browser = pw.chromium.launch(args=["--disable-dev-shm-usage"])
-            page = browser.new_page(viewport={"width": 1240, "height": 850}, permissions=["clipboard-read", "clipboard-write"])
+            context = browser.new_context(viewport={"width": 1240, "height": 850}, permissions=["clipboard-read", "clipboard-write"])
+            page = context.new_page()
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.route("**/api/v1/session",lambda route: route.fulfill(status=503,body=""),times=1)
@@ -45,7 +46,7 @@ class Panel(unittest.TestCase):
             service.session=session["session"]
             page.reload()
             expect(page.get_by_role("heading",name="Startups")).to_be_visible()
-            tab=page.context.new_page()
+            tab=context.new_page()
             tab.goto(f"http://127.0.0.1:{port}")
             expect(tab.get_by_role("heading",name="Sign in")).to_be_visible()
             tab.close()
