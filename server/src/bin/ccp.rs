@@ -194,8 +194,9 @@ async fn run() -> Result<ExitCode> {
         .map_err(|_| utf8())?;
     let binary = executable(tool);
     if let Some(path) = &binary {
-        let own = fs::metadata(env::current_exe()?)?;
-        if fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == (own.dev(), own.ino())) {
+        if let (Ok(own), Ok(native)) = (fs::metadata("/proc/self/exe"), fs::metadata(path))
+            && (native.dev(), native.ino()) == (own.dev(), own.ino())
+        {
             eprintln!("ccp: native command resolves to the launcher.");
             return Ok(ExitCode::from(2));
         }

@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler
 import json
 import os
 from pathlib import Path
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -69,6 +70,39 @@ sys.exit(17)
         self.assertEqual(json.loads(out),[["--","a b",""],"/physical/home","test-editor",None,"input\n",p.pid])
         self.assertEqual(p.returncode,17)
         self.assertEqual(err,"ccp: claude/work -> /physical/home\n")
+
+    def test_runtime_socket_does_not_require_a_home_directory(self):
+        self.env.pop("HOME")
+        p=self.run_ccp("claude")
+        self.assertEqual(p.returncode,17,p.stderr)
+
+    def test_empty_path_does_not_pick_a_program_in_the_working_directory(self):
+        self.env["PATH"]=""
+        p=self.run_ccp("claude")
+        self.assertIsNone(json.loads(self.calls[0][1])["binary"])
+        self.assertEqual((p.returncode,p.stdout),(1,""))
+
+    def test_launch_survives_replacement_of_the_launcher_binary(self):
+        retired=self.root/"retired"
+        shutil.copyfile(LAUNCHER,retired)
+        retired.chmod(0o700)
+        with retired.open("rb") as old:
+            retired.unlink()
+            p=subprocess.run([f"/proc/self/fd/{old.fileno()}","claude"],pass_fds=(old.fileno(),),
+                             env=self.env,cwd=self.root,input="",capture_output=True,text=True,timeout=8)
+        self.assertEqual(p.returncode,17,p.stderr)
+
+    @unittest.skipIf(os.geteuid()==0,"root may execute files with only the other execute bit")
+    def test_path_skips_a_file_not_executable_by_its_owner(self):
+        first=self.root/"first"
+        first.mkdir()
+        decoy=first/"claude"
+        decoy.touch(mode=0o700)
+        decoy.chmod(0o001)
+        self.env["PATH"]=os.pathsep.join([str(first),str(self.root)])
+        p=self.run_ccp("claude")
+        self.assertEqual(p.returncode,17,p.stderr)
+        self.assertEqual(json.loads(self.calls[0][1])["binary"],str(self.native))
 
     def test_invalid_plans_never_execute(self):
         for bad in [{"env_unset":["PATH"]},{"env_set":{"CLAUDE_CONFIG_DIR":"relative"}},

@@ -24,9 +24,11 @@ pub fn state_dir() -> Result<PathBuf> {
         .ok_or_else(Error::denied)
 }
 pub fn runtime_dir() -> Result<PathBuf> {
-    Ok(env_dir("XDG_RUNTIME_DIR")
-        .map(|p| p.join("cc-profile"))
-        .unwrap_or(state_dir()?.join("runtime")))
+    if let Some(dir) = env_dir("XDG_RUNTIME_DIR") {
+        Ok(dir.join("cc-profile"))
+    } else {
+        Ok(state_dir()?.join("runtime"))
+    }
 }
 pub fn private_dir(p: &Path) -> Result<()> {
     fs::DirBuilder::new()

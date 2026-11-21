@@ -4,8 +4,10 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
-    env, fs,
-    os::unix::fs::MetadataExt,
+    env,
+    ffi::CString,
+    fs,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -74,9 +76,19 @@ pub fn executable(name: &str) -> Option<PathBuf> {
     if p.components().count() > 1 {
         p.canonicalize().ok()
     } else {
-        env::split_paths(&env::var_os("PATH")?)
+        let search = env::var_os("PATH").unwrap_or_else(|| "/bin:/usr/bin".into());
+        if search.is_empty() {
+            return None;
+        }
+        env::split_paths(&search)
             .map(|p| p.join(name))
-            .find(|p| p.is_file() && fs::metadata(p).is_ok_and(|m| m.mode() & 0o111 != 0))
+            .find(|p| {
+                p.is_file()
+                    && CString::new(p.as_os_str().as_bytes()).is_ok_and(|path| unsafe {
+                        libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS)
+                            == 0
+                    })
+            })
             .and_then(|p| p.canonicalize().ok())
     }
 }
