@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextlib import closing
 import os
 import pty
 import select
@@ -35,7 +36,7 @@ class PanelPassword(unittest.TestCase):
         self.assertEqual(s.api("GET","session")[1],{"setup_required":False,"signed_in":False})
         self.assertEqual(s.api("POST","login",{"password":passwords[1-winner]})[0],401)
         self.assertEqual(s.api("POST","login",{"password":passwords[winner]})[0],200)
-        with sqlite3.connect(s.root/"state/cc-profile/router.sqlite3") as db:
+        with closing(sqlite3.connect(s.root/"state/cc-profile/router.sqlite3")) as db, db:
             verifier,=db.execute("SELECT verifier FROM panel_password").fetchone()
             self.assertTrue(verifier.startswith("$argon2id$"))
             self.assertNotIn(passwords[winner],verifier)
@@ -81,7 +82,7 @@ class PanelPassword(unittest.TestCase):
     def test_upgrading_an_existing_router_keeps_mappings_and_rejects_old_tokens(self):
         s=self.s
         s.stop()
-        with sqlite3.connect(s.root/"state/cc-profile/router.sqlite3") as db:
+        with closing(sqlite3.connect(s.root/"state/cc-profile/router.sqlite3")) as db, db:
             db.execute("DROP TABLE panel_password")
             db.execute("ALTER TABLE configs DROP COLUMN birth_ns")
             db.execute("PRAGMA user_version=1")

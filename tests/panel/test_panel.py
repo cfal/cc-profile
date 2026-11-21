@@ -1,4 +1,5 @@
 """Optional browser acceptance suite. See README for the isolated command."""
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -70,7 +71,7 @@ class Panel(unittest.TestCase):
             self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),390)
             page.set_viewport_size({"width":1240,"height":850})
             sql="INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) VALUES('claude',?,1,'assigned','/work',1,1)"
-            with sqlite3.connect(service.root/"state/cc-profile/router.sqlite3") as db:
+            with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
                 db.executemany(sql,[(str(uuid.uuid4()),) for _ in range(60)])
                 db.commit()
                 page.get_by_role("navigation").get_by_text("Sessions").click()

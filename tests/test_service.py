@@ -1,4 +1,5 @@
 """Exercise the release boundary: real HTTP, Unix socket, exec, hook, and SQLite."""
+from contextlib import closing
 import http.client
 import json
 import os
@@ -295,7 +296,7 @@ else:
                 time.sleep(.02)
             self.fail("quota did not reach "+want)
         wait_status("fresh")
-        with sqlite3.connect(self.root/"state/cc-profile/router.sqlite3") as db:
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
             db.execute("UPDATE quota_cache SET retry_ms=0")
         (home/"throttled").touch()
         hold=home/"hold-fetch"
