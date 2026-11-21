@@ -138,8 +138,7 @@ function go(view, obj = {}) {
 }
 const title = (s, ...actions) =>
   el("div", { class: "titleline" }, el("h1", {}, s), el("div", { class: "actions" }, actions));
-const field = (label, control, note) =>
-  el("label", { class: "field" }, label, control, note && el("small", {}, note));
+const field = (label, control) => el("label", { class: "field" }, label, control);
 function select(items, val, props = {}) {
   const box = el("select", props, ...items.map(([v, name]) => el("option", { value: v }, name)));
   box.value = val;
@@ -186,14 +185,14 @@ function passwordForm() {
   const input = (name) => el("input", {type: "password", name, required: true, maxlength: 1024,
     autocomplete: setup ? "new-password" : "current-password", spellcheck: "false"});
   const password = input("password"), confirm = setup ? input("confirmation") : null;
+  if (setup) password.setAttribute("aria-describedby", "password-hint");
   const submit = el("button", {type: "submit", class: "primary"}, setup ? "Set password" : "Sign in");
   const error = el("p", { class: "error", role: "alert", hidden: true });
   const f = el(
     "form",
     { class: "password-form" },
-    el("span", { class: "brandmark" }, icon("key-round")),
     el("h1", {}, heading),
-    setup && el("p", { class: "muted" }, "Use at least 4 characters."),
+    setup && el("p", { id: "password-hint", class: "muted" }, "Use at least 4 characters."),
     field(setup ? "New password" : "Password", password),
     confirm && field("Confirm password", confirm),
     error,
@@ -230,13 +229,12 @@ $(".logout").onclick = guard(async () => {
   sessionStorage.removeItem("ccp_session");
   passwordForm();
 });
-function empty(glyph, heading, description, action) {
+function empty(heading, description, action) {
   return el(
     "div",
     { class: "empty" },
-    icon(glyph),
     el("h2", {}, heading),
-    el("p", {}, description),
+    description && el("p", {}, description),
     action,
   );
 }
@@ -261,11 +259,11 @@ async function logs(view, params, ver) {
   }
   const chooser = (k, caption, rows, val) =>
     el("label", {}, caption, select(rows, val, { onchange: (e) => filter(k, e.target.value) }));
-  const byTool = chooser("tool", "Tool", [["", "All tools"], ...Object.entries(names)], t);
+  const byTool = chooser("tool", "Tool", [["", "All"], ...Object.entries(names)], t);
   const byConfig = chooser(
     "config_id",
     "Config",
-    [["", "All configs"], ...configs.map((c) => [c.id, names[c.tool] + " / " + c.label])],
+    [["", "All"], ...configs.map((c) => [c.id, t ? c.label : names[c.tool] + " / " + c.label])],
     id,
   );
   const search = el("input", {
@@ -281,7 +279,7 @@ async function logs(view, params, ver) {
     byTool,
     byConfig,
     !sessions &&
-      chooser("state", "Result", [["", "All results"], ...Object.entries(states)], result),
+      chooser("state", "Result", [["", "All"], ...Object.entries(states)], result),
     el("label", {}, icon("search"), search),
   );
   const table = el("table"),
@@ -345,6 +343,7 @@ async function logs(view, params, ver) {
       expanded = expanded === row.seq ? null : row.seq;
       await render();
     });
+    det.setAttribute("aria-expanded", String(expanded === row.seq));
     const cells = sessions
       ? [
           idLink,
@@ -371,32 +370,30 @@ async function logs(view, params, ver) {
               datum("Request ID", code(row.request_id)),
               datum("Workspace", code(row.workspace || "Unavailable")),
               datum("Session UUID", uid ? code(uid) : "Not recorded"),
-              datum("Decision", simple(row.reason)),
               row.observed_ms && datum("ID observed", fmt(row.observed_ms)),
             ),
           ),
         ),
       );
   }
-  const tools = el("div", { class: "tablewrap" }, table);
-  if (!page.items.length)
-    tools.append(
-      empty(
-        sessions ? "git-branch" : "activity",
-        sessions ? "No session mappings" : "No startup requests",
-        params.size
-          ? "No records match these filters."
-          : sessions
-            ? "Assigned and observed session IDs appear here."
-            : "No managed launches recorded.",
-        btn(params.size ? "Clear filters" : "Accounts", () => go(params.size ? view : "accounts")),
-      ),
-    );
-  const pager = el(
+  let records;
+  if (page.items.length) records = el("div", { class: "tablewrap" }, table);
+  else if (cursors.length > 1) records = empty("No records on this page");
+  else if (params.size) records = empty("No matching " + view, null, btn("Clear filters", () => go(view)));
+  else records = sessions
+    ? empty("No session mappings", "Session IDs appear here when assigned or observed.")
+    : empty("No startup requests", "Only launches through ccp appear here.");
+
+  main.replaceChildren(title(sessions ? "Sessions" : "Startups", ib("Refresh", "refresh-cw", render)),
+    filters, records);
+  const paginated = cursors.length > 1 || page.next_cursor != null;
+  if (!page.items.length && !paginated) return;
+  main.append(el(
     "div",
     { class: "pages" },
-    text(page.items.length + " records on this page", "caption"),
-    el(
+    text(page.items.length + (page.items.length === 1 ? " record" : " records") +
+      (paginated ? " on this page" : ""), "caption"),
+    paginated && el(
       "div",
       { class: "row" },
       ib(
@@ -421,13 +418,7 @@ async function logs(view, params, ver) {
         page.next_cursor == null,
       ),
     ),
-  );
-  main.replaceChildren(
-    title(sessions ? "Sessions" : "Startups", ib("Refresh", "refresh-cw", render)),
-    filters,
-    tools,
-    pager,
-  );
+  ));
 }
 function accountForm(t, c) {
   const label = el("input", { required: true, maxlength: 100, value: c?.label || "" }),
@@ -464,15 +455,18 @@ function accountForm(t, c) {
   const fields = el(
     "div",
     {},
+    (c?.http_proxy || c?.https_proxy) &&
+      el("p", { id: "proxy-hint", class: "caption" }, "Leave a proxy blank to keep its saved value."),
     ...[
       ["HTTP_PROXY", http, c?.http_proxy],
       ["HTTPS_PROXY", https, c?.https_proxy],
     ].map(([k, input, saved]) => {
       const clear = el("input", { type: "checkbox", "data-clear": k });
+      if (saved) input.setAttribute("aria-describedby", "proxy-hint");
       return el(
         "div",
         {},
-        field(k, input, saved ? "Blank keeps the saved value." : null),
+        field(k, input),
         saved && el("label", { class: "switch" }, clear, "Clear saved " + k),
       );
     }),
@@ -518,19 +512,14 @@ function compatibility(t, compat) {
   function show() {
     root.disabled = outer.disabled = !active.checked;
     root.required = outer.required = active.checked;
-    preview.textContent = active.checked
-      ? (outer.value || "Native path") +
-        " → " +
-        (root.value || "Profile root") +
-        "/" +
-        t +
-        "/current/config"
-      : "No compatibility projection.";
+    preview.hidden = !active.checked;
+    preview.textContent = (outer.value || "Native path") + " → " +
+      (root.value || "Profile root") + "/" + t + "/current/config";
   }
   active.onchange = root.oninput = outer.oninput = show;
   show();
   const fields = [
-    el("label", { class: "switch" }, active, "Project Current into native paths"),
+    el("label", { class: "switch" }, active, "Link native path to Current"),
     field("Existing profile root", root),
     field("Outer symlink path", outer),
     preview,
@@ -591,10 +580,12 @@ function capacity(c) {
     el(
       "p",
       { class: "caption" },
-      quotaText(q),
-      s?.plan ? " · " + s.plan : "",
-      q.success_ms ? " · Last checked " + fmt(q.success_ms) : "",
-      q.stale && q.status !== "fresh" ? " · " + (quotaStates[q.status] || "Unavailable") : "",
+      [
+        (!q.success_ms || q.loading || q.stale || q.status !== "fresh") && quotaText(q),
+        q.stale && q.status !== "fresh" && (quotaStates[q.status] || "Unavailable"),
+        s?.plan,
+        q.success_ms && "Last checked " + fmt(q.success_ms),
+      ].filter(Boolean).join(" · "),
     ),
   );
   for (const w of s?.windows || []) {
@@ -670,7 +661,7 @@ function signInPanel(c, initial, supported) {
   const section = el("section", {}, el("h3", {}, "Profile sign-in"));
   if (c.tool === "claude") {
     const cmd = "ccp login " + c.id;
-    section.append(el("p", {}, "Sign in to " + c.label + " with Claude Code in your terminal."),
+    section.append(el("p", {}, "Run in your terminal:"),
       el("div", {class: "row"}, code(cmd), ib("Copy Claude sign-in command", "copy", () => copy(cmd))));
     return section;
   }
@@ -714,7 +705,7 @@ function signInPanel(c, initial, supported) {
       const cancel = action("Cancel sign-in", endpoint + "/cancel", {attempt: v.attempt}, "x");
       cancel.disabled = v.state === "cancelling";
       body.replaceChildren(v.state === "waiting"
-        ? el("div", {}, el("p", {}, "Choose the ChatGPT account for " + c.label + " at OpenAI and enter this code."),
+        ? el("div", {}, el("p", {}, "Choose the ChatGPT account for " + c.label + " and enter this code."),
             el("div", {class: "row"}, code(v.code), ib("Copy device code", "copy", () => copy(v.code)),
               el("a", {href: v.url, target: "_blank", rel: "noopener noreferrer"}, "Open OpenAI verification")))
         : el("p", {}, v.state === "starting" ? "Requesting a device code…" : "Cancelling sign-in…"),
@@ -855,7 +846,8 @@ async function accounts(params, ver, enter) {
           el(
             "p",
             { class: "caption" },
-            "Run this command, approve the observer in /hooks, then exit Codex and select Check observer.",
+            "After installation, run this command. Approve the observer in ", code("/hooks"),
+            ", exit Codex, then select Check observer.",
           ),
           el(
             "div",
@@ -900,7 +892,7 @@ async function accounts(params, ver, enter) {
       el("p", {id: "routing-note", class: "caption"}, "Disabling this profile blocks new chats and resumes. Chats already running are not stopped."),
       el("dl", {class: "facts"},
         datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
-        datum("Current", current),
+        datum("Maintenance commands", current),
         datum("Directory", code(c.home)),
         datum("Proxy", c.proxy_mode === "custom"
           ? [c.http_proxy?.url, c.https_proxy?.url].filter(Boolean).join(" · ")
@@ -925,32 +917,22 @@ async function accounts(params, ver, enter) {
     c
       ? el("div", { class: "account-grid" }, list, detail)
       : empty(
-          "users",
           "No " + names[t] + " profiles",
           "Create a profile or use an existing directory.",
-          btn("Add profile", () => accountForm(t, null), "plus"),
         ),
     el(
       "div",
-      { class: "pages" },
+      { class: "actions compatibility" },
+      btn("Compatibility links", () => compatibility(t, compat), "link"),
       text(
-        compat
-          ? compat.needs_repair
-            ? "Compatibility links need repair"
-            : "Compatibility links configured"
-          : "Compatibility links off",
-        "caption",
+        compat ? (compat.needs_repair ? "Needs repair" : "Configured") : "Off",
+        compat?.needs_repair ? "warn" : "caption",
       ),
-      el(
-        "div",
-        { class: "row" },
-        compat?.needs_repair &&
-          btn("Repair", async () => {
-            await api("current/" + t + "/repair", "POST", {});
-            await render();
-          }),
-        btn("Compatibility links", () => compatibility(t, compat), "link"),
-      ),
+      compat?.needs_repair &&
+        btn("Repair", async () => {
+          await api("current/" + t + "/repair", "POST", {});
+          await render();
+        }),
     ),
   );
   if (enter) {
@@ -989,7 +971,7 @@ async function connect() {
   try {
     session = await api("session");
   } catch (err) {
-    main.replaceChildren(empty("route", "Could not load the panel", err.message,
+    main.replaceChildren(empty("Could not load the panel", err.message,
       btn("Retry", connect, "refresh-cw")));
     return;
   }

@@ -9,10 +9,7 @@
   --paper: #fff;
   --wash: #f6f8f7;
   --danger: #922f30;
-  font:
-    14px/1.48 system-ui,
-    -apple-system,
-    sans-serif;
+  font: 14px/1.5 Arial, sans-serif;
   color: var(--ink);
   background: var(--paper);
 }
@@ -52,7 +49,6 @@ button {
   color: var(--ink);
   border: 1px solid #cbd5cf;
   border-radius: 5px;
-  font-weight: 550;
 }
 button:disabled {
   opacity: 0.5;
@@ -115,10 +111,8 @@ main {
   align-items: center;
   gap: 10px;
   color: var(--ink);
-  font:
-    700 20px/1 ui-monospace,
-    SFMono-Regular,
-    monospace;
+  font-size: 20px;
+  font-weight: bold;
 }
 .brandmark {
   display: grid;
@@ -143,14 +137,12 @@ nav a {
   align-items: center;
   color: var(--muted);
   border-bottom: 2px solid transparent;
-  font-weight: 550;
   padding: 4px 1px 2px;
 }
 nav a[aria-current="page"] {
   color: var(--green);
   border-color: var(--green);
 }
-.right,
 .actions,
 .segments,
 .toolbar,
@@ -161,24 +153,8 @@ nav a[aria-current="page"] {
   align-items: center;
   gap: 9px;
 }
-.right {
-  margin-left: auto;
-}
-.local {
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.local i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #25845c;
-}
 .logout {
+  margin-left: auto;
   border: none;
   background: transparent;
   color: var(--muted);
@@ -200,9 +176,8 @@ h3 {
   margin: 0;
 }
 h1 {
-  font-size: 28px;
+  font-size: 24px;
   line-height: 1.2;
-  font-weight: 650;
   margin: 0;
 }
 h2 {
@@ -211,7 +186,6 @@ h2 {
 }
 h3 {
   font-size: 14px;
-  font-weight: 650;
 }
 .actions,
 .toolbar {
@@ -226,7 +200,13 @@ h3 {
   align-items: center;
   gap: 7px;
   color: var(--muted);
-  font-size: 12px;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 13px;
+}
+.toolbar select {
+  min-width: 0;
+  max-width: 32ch;
 }
 input,
 select {
@@ -243,20 +223,18 @@ input[type="search"] {
 }
 .mono,
 code,
-.uuid,
-.number {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+pre,
+.uuid {
+  font-family: monospace;
+  font-size: 13px;
   overflow-wrap: anywhere;
 }
 .muted,
-.caption,
-small {
+.caption {
   color: var(--muted);
 }
-.caption,
-small {
-  font-size: 12px;
+.caption {
+  font-size: 13px;
 }
 .segments {
   gap: 0;
@@ -283,14 +261,13 @@ small {
 table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13px;
   text-align: left;
 }
 th {
   background: var(--wash);
   color: var(--muted);
   font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
 }
 th,
@@ -318,6 +295,9 @@ td .icon {
   border: 0;
   background: transparent;
 }
+td [aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
 .uuid {
   color: var(--blue);
 }
@@ -336,12 +316,19 @@ td .icon {
   background: transparent;
   text-decoration: underline;
 }
+td .aslink:not(.uuid) {
+  max-width: 32ch;
+}
+td:nth-child(2),
+td .uuid {
+  white-space: nowrap;
+}
 .pill {
   display: inline-flex;
   align-items: center;
   border-radius: 4px;
   padding: 2px 7px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
   background: #edf1ef;
   color: #51615a;
@@ -367,18 +354,12 @@ td .icon {
 .pages {
   padding-top: 12px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .empty {
   text-align: center;
   padding: 46px 15px;
   color: var(--muted);
-}
-.empty svg {
-  width: 26px;
-  height: 26px;
-  margin: 0 auto 10px;
-  color: #648d78;
 }
 .empty h2 {
   font-size: 16px;
@@ -419,9 +400,10 @@ td .icon {
 }
 .account-row .row {
   flex-wrap: wrap;
+  max-width: 100%;
 }
 .account-row strong,
-.detail h2 {
+.detail {
   overflow-wrap: anywhere;
 }
 .detail {
@@ -451,7 +433,7 @@ td .icon {
 }
 .facts dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .facts dd {
   margin: 0;
@@ -484,7 +466,11 @@ td .icon {
   accent-color: var(--green);
 }
 .quota time {
-  font-size: 12px;
+  font-size: 13px;
+}
+.compatibility,
+.detail .row + .actions {
+  margin-top: 12px;
 }
 .wrap {
   overflow-wrap: anywhere;
@@ -535,14 +521,13 @@ dialog footer {
   display: grid;
   gap: 5px;
   margin-bottom: 12px;
-  font-weight: 550;
+  font-weight: bold;
 }
 .field input,
 .field select {
   width: 100%;
-  font-weight: 400;
 }
-.field small {
+.field > * {
   font-weight: 400;
 }
 dialog .error {
@@ -569,10 +554,6 @@ dialog .error {
 .password-form .field {
   margin-top: 22px;
 }
-.password-form .brandmark {
-  height: 40px;
-  width: 40px;
-}
 .details-cell {
   background: var(--wash);
   padding: 10px 20px;
@@ -585,8 +566,11 @@ dialog .error {
   .bar {
     gap: 15px;
     flex-wrap: wrap;
-    padding-top: 12px;
+    padding-top: 10px;
     min-height: 0;
+  }
+  .bar:has(nav[hidden]) {
+    padding-bottom: 10px;
   }
   nav {
     order: 3;
@@ -597,7 +581,7 @@ dialog .error {
     padding: 6px 0 9px;
   }
   .account-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .account-list {
     border-right: 0;
@@ -611,12 +595,6 @@ dialog .error {
   }
   main {
     padding-top: 22px;
-  }
-  h1 {
-    font-size: 24px;
-  }
-  .local {
-    font-size: 11px;
   }
   .tablewrap table {
     min-width: 630px;
