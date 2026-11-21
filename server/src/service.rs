@@ -192,7 +192,7 @@ async fn hooks(
     let c = config(&*s.store.db()?, id)?;
     revision(&body, &c)?;
     match op.as_str() {
-        "install" => blocking(move || observer::install(&c)).await?,
+        "install" => blocking(move || observer::install(&s.store, &c)).await?,
         "check" => observer::check(&s.store, &s.codex, &c, &s.state_dir).await?,
         _ => return Err(Error::missing("route", "Unknown observer action.")),
     }

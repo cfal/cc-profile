@@ -42,7 +42,10 @@ pub fn binary() -> Result<&'static Binary> {
         .map_err(Clone::clone)
 }
 pub fn spec() -> Result<Value> {
-    Ok(json!({"matcher":"startup","hooks":[{"type":"command","command":binary()?.command}]}))
+    Ok(entry(&binary()?.command))
+}
+fn entry(command: &str) -> Value {
+    json!({"matcher":"startup","hooks":[{"type":"command","command":command}]})
 }
 fn target(c: &Config) -> Result<()> {
     if c.tool != "codex" || !c.present() {
@@ -53,7 +56,17 @@ fn target(c: &Config) -> Result<()> {
     }
     Ok(())
 }
-pub fn install(c: &Config) -> Result<()> {
+pub fn install(store: &Store, c: &Config) -> Result<()> {
+    use rusqlite::{OptionalExtension, params};
+    let command = &binary()?.command;
+    store.write(|db| {
+        let old: Option<String> = db.query_row("SELECT command FROM installed_observers WHERE config_id=?", [c.id], |r| r.get(0)).optional()?;
+        merge(c, old.as_deref(), command)?;
+        db.execute("INSERT INTO installed_observers(config_id, command) VALUES(?,?) ON CONFLICT(config_id) DO UPDATE SET command=excluded.command",params![c.id,command])?;
+        Ok(())
+    })
+}
+fn merge(c: &Config, previous: Option<&str>, command: &str) -> Result<()> {
     target(c)?;
     let path = c.home.join("hooks.json");
     let bad = || {
@@ -84,11 +97,17 @@ pub fn install(c: &Config) -> Result<()> {
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .ok_or_else(bad)?;
-    let entry = spec()?;
-    if events.contains(&entry) {
+    let len = events.len();
+    if let Some(old) = previous.filter(|old| *old != command) {
+        let old = entry(old);
+        events.retain(|e| *e != old);
+    }
+    let entry = entry(command);
+    if !events.contains(&entry) {
+        events.push(entry);
+    } else if events.len() == len {
         return Ok(());
     }
-    events.push(entry);
     let mut data = serde_json::to_vec_pretty(&value).map_err(|_| bad())?;
     data.push(b'\n');
     paths::replace(&path, &data, prior.as_deref())

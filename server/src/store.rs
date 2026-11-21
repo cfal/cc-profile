@@ -282,6 +282,7 @@ impl Store {
                 "Unsupported router database version.",
             ));
         }
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS installed_observers(config_id INTEGER PRIMARY KEY REFERENCES configs(id), command TEXT NOT NULL);")?;
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
         let legacy = tx
