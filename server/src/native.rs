@@ -157,18 +157,25 @@ impl Build {
     }
     pub fn observer_stamp(&self, c: &Config) -> String {
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             self.fingerprint,
             stamp(&c.home.join("hooks.json")),
             stamp(&c.home.join("config.toml")),
-            stamp(&PathBuf::from("/etc/codex/requirements.toml")),
-            env::current_exe().map(|p| stamp(&p)).unwrap_or_default()
+            stamp(Path::new("/etc/codex/config.toml")),
+            stamp(Path::new("/etc/codex/managed_config.toml")),
+            stamp(Path::new("/etc/codex/requirements.toml")),
+            crate::observer::binary()
+                .map(|b| b.signature())
+                .unwrap_or_default()
         )
     }
     pub fn ready(&self, c: &Config) -> &'static str {
         if !c.present() {
             "path_missing"
-        } else if !self.unchanged() || !self.supported {
+        } else if !self.unchanged()
+            || !self.supported
+            || (c.tool == "codex" && !crate::observer::binary().is_ok_and(|b| b.unchanged()))
+        {
             "unsupported_build"
         } else if c.tool == "codex" && c.observer.as_ref() != Some(&self.observer_stamp(c)) {
             "observer_required"

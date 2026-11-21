@@ -78,6 +78,8 @@ class Native(unittest.TestCase):
             f.write("\n[hooks.state."+json.dumps(hook["key"])+"]\ntrusted_hash="+json.dumps(hook["currentHash"])+"\n")
         status,reply,_=self.s.api("POST",route+"check",data)
         self.assertEqual(status,200,reply)
+        with cfg.open("a") as f:
+            f.write("\n# A native settings edit must not require manual reapproval.\n")
         p=self.s.cli("codex","exec","--skip-git-repo-check","--json","Reply OK")
         events=[json.loads(line) for line in p.stdout.splitlines() if line.startswith("{")]
         actual=next((e["thread_id"] for e in events if e.get("type")=="thread.started"),None)

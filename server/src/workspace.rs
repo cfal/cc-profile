@@ -80,20 +80,27 @@ pub async fn check(s: &Shared, r: &Request) -> Result<Option<Eligibility>> {
         verified: HashMap::new(),
     };
     let (layer_stamp, linked) = &out.layers;
-    if layer_stamp.is_empty() && !*linked {
-        return Ok(Some(out));
-    }
+    let workspace_probe = !layer_stamp.is_empty() || *linked;
     let app = s.clone();
     let homes = blocking(move || configs(&*app.store.db()?, "codex")).await?;
     let mut probes = JoinSet::new();
     for c in homes
         .into_iter()
-        .filter(|c| c.enabled && s.codex.ready(c) == "ready")
+        .filter(|c| c.enabled && c.observer.is_some())
     {
+        let recheck_home = match s.codex.ready(&c) {
+            "ready" => false,
+            "observer_required" => true,
+            _ => continue,
+        };
+        if !workspace_probe && !recheck_home {
+            continue;
+        }
         let home_stamp = s.codex.observer_stamp(&c);
         let key = (cwd.clone(), c.id);
         let sig = format!("{home_stamp}|{layer_stamp}");
-        if !linked
+        if !recheck_home
+            && !linked
             && let Some((prior, ok)) = s.workspace.cache.lock().unwrap().get(&key)
             && prior == &sig
         {
@@ -107,6 +114,16 @@ pub async fn check(s: &Shared, r: &Request) -> Result<Option<Eligibility>> {
         let cacheable = !*linked;
         probes.spawn(async move {
             let _slot = a.workspace.slots.acquire().await.ok()?;
+            // Workspace trust is not proof of global trust. Recheck the home in
+            // a neutral directory before evaluating any project override.
+            if recheck_home {
+                observer::check(&a.store, &a.codex, &c, &a.state_dir)
+                    .await
+                    .ok()?;
+            }
+            if !workspace_probe {
+                return Some((c.id, home_stamp));
+            }
             let valid = observer::trusted(&a.codex, &c, &a.state_dir, &cwd)
                 .await
                 .ok()?;

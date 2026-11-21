@@ -5,15 +5,44 @@ use crate::{
     types::{Error, Result},
 };
 use serde_json::{Value, json};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
-pub fn command() -> Result<String> {
-    let p = std::env::current_exe()?.canonicalize()?;
-    let s = p.to_str().ok_or_else(Error::denied)?;
-    Ok(format!("'{}' observe", s.replace('\'', "'\"'\"'")))
+pub struct Binary {
+    path: PathBuf,
+    stamp: String,
+    command: String,
+}
+impl Binary {
+    fn from_path(path: PathBuf) -> Result<Self> {
+        let s = path.to_str().ok_or_else(Error::denied)?;
+        let command = format!("'{}' observe", s.replace('\'', "'\"'\"'"));
+        Ok(Self {
+            stamp: crate::native::stamp(&path),
+            path,
+            command,
+        })
+    }
+    pub fn unchanged(&self) -> bool {
+        !self.stamp.is_empty() && crate::native::stamp(&self.path) == self.stamp
+    }
+    pub fn signature(&self) -> String {
+        format!("{}:{}", self.command, self.stamp)
+    }
+}
+pub fn binary() -> Result<&'static Binary> {
+    // /proc/self/exe can point at an unlinked inode after an upgrade.
+    static BINARY: OnceLock<Result<Binary>> = OnceLock::new();
+    BINARY
+        .get_or_init(|| Binary::from_path(std::env::current_exe()?.canonicalize()?))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 pub fn spec() -> Result<Value> {
-    Ok(json!({"matcher":"startup","hooks":[{"type":"command","command":command()?}]}))
+    Ok(json!({"matcher":"startup","hooks":[{"type":"command","command":binary()?.command}]}))
 }
 fn target(c: &Config) -> Result<()> {
     if c.tool != "codex" || !c.present() {
@@ -66,11 +95,11 @@ pub fn install(c: &Config) -> Result<()> {
 }
 pub async fn trusted(build: &Build, c: &Config, neutral: &Path, workspace: &Path) -> Result<bool> {
     target(c)?;
-    if !build.supported {
+    let observer = binary()?;
+    if !build.supported || !observer.unchanged() {
         return Err(crate::native::unsupported_build());
     }
     let v = rpc::codex(build, c, neutral, "hooks/list", json!({"cwds":[workspace]})).await?;
-    let cmd = command()?;
     let path = c.home.join("hooks.json");
     Ok(v["data"].as_array().is_some_and(|a| {
         a.iter().any(|entry| {
@@ -79,7 +108,7 @@ pub async fn trusted(build: &Build, c: &Config, neutral: &Path, workspace: &Path
                     h.iter().any(|h| {
                         h["eventName"] == "sessionStart"
                             && h["handlerType"] == "command"
-                            && h["command"] == cmd
+                            && h["command"] == observer.command
                             && h["enabled"] == true
                             && h["matcher"] == "startup"
                             && h["source"] == "user"
@@ -94,11 +123,18 @@ pub async fn trusted(build: &Build, c: &Config, neutral: &Path, workspace: &Path
 pub async fn check(store: &Store, build: &Build, c: &Config, cwd: &Path) -> Result<()> {
     let before = build.observer_stamp(c);
     let response = trusted(build, c, cwd, cwd).await;
-    let valid = response.as_ref().is_ok_and(|v| *v) && before == build.observer_stamp(c);
+    // A stale stamp cannot admit launches. Keep it on a transient failure so
+    // that the next launch can retry checking a previously approved hook.
+    if c.observer.as_ref() != Some(&before)
+        && let Err(e) = &response
+    {
+        return Err(e.clone());
+    }
+    let valid = response.as_ref().is_ok_and(|v| *v);
     store.write(|db| {
-        if db.execute(
-            "UPDATE configs SET observer_stamp=? WHERE id=? AND revision=?",
-            rusqlite::params![valid.then_some(&before), c.id, c.revision],
+        if before != build.observer_stamp(c) || !c.present() || !binary()?.unchanged() || db.execute(
+            "UPDATE configs SET observer_stamp=?1 WHERE id=?2 AND revision=?3 AND (observer_stamp IS ?4 OR observer_stamp IS ?1)",
+            rusqlite::params![valid.then_some(&before), c.id, c.revision, c.observer],
         )? != 1
         {
             return Err(Error::conflict(

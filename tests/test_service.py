@@ -28,8 +28,12 @@ if sys.argv[1:2] == ["app-server"]:
         result = {}
         if r["method"] == "hooks/list":
             entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
-            project = pathlib.Path(r["params"]["cwds"][0]) / ".codex/config.toml"
+            workspace = r["params"]["cwds"][0]
+            with (home / "hook-checks").open("a") as f: f.write(workspace+"\n")
+            project = pathlib.Path(workspace) / ".codex/config.toml"
             enabled = not project.exists() or project.read_text() != "hooks=false"
+            config = home / "config.toml"
+            enabled &= not config.exists() or config.read_text() != "trust revoked"
             result = {"data": [{"errors": [], "hooks": [dict(eventName="sessionStart", handlerType="command", command=entry["command"], enabled=enabled, matcher="startup", source="user", sourcePath=str(home / "hooks.json"),trustStatus="trusted",currentHash="test")]}]}
         if r["method"] == "account/rateLimits/read":
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
@@ -78,7 +82,7 @@ else:
             self.env["PATH"] = ":".join(dirs + ["/usr/bin", "/bin"])
             self.env["HTTP_PROXY"] = self.env["HTTPS_PROXY"] = "http://127.0.0.1:9"
             self.env["NO_PROXY"] = "localhost,127.0.0.1"
-        self.p = subprocess.Popen([str(DAEMON), "--port", "0"], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
+        self.p = subprocess.Popen([str(getattr(self, "binary", DAEMON)), "--port", "0"], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop)
         line = self.p.stderr.readline()
         self.assertIn("http://127.0.0.1:", line, line)
@@ -173,6 +177,28 @@ else:
                 status, _, _ = self.api("POST", "accounts", {}, extra)
                 self.assertEqual(status, 403)
 
+    def test_codex_revalidates_existing_approval_after_native_config_changes(self):
+        c = self.account("codex", "approval")
+        route = "accounts/%d/observer/" % c["id"]
+        body = {"revision": c["revision"]}
+        home = Path(c["home"])
+        self.assertEqual(self.api("POST", route+"install", body)[0], 200)
+        self.assertNotEqual(self.cli("codex", "exec", "waiting").returncode, 0)
+        self.assertFalse((home/"hook-checks").exists())
+        self.assertEqual(self.api("POST", route+"check", body)[0], 200)
+        (home/"config.toml").write_text("ordinary native update")
+        p = self.cli("codex", "exec", "new chat")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        probes = (home/"hook-checks").read_text().splitlines()
+        neutral = str(self.root/"state/cc-profile")
+        self.assertEqual(probes.count(neutral), 2)
+        self.assertEqual(self.cli("codex", "exec", "another").returncode, 0)
+        self.assertEqual((home/"hook-checks").read_text().splitlines(), probes)
+        (home/"config.toml").write_text("trust revoked")
+        self.assertNotEqual(self.cli("codex", "exec", "no grant").returncode, 0)
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"], "no_ready_config")
+        self.assertEqual((home/"hook-checks").read_text().splitlines(), probes+[neutral])
+
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")
         cx = self.account("codex", "two")
@@ -242,3 +268,23 @@ else:
         self.assertFalse(wait_status("not_checked").get("snapshot"))
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         self.assertEqual((home/"quota-count").read_text(),"fetch\n"*2)
+
+
+@unittest.skipUnless(DAEMON.is_file(), "build ccpd first")
+class DaemonUpgrade(unittest.TestCase):
+    def test_unlinking_running_daemon_keeps_accounts_accessible(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = Service("test_web_authenticates_reads_and_mutations")
+            service.binary = Path(shutil.copy2(DAEMON, Path(d)/"ccpd"))
+            self.addCleanup(service.doCleanups)
+            service.setUp()
+            c = service.account("codex", "work")
+            for op in ("install", "check"):
+                status, _, _ = service.api("POST", "accounts/%d/observer/%s" % (c["id"],op), {"revision":c["revision"]})
+                self.assertEqual(status, 200)
+            service.binary.unlink()
+            for tool in ("claude","codex"):
+                status, data, _ = service.api("GET","accounts?tool="+tool)
+                self.assertEqual(status, 200)
+                self.assertIn(str(service.binary), data["observer"]["hooks"][0]["command"])
+            self.assertNotEqual(service.cli("codex","exec","missing observer").returncode, 0)

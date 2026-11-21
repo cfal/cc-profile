@@ -50,6 +50,7 @@ async fn run() -> Result<()> {
         }
     }
     let state = paths::state_dir()?;
+    ccpd::observer::binary()?;
     let runtime = paths::runtime_dir()?;
     paths::private_dir(&state)?;
     paths::private_dir(&runtime)?;
