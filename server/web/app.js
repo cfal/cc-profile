@@ -285,7 +285,7 @@ async function logs(view, params, ver) {
     head = el("tr"),
     body = el("tbody");
   for (const h of sessions
-    ? ["Session UUID", "Tool", "Bound config", "Evidence", "Last routed", "Resume"]
+    ? ["Session UUID", "Tool", "Bound config", "Workspace", "Evidence", "Last routed", "Resume"]
     : ["Time", "Tool", "Intent", "Config", "Decision", "Session UUID", "Details"])
     head.append(el("th", { scope: "col" }, h));
   table.append(el("thead", {}, head), body);
@@ -334,7 +334,8 @@ async function logs(view, params, ver) {
     );
     const commands = sessions
       ? ib("Copy resume command", "copy", () =>
-          copy("ccp " + row.tool + (row.tool === "claude" ? " --resume " : " resume ") + uid),
+          copy("cd " + shell(row.workspace) + " && ccp " + row.tool +
+            (row.tool === "claude" ? " --resume " : " resume ") + uid),
         )
       : null;
     const det = ib("Startup details", "chevron-right", async () => {
@@ -346,6 +347,7 @@ async function logs(view, params, ver) {
           idLink,
           alias,
           el("div", {}, cfg, row.enabled === false && el("div", {}, pill("Disabled"))),
+          el("span", {class:"wrap"}, row.workspace),
           pill(simple(row.evidence)),
           fmt(row.last_routed_ms),
           commands,
