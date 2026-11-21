@@ -39,6 +39,21 @@ fn unsupported() -> Error {
         "Unsupported or ambiguous invocation. Use a new chat, an exact resume UUID from Sessions, or a supported maintenance command.",
     )
 }
+fn claude_internal(word: &str) -> bool {
+    matches!(
+        word,
+        "project"
+            | "edit-hook"
+            | "edit-permission-rules"
+            | "edit-memory-settings"
+            | "edit-skill-overrides"
+            | "edit-sandbox-settings"
+            | "edit-chrome-settings"
+            | "design-login"
+            | "workspace-trust"
+            | "worktree-hook"
+    )
+}
 fn claude_command(word: &str) -> bool {
     matches!(
         word,
@@ -200,6 +215,9 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         }
     }
     let command = words.first().filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
+    if claude && words.first().is_some_and(|(word, _)| claude_internal(word)) {
+        return Err(unsupported());
+    }
     let sub = words.get(1).filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
     if claude
         && let Some(&(word, before_delimiter)) = words.first()
@@ -352,6 +370,34 @@ mod tests {
             ("codex", vec!["exec", "--ephemeral"]),
         ] {
             assert!(parse(t, &args).is_err(), "{args:?}")
+        }
+    }
+    #[test]
+    fn internal_claude_commands_never_allocate_chats() {
+        for name in [
+            "project",
+            "edit-hook",
+            "edit-permission-rules",
+            "edit-memory-settings",
+            "edit-skill-overrides",
+            "edit-sandbox-settings",
+            "edit-chrome-settings",
+            "design-login",
+            "workspace-trust",
+            "worktree-hook",
+        ] {
+            for args in [
+                vec![name],
+                vec![name, "--help"],
+                vec!["--", name],
+                vec!["-p", name],
+                vec!["-p", "--", name],
+            ] {
+                assert_eq!(
+                    parse("claude", &args).err().unwrap().1,
+                    "unsupported_invocation"
+                );
+            }
         }
     }
     #[test]
