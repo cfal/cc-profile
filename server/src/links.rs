@@ -32,6 +32,13 @@ fn safe_dir(p: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn existing_safe_dir(p: &Path) -> Result<bool> {
+    match fs::symlink_metadata(p) {
+        Ok(_) => safe_dir(p).map(|()| true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
 fn ensure(p: &Path) -> Result<()> {
     match fs::create_dir(p) {
         Ok(()) => {}
@@ -132,24 +139,27 @@ impl Projection {
     fn checked_sources(&self) -> Result<()> {
         safe_dir(self.root.parent().unwrap())?;
         safe_dir(self.outer.parent().unwrap())?;
-        match self.root.symlink_metadata() {
-            Ok(_) => safe_dir(&self.root),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        existing_safe_dir(&self.root).map(|_| ())
     }
     fn detach(&self) -> Result<()> {
-        self.checked_sources()?;
+        let has_outer = existing_safe_dir(self.outer.parent().unwrap())?;
+        let has_inner =
+            existing_safe_dir(self.root.parent().unwrap())? && existing_safe_dir(&self.root)?;
         let inner = self.root.join("current");
         let outer_target = self.outer_target();
         // Preflight both sources before removing either one.
-        if target(&self.outer)?.is_some_and(|p| p != outer_target)
-            || target(&inner)?.is_some_and(|p| Some(p) != self.prior)
+        if (has_outer && target(&self.outer)?.is_some_and(|p| p != outer_target))
+            || (has_inner && target(&inner)?.is_some_and(|p| Some(p) != self.prior))
         {
             return Err(occupied());
         }
-        link(&self.outer, None, Some(&outer_target))?;
-        link(&inner, None, self.prior.as_deref())
+        if has_outer {
+            link(&self.outer, None, Some(&outer_target))?;
+        }
+        if has_inner {
+            link(&inner, None, self.prior.as_deref())?;
+        }
+        Ok(())
     }
     fn view(&self) -> Value {
         let inner = self.root.join("current");

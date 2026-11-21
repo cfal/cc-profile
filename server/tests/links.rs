@@ -66,3 +66,35 @@ fn detaching_does_not_follow_a_replaced_parent_or_partially_remove_links() {
         true
     );
 }
+
+#[test]
+fn detaching_after_a_link_root_disappears_removes_only_the_remaining_link() {
+    let f = Fixture::new();
+    let c = f.add("codex", "work");
+    let root = f.root.join("profiles");
+    fs::create_dir(&root).unwrap();
+    let outer = f.root.join(".codex");
+    let state = f.root.join("state");
+    let rt = f.root.join("runtime");
+    f.store.current("codex", Some(c.id)).unwrap();
+    links::configure(
+        &f.store,
+        "codex",
+        root.to_str(),
+        outer.to_str(),
+        &state,
+        &rt,
+    )
+    .unwrap();
+    let moved = f.root.join("moved");
+    fs::rename(&root, &moved).unwrap();
+    links::configure(&f.store, "codex", None, None, &state, &rt).unwrap();
+    assert!(!outer.is_symlink());
+    assert!(!root.exists());
+    assert!(moved.join("codex/current").is_symlink());
+    assert!(
+        links::status(&f.store.db().unwrap(), "codex")
+            .unwrap()
+            .is_null()
+    );
+}
