@@ -87,7 +87,9 @@ Interactive Claude can dispatch a subcommand even after `--`. The router refuses
 
 ## Proxies and quota
 
-Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per directory), and **Direct**. These settings apply to native chat, sign-in, and observer setup/check processes. Inherit uses the caller's shell for CLI launches and the daemon environment for dashboard requests. A verification page opened in your browser uses the browser's own network settings. Custom writes matching upper/lowercase variables, removes ambient catch-all proxies and bypasses loopback. The CLI passes the settings to the child; ccpd is not an inference proxy. Refresh failures do not trigger a direct-egress fallback. Proxy URLs are visible as you type; saved credentials are not returned by the panel API or included in copied commands.
+Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per directory), and **Direct**. These settings apply to native chat, sign-in, and observer setup/check processes. Inherit uses the caller's shell for CLI launches and the daemon environment for dashboard requests. A verification page opened in your browser uses the browser's own network settings. Custom writes matching upper/lowercase variables, removes ambient catch-all proxies and bypasses loopback. The CLI passes the settings to the child; ccpd is not an inference proxy. Refresh failures do not trigger a direct-egress fallback.
+
+Proxy URLs are visible as you type. The panel API and copied commands omit saved credentials. The native process receives the full proxy URL, including credentials, in its environment. Tools that inherit that environment can read it too.
 
 Quota is **informational**. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
 
