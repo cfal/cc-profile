@@ -50,11 +50,12 @@ button {
   border: 1px solid #cbd5cf;
   border-radius: 5px;
 }
-button:disabled {
+button:disabled,
+button[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }
-button:hover:not(:disabled) {
+button:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--wash);
   border-color: #9baea3;
 }

@@ -564,40 +564,17 @@ function resetTime(ms) {
     ? text("Reset unknown")
     : el("time", { datetime: d.toISOString(), title: d.toLocaleString() }, fmt(ms) + " · " + delta);
 }
-function capacity(c, heading = "Quota & resets", refreshed = render) {
-  const q = c.quota,
-    s = q.snapshot;
-  const section = el(
-    "section",
-    {},
-    el(
-      "div",
-      { class: "sectionhead" },
-      el("h3", {}, heading),
-      ib(
-        "Refresh quota",
-        "refresh-cw",
-        async () => {
-          await api("accounts/" + c.id + "/quota/refresh", "POST", {});
-          await refreshed();
-        },
-        q.loading,
-      ),
-    ),
-    el(
-      "p",
-      { class: "caption" },
-      [
-        (!q.success_ms || q.loading || q.stale || q.status !== "fresh") && quotaText(q),
-        q.stale && q.status !== "fresh" && (quotaStates[q.status] || "Unavailable"),
-        s?.plan,
-        q.success_ms && "Last checked " + fmt(q.success_ms),
-      ].filter(Boolean).join(" · "),
-    ),
-  );
+function quotaDetails(q) {
+  const s = q.snapshot, details = document.createDocumentFragment();
+  details.append(el("p", {class: "caption"}, [
+    (!q.success_ms || q.loading || q.stale || q.status !== "fresh") && quotaText(q),
+    q.stale && q.status !== "fresh" && (quotaStates[q.status] || "Unavailable"),
+    s?.plan,
+    q.success_ms && "Last checked " + fmt(q.success_ms),
+  ].filter(Boolean).join(" · ")));
   for (const w of s?.windows || []) {
     const remaining = 100 - w.used_pct;
-    section.append(
+    details.append(
       el(
         "div",
         { class: "quota" },
@@ -612,9 +589,9 @@ function capacity(c, heading = "Quota & resets", refreshed = render) {
       ),
     );
   }
-  if (s && !s.windows.length) section.append(el("p", {}, "No windows reported"));
+  if (s && !s.windows.length) details.append(el("p", {}, "No windows reported"));
   if (s?.credits)
-    section.append(
+    details.append(
       el(
         "p",
         {},
@@ -626,7 +603,7 @@ function capacity(c, heading = "Quota & resets", refreshed = render) {
     );
   if (s?.spend_control) {
     const v = s.spend_control;
-    section.append(
+    details.append(
       el(
         "p",
         {},
@@ -641,17 +618,43 @@ function capacity(c, heading = "Quota & resets", refreshed = render) {
       ),
     );
   }
-  return section;
+  return details;
+}
+function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
+  const link = showProfile && el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id});
+  const badge = showProfile && pill("Disabled");
+  const button = ib("Refresh quota", "refresh-cw", async () => {
+    if (button.getAttribute("aria-disabled") === "true") return;
+    await api("accounts/" + c.id + "/quota/refresh", "POST", {});
+    await refreshed();
+  });
+  const body = el("div");
+  const section = el("section", {}, el("div", {class: "sectionhead"},
+    el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body);
+  function update(profile) {
+    if (link) {
+      const label = names[profile.tool] + " / " + profile.label;
+      if (link.textContent !== label) link.textContent = label;
+      badge.hidden = profile.enabled;
+    }
+    // Unlike native disabled, aria-disabled keeps keyboard focus while a check runs.
+    button.setAttribute("aria-disabled", String(!!profile.quota.loading));
+    body.replaceChildren(quotaDetails(profile.quota));
+  }
+  update(c);
+  return {section, update};
 }
 function openDashboard(profiles) {
   const grid = el("div", {class: "quota-grid"});
+  const cards = new Map();
+  const empty = el("p", {}, "No profiles yet. ", el("a", {href: "#accounts"}, "Add a profile"));
   const refresh = async (staleOnly) => {
     await api("quota/refresh", "POST", {stale_only: staleOnly});
     await read();
   };
   const all = ib("Refresh enabled quotas", "refresh-cw", () => refresh(false));
   const overview = el("section", {"aria-labelledby": "quota-heading"},
-    el("div", {class: "sectionhead"}, el("h2", {id: "quota-heading"}, "Account quotas"), all), grid);
+    el("div", {class: "sectionhead"}, el("h2", {id: "quota-heading"}, "Account quotas"), all), grid, empty);
   const log = el("section", {id: "startup-logs", "aria-labelledby": "logs-heading"});
   main.replaceChildren(title("Dashboard"), overview, log);
 
@@ -666,11 +669,23 @@ function openDashboard(profiles) {
   }
   function draw(rows) {
     all.disabled = !rows.some((c) => c.enabled);
-    grid.replaceChildren(...rows.map((c) => capacity(c, [
-      el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id}, names[c.tool] + " / " + c.label),
-      !c.enabled && pill("Disabled"),
-    ], read)));
-    if (!rows.length) grid.append(el("p", {}, "No profiles yet. ", el("a", {href: "#accounts"}, "Add a profile")));
+    empty.hidden = rows.length > 0;
+    const ids = new Set(rows.map((c) => c.id));
+    for (const [id, card] of cards) {
+      if (!ids.has(id)) {
+        card.section.remove();
+        cards.delete(id);
+      }
+    }
+    rows.forEach((c, i) => {
+      const card = cards.get(c.id);
+      if (card) card.update(c);
+      else {
+        const added = quotaCard(c, {showProfile: true, refreshed: read});
+        cards.set(c.id, added);
+        grid.insertBefore(added.section, grid.children[i] || null);
+      }
+    });
     if (rows.some((c) => c.quota.loading)) poll = setTimeout(guard(read), 1000);
   }
   draw(profiles);
@@ -937,7 +952,7 @@ async function accounts(params, ver, enter) {
         datum("Directory", code(c.home)),
         datum("Proxy", c.proxy_mode === "custom"
           ? [c.http_proxy?.url, c.https_proxy?.url].filter(Boolean).join(" · ")
-          : simple(c.proxy_mode)))), capacity(c));
+          : simple(c.proxy_mode)))), quotaCard(c).section);
   }
   const compat = data.compatibility;
   main.replaceChildren(

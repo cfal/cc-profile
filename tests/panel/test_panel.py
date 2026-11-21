@@ -244,6 +244,44 @@ class Panel(unittest.TestCase):
             expect(page).to_have_url(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={codex['id']}")
             expect(page.get_by_role("heading",name="Profile sign-in")).to_be_visible()
 
+    def test_quota_poll_keeps_card_controls_interactive(self):
+        service = self.start_service()
+        for tool in ["claude", "codex"]:
+            status, profile, _ = service.api("POST", "accounts", {"tool":tool, "label":"Work", "create":True})
+            self.assertEqual(status, 201)
+            if tool == "claude":
+                home = Path(profile["home"])
+        (home / ".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
+        hold = home / "hold-fetch"
+        hold.touch()
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width":1240, "height":850})
+            page.goto(f"http://127.0.0.1:{service.port}")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            overview = page.get_by_role("region", name="Account quotas")
+            card = overview.locator("section").filter(has=page.get_by_role("link", name="Claude / Work"))
+            refresh = card.get_by_role("button", name="Refresh quota")
+            posts = []
+            page.on("request", lambda req: posts.append(req.url) if req.method == "POST" and req.url.endswith("/quota/refresh") else None)
+            refresh.focus()
+            refresh.press("Enter")
+            expect(card).to_contain_text("Checking quota")
+            expect(refresh).to_be_disabled()
+            expect(refresh).to_be_focused()
+            page.keyboard.press("Enter")
+
+            link = overview.get_by_role("link", name="Codex / Work")
+            link.hover()
+            page.mouse.down()
+            hold.unlink()
+            expect(card).to_contain_text("75% left")
+            self.assertEqual(len(posts), 1)
+            expect(link).to_be_focused()
+            page.mouse.up()
+            expect(page.get_by_role("heading", name="Profile sign-in")).to_be_visible()
+            expect(page).to_have_url(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={profile['id']}")
+
     def test_log_filters_and_session_navigation(self):
         service = self.start_service()
         profile = service.account("claude", "Work" * 24)
