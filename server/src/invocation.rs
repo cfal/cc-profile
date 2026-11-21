@@ -174,19 +174,21 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     // Codex's hidden subcommands and aliases are also reserved prompt words.
     if matches!(
         (claude, command),
-        (true, Some("remote-control" | "rc"))
-            | (
-                false,
-                Some(
-                    "cloud"
-                        | "cloud-tasks"
-                        | "remote-control"
-                        | "tcp-tunnel"
-                        | "git-credential"
-                        | "execpolicy"
-                        | "responses-api-proxy"
-                )
+        (
+            true,
+            Some("remote-control" | "rc" | "remote" | "sync" | "bridge")
+        ) | (
+            false,
+            Some(
+                "cloud"
+                    | "cloud-tasks"
+                    | "remote-control"
+                    | "tcp-tunnel"
+                    | "git-credential"
+                    | "execpolicy"
+                    | "responses-api-proxy"
             )
+        )
     ) {
         return Err(unsupported());
     }
@@ -312,6 +314,9 @@ mod tests {
         for (tool, cmd) in [
             ("claude", "remote-control"),
             ("claude", "rc"),
+            ("claude", "remote"),
+            ("claude", "sync"),
+            ("claude", "bridge"),
             ("codex", "cloud-tasks"),
             ("codex", "cloud"),
             ("codex", "remote-control"),
@@ -376,6 +381,8 @@ mod tests {
             assert_eq!(parse(tool, &args).unwrap().intent, Intent::Misc);
         }
         assert!(parse("claude", &["--scope", "user"]).is_err());
+        // This Claude option prompts for the secret; it takes no inline value.
+        assert!(parse("claude", &["mcp", "add", "--client-secret=fixture"]).is_err());
         assert!(parse("codex", &["--url", "https://localhost"]).is_err());
     }
 }

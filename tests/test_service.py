@@ -170,6 +170,18 @@ else:
         layer.write_text("hooks=true")
         self.assertEqual(self.cli("codex","-C",str(project),"exec","first").returncode,0)
 
+    def test_claude_bridge_aliases_do_not_allocate_session_ids(self):
+        c=self.account("claude","work")
+        self.api("PUT","current/claude",{"config_id":c["id"]})
+        for cmd in ["remote-control","rc","remote","sync","bridge"]:
+            for flags in [[], ["--help"]]:
+                p=self.cli("claude",cmd,*flags)
+                self.assertNotEqual(p.returncode,0,cmd)
+                self.assertEqual(p.stdout,"")
+        self.assertFalse(self.api("GET","sessions")[1]["items"])
+        logs=self.api("GET","startups")[1]["items"]
+        self.assertEqual([row["reason"] for row in logs],["unsupported_invocation"]*10)
+
     def test_web_authenticates_reads_and_mutations(self):
         self.assertEqual(self.api("GET","accounts?tool=codex",extra={"Cookie":""})[0],403)
         for extra in [{"Cookie":""}, {"Host":"example.invalid"}, {"Origin":"https://example.invalid"}, {"X-CSRF-Token":""}]:
