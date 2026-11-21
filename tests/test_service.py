@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,7 +67,12 @@ print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\
         curl.chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
                     "XDG_RUNTIME_DIR": str(self.root / "run"), "XDG_STATE_HOME": str(self.root / "state")}
-        self.p = subprocess.Popen([str(DAEMON), "--port", "0"], env=self.env, stderr=subprocess.PIPE, text=True)
+        if getattr(self, "native", False):
+            dirs = [str(Path(shutil.which(t)).parent) for t in ("claude", "codex", "node")]
+            self.env["PATH"] = ":".join(dirs + ["/usr/bin", "/bin"])
+            self.env["HTTP_PROXY"] = self.env["HTTPS_PROXY"] = "http://127.0.0.1:9"
+            self.env["NO_PROXY"] = "localhost,127.0.0.1"
+        self.p = subprocess.Popen([str(DAEMON), "--port", "0"], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop)
         line = self.p.stderr.readline()
         self.assertIn("http://127.0.0.1:", line, line)
@@ -106,7 +112,8 @@ print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\
 
     def cli(self, *args):
         return subprocess.run([sys.executable, str(ROOT / "cc_profile.py"), *args], env=self.env,
-                              text=True, capture_output=True, timeout=8)
+                              text=True, capture_output=True, stdin=subprocess.DEVNULL, cwd=self.root,
+                              timeout=30 if getattr(self,"native",False) else 8)
 
     def test_claude_exec_stickiness_and_fail_closed_controls(self):
         c = self.account("claude", "one")
