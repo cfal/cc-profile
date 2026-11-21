@@ -52,8 +52,11 @@ button {
 }
 button:disabled,
 button[aria-disabled="true"] {
-  opacity: 0.5;
   cursor: not-allowed;
+}
+button:disabled,
+button[aria-disabled="true"] > svg {
+  opacity: 0.5;
 }
 button:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--wash);

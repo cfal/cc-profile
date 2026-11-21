@@ -623,10 +623,20 @@ function quotaDetails(q) {
 function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   const link = showProfile && el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id});
   const badge = showProfile && pill("Disabled");
+  let submitting = false, loading = false;
+  // Keep keyboard focus while either the request or the daemon's quota check is pending.
+  const syncButton = () => button.setAttribute("aria-disabled", String(submitting || loading));
   const button = ib("Refresh quota", "refresh-cw", async () => {
-    if (button.getAttribute("aria-disabled") === "true") return;
-    await api("accounts/" + c.id + "/quota/refresh", "POST", {});
-    await refreshed();
+    if (submitting || loading) return;
+    submitting = true;
+    syncButton();
+    try {
+      await api("accounts/" + c.id + "/quota/refresh", "POST", {});
+      await refreshed();
+    } finally {
+      submitting = false;
+      syncButton();
+    }
   });
   const body = el("div");
   const section = el("section", {}, el("div", {class: "sectionhead"},
@@ -637,8 +647,8 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
       if (link.textContent !== label) link.textContent = label;
       badge.hidden = profile.enabled;
     }
-    // Unlike native disabled, aria-disabled keeps keyboard focus while a check runs.
-    button.setAttribute("aria-disabled", String(!!profile.quota.loading));
+    loading = !!profile.quota.loading;
+    syncButton();
     body.replaceChildren(quotaDetails(profile.quota));
   }
   update(c);

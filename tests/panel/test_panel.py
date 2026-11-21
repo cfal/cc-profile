@@ -264,7 +264,22 @@ class Panel(unittest.TestCase):
             refresh = card.get_by_role("button", name="Refresh quota")
             posts = []
             page.on("request", lambda req: posts.append(req.url) if req.method == "POST" and req.url.endswith("/quota/refresh") else None)
+            held = []
+            endpoint = "**/accounts/*/quota/refresh"
+            page.route(endpoint, lambda route: held.append(route))
             refresh.focus()
+            with page.expect_request(lambda req: req.method == "POST" and req.url.endswith("/quota/refresh")):
+                refresh.press("Enter")
+            page.keyboard.press("Enter")
+            expect(refresh).to_be_disabled()
+            expect(refresh).to_be_focused()
+            expect(refresh).to_have_css("opacity", "1")
+            expect(refresh).to_have_css("outline-style", "solid")
+            self.assertEqual(len(held), 1)
+            held[0].fulfill(status=503, json={"message": "Refresh temporarily unavailable"})
+            expect(page.get_by_role("status")).to_contain_text("Refresh temporarily unavailable")
+            expect(refresh).to_be_enabled()
+            page.unroute(endpoint)
             refresh.press("Enter")
             expect(card).to_contain_text("Checking quota")
             expect(refresh).to_be_disabled()
@@ -276,7 +291,8 @@ class Panel(unittest.TestCase):
             page.mouse.down()
             hold.unlink()
             expect(card).to_contain_text("75% left")
-            self.assertEqual(len(posts), 1)
+            expect(refresh).to_be_enabled()
+            self.assertEqual(len(posts), 2)  # One failed request and one successful retry.
             expect(link).to_be_focused()
             page.mouse.up()
             expect(page.get_by_role("heading", name="Profile sign-in")).to_be_visible()
