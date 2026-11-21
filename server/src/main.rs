@@ -1,5 +1,6 @@
+mod auth;
 mod callback;
-mod pairing;
+mod password;
 mod quotas;
 mod service;
 mod workspace;
@@ -33,11 +34,12 @@ async fn run() -> Result<()> {
     let bad = || {
         Error::bad(
             "arguments",
-            "Usage: ccpd [--port PORT] [--claude-bin PATH] [--codex-bin PATH]",
+            "Usage: ccpd [--port PORT] [--claude-bin PATH] [--codex-bin PATH]\n       ccpd set-password",
         )
     };
     while let Some(k) = args.next() {
         match k.as_str() {
+            "set-password" if args.len() == 0 => return password::prompt(),
             "observe" => return callback::run().await,
             "-h" | "--help" => {
                 println!("{}", bad());
@@ -56,45 +58,12 @@ async fn run() -> Result<()> {
     paths::private_dir(&runtime)?;
     let _state_lock = paths::locked(&state.join("service.lock"))?;
     let _listener_lock = paths::locked(&runtime.join("listener.lock"))?;
-    let db = state.join("router.sqlite3");
-    let initialized = state.join("initialized");
-    if initialized.exists() && !db.exists() {
-        return Err(Error::unavailable(
-            "missing_database",
-            "Database is missing; restore it before starting ccpd.",
-        ));
-    }
-    if db.symlink_metadata().is_ok_and(|m| !m.is_file()) {
-        return Err(Error::denied());
-    }
-    let store = Store::open(&db)?;
+    let store = Store::open_user(&state)?;
     store.prune()?;
     for t in ["claude", "codex"] {
         if ccpd::links::repair(&store, t).is_err() {
             eprintln!("ccpd: {t} compatibility link needs repair (Accounts).");
         }
-    }
-    if !initialized.exists() {
-        paths::replace(&initialized, b"router schema 1\n", None)?;
-    }
-    let tokenfile = runtime.join("pairing-token");
-    let key = if tokenfile.try_exists()? {
-        let m = tokenfile.symlink_metadata()?;
-        use std::os::unix::fs::MetadataExt;
-        if !m.is_file() || m.uid() != paths::uid() || m.mode() & 0o077 != 0 {
-            return Err(Error::denied());
-        }
-        String::from_utf8(paths::read_limited(&tokenfile, 128)?)
-            .map_err(|_| Error::denied())?
-            .trim()
-            .to_owned()
-    } else {
-        let v = paths::secret()?;
-        paths::replace(&tokenfile, format!("{v}\n").as_bytes(), None)?;
-        v
-    };
-    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(Error::denied());
     }
     let tcp = TcpListener::bind(("127.0.0.1", port))
         .await
@@ -122,7 +91,7 @@ async fn run() -> Result<()> {
         codex,
         state_dir: state,
         port,
-        pairing: pairing::Pairing::new(&key),
+        auth: auth::Auth::new(),
         quotas: quotas::Jobs::new(),
         workspace: workspace::Checks::new(),
     });
@@ -135,9 +104,8 @@ async fn run() -> Result<()> {
         }
     });
     eprintln!(
-        "ccpd {}: http://127.0.0.1:{port}\npairing token file: {}\nlaunch socket: {}",
+        "ccpd {}: http://127.0.0.1:{port}\nlaunch socket: {}",
         env!("CARGO_PKG_VERSION"),
-        tokenfile.display(),
         sock.display()
     );
     tokio::select! {

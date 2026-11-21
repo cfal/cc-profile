@@ -1,0 +1,95 @@
+import concurrent.futures
+import os
+import pty
+import select
+import sqlite3
+import time
+import unittest
+
+import test_service
+
+
+@unittest.skipUnless(test_service.DAEMON.is_file(), "build ccpd first")
+class PanelPassword(unittest.TestCase):
+    def setUp(self):
+        self.s = test_service.Service("test_web_authenticates_reads_and_mutations")
+        self.s.claim = False
+        self.addCleanup(self.s.doCleanups)
+        self.s.setUp()
+
+    def test_only_one_first_visitor_can_claim_and_it_survives_restart(self):
+        s = self.s
+        self.assertEqual(s.api("GET","session")[1], {"setup_required":True,"csrf":None})
+        self.assertFalse((s.root/"run/cc-profile/pairing-token").exists())
+        self.assertNotEqual(s.api("POST","login",{"token":"obsolete token"})[0],200)
+        self.assertEqual(s.api("GET","accounts?tool=claude")[0],403)
+        self.assertEqual(s.api("POST","setup",{"password":"short"})[0],400)
+        self.assertEqual(s.api("POST","setup",{"password":s.password},{"Origin":"https://example.invalid"})[0],403)
+        passwords = [" first panel passphrase ", "second panel passphrase"]
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            results=list(pool.map(lambda p:s.api("POST","setup",{"password":p}),passwords))
+        self.assertCountEqual([r[0] for r in results],[200,409])
+        winner=next(i for i,r in enumerate(results) if r[0]==200)
+        s.stop()
+        s.start()
+        self.assertEqual(s.api("GET","session")[1],{"setup_required":False,"csrf":None})
+        self.assertEqual(s.api("POST","login",{"password":passwords[1-winner]})[0],401)
+        self.assertEqual(s.api("POST","login",{"password":passwords[winner]})[0],200)
+        with sqlite3.connect(s.root/"state/cc-profile/router.sqlite3") as db:
+            verifier,=db.execute("SELECT verifier FROM panel_password").fetchone()
+            self.assertTrue(verifier.startswith("$argon2id$"))
+            self.assertNotIn(passwords[winner],verifier)
+
+    def set_local(self,password,confirmation):
+        pid,fd=pty.fork()
+        if pid==0:
+            os.execve(str(test_service.DAEMON),["ccpd","set-password"],self.s.env)
+        try:
+            for prompt, value in [(b"characters): ",password),(b"Confirm new password: ",confirmation)]:
+                output=b""
+                deadline=time.monotonic()+8
+                while prompt not in output:
+                    self.assertTrue(select.select([fd],[],[],max(0,deadline-time.monotonic()))[0],"password prompt timed out")
+                    output+=os.read(fd,1024)
+                os.write(fd,(value+"\n").encode())
+            return os.waitstatus_to_exitcode(os.waitpid(pid,0)[1])
+        finally:
+            os.close(fd)
+
+    def test_terminal_setup_and_reset_revoke_existing_logins(self):
+        s=self.s
+        s.stop()
+        self.assertEqual(self.set_local(s.password,s.password),0)
+        s.start()
+        self.assertEqual(s.api("POST","setup",{"password":"overwriting passphrase"})[0],409)
+        _,data,headers=s.api("POST","login",{"password":s.password})
+        s.cookie,s.csrf=headers["set-cookie"].split(";")[0],data["csrf"]
+        self.assertEqual(s.api("GET","accounts?tool=claude")[0],200)
+        new="replacement passphrase"
+        self.assertNotEqual(self.set_local(new,"mismatch"),0)
+        self.assertEqual(s.api("GET","accounts?tool=claude")[0],200)
+        self.assertEqual(self.set_local(new,new),0)
+        self.assertEqual(s.api("GET","accounts?tool=claude")[0],403)
+        self.assertEqual(s.api("POST","login",{"password":s.password})[0],401)
+        self.assertEqual(s.api("POST","login",{"password":new})[0],200)
+
+    def test_upgrading_an_existing_router_keeps_mappings_and_rejects_old_tokens(self):
+        s=self.s
+        s.stop()
+        with sqlite3.connect(s.root/"state/cc-profile/router.sqlite3") as db:
+            db.execute("DROP TABLE panel_password")
+            db.execute("PRAGMA user_version=1")
+            db.execute("INSERT INTO configs(tool,label,home,dev,ino) VALUES('claude','existing','/missing',1,1)")
+            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) VALUES('claude','existing-mapping',1,'assigned','/work',1,1)")
+        s.start()
+        self.assertTrue(s.api("GET","session")[1]["setup_required"])
+        _,data,headers=s.api("POST","setup",{"password":s.password})
+        s.cookie,s.csrf=headers["set-cookie"].split(";")[0],data["csrf"]
+        self.assertEqual(s.api("GET","sessions")[1]["items"][0]["native_id"],"existing-mapping")
+
+    def test_password_guessing_is_throttled(self):
+        s=self.s
+        self.assertEqual(s.api("POST","setup",{"password":s.password})[0],200)
+        for _ in range(5):
+            self.assertEqual(s.api("POST","login",{"password":"incorrect password"})[0],401)
+        self.assertEqual(s.api("POST","login",{"password":s.password})[0],429)

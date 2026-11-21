@@ -559,17 +559,17 @@ dialog .error {
   color: white;
   z-index: 5;
 }
-.pair {
+.password-form {
   max-width: 390px;
   margin: 55px auto;
 }
-.pair h1 {
+.password-form h1 {
   margin: 18px 0 8px;
 }
-.pair .field {
+.password-form .field {
   margin-top: 22px;
 }
-.pair .brandmark {
+.password-form .brandmark {
   height: 40px;
   width: 40px;
 }

@@ -26,6 +26,7 @@ const quotaStates = {
   fresh: "Checked",
 };
 let csrf = "",
+  needsSetup = false,
   version = 0,
   cursors = [null],
   timer,
@@ -117,9 +118,9 @@ async function api(path, method = "GET", body) {
   if (!r.ok) {
     if (r.status === 403 && csrf) {
       csrf = "";
-      pair();
+      passwordForm();
     }
-    throw new Error(v.message || "Request failed (" + r.status + ").");
+    throw Object.assign(new Error(v.message || "Request failed (" + r.status + ")."), {code: v.error});
   }
   return v;
 }
@@ -173,46 +174,58 @@ const copy = async (s) => {
   await navigator.clipboard.writeText(s);
   notice("Copied to clipboard.");
 };
-function pair() {
+function passwordForm() {
   clearTimeout(timer);
   version++;
   $("nav").hidden = true;
   $(".logout").hidden = true;
-  const token = el("input", {
-    type: "password",
-    required: true,
-    autocomplete: "off",
-    spellcheck: "false",
-  });
+  if (dialog.open) dialog.close();
+  const setup = needsSetup, heading = setup ? "Set panel password" : "Sign in";
+  document.title = heading + " | cc-profile";
+  const input = (name) => el("input", {type: "password", name, required: true, maxlength: 1024,
+    autocomplete: setup ? "new-password" : "current-password", spellcheck: "false"});
+  const password = input("password"), confirm = setup ? input("confirmation") : null;
+  const submit = el("button", {type: "submit", class: "primary"}, setup ? "Set password" : "Sign in");
   const error = el("p", { class: "error", role: "alert", hidden: true });
   const f = el(
     "form",
-    { class: "pair" },
+    { class: "password-form" },
     el("span", { class: "brandmark" }, icon("key-round")),
-    el("h1", {}, "Pair this browser"),
-    el("p", { class: "muted" }, "Use the pairing token from the file printed by ccpd."),
-    field("Pairing token", token),
+    el("h1", {}, heading),
+    setup && el("p", { class: "muted" }, "Use at least 12 characters."),
+    field(setup ? "New password" : "Password", password),
+    confirm && field("Confirm password", confirm),
     error,
-    el("button", { type: "submit", class: "primary" }, "Connect"),
+    submit,
   );
   f.onsubmit = async (e) => {
     e.preventDefault();
+    submit.disabled = true;
     try {
-      csrf = (await api("login", "POST", { token: token.value.trim() })).csrf;
-      token.value = "";
+      if (confirm && password.value !== confirm.value) throw new Error("Passwords do not match.");
+      csrf = (await api(setup ? "setup" : "login", "POST", {password: password.value})).csrf;
+      password.value = "";
+      if (confirm) confirm.value = "";
+      needsSetup = false;
       lastView = "";
       await render();
     } catch (err) {
+      if (err.code === "password_set" || err.code === "setup_required") {
+        needsSetup = err.code === "setup_required";
+        passwordForm();
+        notice(err.message);
+        return;
+      }
       error.textContent = err.message;
       error.hidden = false;
-    }
+    } finally { submit.disabled = false; }
   };
   main.replaceChildren(f);
 }
 $(".logout").onclick = guard(async () => {
   await api("logout", "POST", {});
   csrf = "";
-  pair();
+  passwordForm();
 });
 function empty(glyph, heading, description, action) {
   return el(
@@ -848,7 +861,7 @@ async function accounts(params, ver, enter) {
 }
 async function render() {
   if (!csrf) {
-    pair();
+    passwordForm();
     return;
   }
   clearTimeout(timer);
@@ -872,9 +885,10 @@ window.onhashchange = guard(async () => {
   await render();
 });
 try {
-  csrf = (await api("session")).csrf;
+  const session = await api("session");
+  csrf = session.csrf || "";
+  needsSetup = session.setup_required;
   await render();
 } catch (err) {
-  if (!csrf) pair();
-  else notice(err.message);
+  notice(err.message);
 }

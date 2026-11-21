@@ -14,6 +14,7 @@ import test_service
 class Panel(unittest.TestCase):
     def test_accounts_pagination_and_mobile(self):
         service = test_service.Service("test_web_authenticates_reads_and_mutations")
+        service.claim = False
         self.addCleanup(service.doCleanups)
         service.setUp()
         port = service.port
@@ -25,9 +26,20 @@ class Panel(unittest.TestCase):
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(f"http://127.0.0.1:{port}")
-            page.get_by_label("Pairing token").fill((service.root / "run/cc-profile/pairing-token").read_text().strip())
-            page.get_by_role("button", name="Connect").click()
+            page.get_by_label("New password",exact=True).fill(service.password)
+            confirm=page.get_by_label("Confirm password",exact=True)
+            confirm.fill("different password")
+            page.get_by_role("button",name="Set password").click()
+            expect(page.get_by_role("alert")).to_have_text("Passwords do not match.")
+            confirm.fill(service.password)
+            page.get_by_role("button",name="Set password").click()
             expect(page.get_by_role("heading",name="Startups")).to_be_visible()
+            page.get_by_role("button",name="Sign out").click()
+            page.get_by_label("Password",exact=True).fill(service.password)
+            page.get_by_role("button",name="Sign in").click()
+            expect(page.get_by_role("heading",name="Startups")).to_be_visible()
+            _, session, headers = service.api("POST","login",{"password":service.password})
+            service.cookie,service.csrf=headers["set-cookie"].split(";")[0],session["csrf"]
             page.get_by_role("navigation").get_by_text("Accounts").click()
             page.get_by_role("button",name="Add config").first.click()
             page.get_by_label("Label",exact=True).fill("Work")

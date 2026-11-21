@@ -205,13 +205,36 @@ pub fn directory(path: &Path, state: &Path) -> Result<(u64, u64)> {
     Ok((m.dev(), m.ino()))
 }
 impl Store {
+    pub fn open_user(state: &Path) -> Result<Self> {
+        crate::paths::private_dir(state)?;
+        let path = state.join("router.sqlite3");
+        let marker = state.join("initialized");
+        if marker.try_exists()? && !path.try_exists()? {
+            return Err(Error::unavailable(
+                "missing_database",
+                "Database is missing; restore it before starting ccpd.",
+            ));
+        }
+        if path.symlink_metadata().is_ok_and(|m| !m.is_file()) {
+            return Err(Error::denied());
+        }
+        let store = Self::open(&path)?;
+        if !marker.try_exists()?
+            && let Err(e) = crate::paths::replace(&marker, b"router initialized\n", None)
+            && !marker.symlink_metadata().is_ok_and(|m| m.is_file())
+        {
+            return Err(e);
+        }
+        Ok(store)
+    }
     pub fn open(path: &Path) -> Result<Self> {
-        let db = Connection::open(path)?;
+        let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(3))?;
         db.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
-        let v: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let v: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v == 0 {
             if path.with_file_name("initialized").try_exists()? {
                 return Err(Error::unavailable(
@@ -219,15 +242,17 @@ impl Store {
                     "Previously initialized router database has no schema. Restore it from backup.",
                 ));
             }
-            db.execute_batch("BEGIN IMMEDIATE;")?;
-            db.execute_batch(include_str!("schema.sql"))?;
-            db.execute_batch("COMMIT;")?;
-        } else if v != 1 {
+            tx.execute_batch(include_str!("schema.sql"))?;
+        }
+        if v == 0 || v == 1 {
+            tx.execute_batch(include_str!("panel_password.sql"))?;
+        } else if v != 2 {
             return Err(Error::unavailable(
                 "schema",
                 "Unsupported router database version.",
             ));
         }
+        tx.commit()?;
         Ok(Self {
             db: Mutex::new(db),
             state_dir: path.parent().unwrap_or(Path::new(".")).to_owned(),

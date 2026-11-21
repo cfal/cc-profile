@@ -50,6 +50,7 @@ print(json.dumps({"argv":sys.argv[1:],"home":str(home),"id":native,"proxy":os.ge
 
 @unittest.skipUnless(DAEMON.is_file(), "build ccpd first")
 class Service(unittest.TestCase):
+    password = "a disposable panel password"
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="ccp-e2e-")
         self.addCleanup(tmp.cleanup)
@@ -82,17 +83,20 @@ else:
             self.env["PATH"] = ":".join(dirs + ["/usr/bin", "/bin"])
             self.env["HTTP_PROXY"] = self.env["HTTPS_PROXY"] = "http://127.0.0.1:9"
             self.env["NO_PROXY"] = "localhost,127.0.0.1"
-        self.p = subprocess.Popen([str(getattr(self, "binary", DAEMON)), "--port", "0"], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
+        self.start()
         self.addCleanup(self.stop)
+        self.cookie = self.csrf = ""
+        if getattr(self, "claim", True):
+            status, data, headers = self.api("POST", "setup", {"password": self.password})
+            self.assertEqual(status, 200, data)
+            self.cookie = headers["set-cookie"].split(";")[0]
+            self.csrf = data["csrf"]
+
+    def start(self):
+        self.p = subprocess.Popen([str(getattr(self, "binary", DAEMON)), "--port", "0"], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
         line = self.p.stderr.readline()
         self.assertIn("http://127.0.0.1:", line, line)
         self.port = int(re.search(r":(\d+)$", line.strip())[1])
-        self.cookie = self.csrf = ""
-        token = (self.root / "run/cc-profile/pairing-token").read_text().strip()
-        status, data, headers = self.api("POST", "login", {"token": token})
-        self.assertEqual(status, 200)
-        self.cookie = headers["set-cookie"].split(";")[0]
-        self.csrf = data["csrf"]
 
     def stop(self):
         self.p.terminate()
@@ -107,7 +111,9 @@ else:
         try:
             conn.request(method, "/api/v1/" + route, json.dumps(body) if body is not None else None, headers)
             r = conn.getresponse()
-            return r.status, json.loads(r.read() or "null"), {k.lower(): v for k, v in r.getheaders()}
+            body = r.read()
+            data = json.loads(body) if r.headers.get_content_type()=="application/json" else body.decode()
+            return r.status, data, {k.lower(): v for k, v in r.getheaders()}
         finally:
             conn.close()
 

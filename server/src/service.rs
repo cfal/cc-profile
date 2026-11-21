@@ -1,4 +1,4 @@
-use super::pairing::{self, Pairing};
+use super::auth::{self, Auth};
 use axum::{
     Json, Router,
     extract::{
@@ -30,7 +30,7 @@ pub struct App {
     pub codex: Build,
     pub state_dir: PathBuf,
     pub port: u16,
-    pub pairing: Pairing,
+    pub auth: Auth,
     pub quotas: super::quotas::Jobs,
     pub workspace: super::workspace::Checks,
 }
@@ -235,9 +235,10 @@ pub fn web(s: Shared) -> Router {
             "/LUCIDE-LICENSE.txt",
             get(|| async { include_str!("../web/LUCIDE-LICENSE.txt") }),
         )
-        .route("/api/v1/login", post(pairing::login))
-        .route("/api/v1/session", get(pairing::session))
-        .route("/api/v1/logout", post(pairing::logout))
+        .route("/api/v1/setup", post(auth::setup))
+        .route("/api/v1/login", post(auth::login))
+        .route("/api/v1/session", get(auth::session))
+        .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
         .route("/api/v1/accounts/{id}/observer/{op}", post(hooks))
@@ -275,6 +276,6 @@ pub fn web(s: Shared) -> Router {
             ),
         )
         .layer(DefaultBodyLimit::max(64 * 1024))
-        .layer(middleware::from_fn_with_state(s.clone(), pairing::guard))
+        .layer(middleware::from_fn_with_state(s.clone(), auth::guard))
         .with_state(s)
 }
