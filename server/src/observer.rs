@@ -122,15 +122,8 @@ pub async fn trusted(build: &Build, c: &Config, neutral: &Path, workspace: &Path
 }
 pub async fn check(store: &Store, build: &Build, c: &Config, cwd: &Path) -> Result<()> {
     let before = build.observer_stamp(c);
-    let response = trusted(build, c, cwd, cwd).await;
-    // A stale stamp cannot admit launches. Keep it on a transient failure so
-    // that the next launch can retry checking a previously approved hook.
-    if c.observer.as_ref() != Some(&before)
-        && let Err(e) = &response
-    {
-        return Err(e.clone());
-    }
-    let valid = response.as_ref().is_ok_and(|v| *v);
+    // Only a completed check can confirm or withdraw an approval.
+    let valid = trusted(build, c, cwd, cwd).await?;
     store.write(|db| {
         if before != build.observer_stamp(c) || !c.present() || !binary()?.unchanged() || db.execute(
             "UPDATE configs SET observer_stamp=?1 WHERE id=?2 AND revision=?3 AND (observer_stamp IS ?4 OR observer_stamp IS ?1)",
@@ -144,7 +137,6 @@ pub async fn check(store: &Store, build: &Build, c: &Config, cwd: &Path) -> Resu
         }
         Ok(())
     })?;
-    response?;
     if !valid {
         return Err(Error::conflict(
             "observer_required",

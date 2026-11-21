@@ -28,6 +28,7 @@ if sys.argv[1:2] == ["app-server"]:
         if "id" not in r: continue
         result = {}
         if r["method"] == "hooks/list":
+            if (home / "offline").exists(): sys.exit(1)
             entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
             workspace = r["params"]["cwds"][0]
             with (home / "hook-checks").open("a") as f: f.write(workspace+"\n")
@@ -219,6 +220,10 @@ else:
         self.assertNotEqual(self.cli("codex", "exec", "waiting").returncode, 0)
         self.assertFalse((home/"hook-checks").exists())
         self.assertEqual(self.api("POST", route+"check", body)[0], 200)
+        (home/"offline").touch()
+        self.assertEqual(self.api("POST", route+"check", body)[0], 503)
+        (home/"offline").unlink()
+        self.assertEqual(self.api("GET","accounts?tool=codex")[1]["items"][0]["readiness"],"ready")
         (home/"config.toml").write_text("ordinary native update")
         p = self.cli("codex", "exec", "new chat")
         self.assertEqual(p.returncode, 0, p.stderr)
