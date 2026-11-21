@@ -13,7 +13,10 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::{
+    sync::{Semaphore, watch},
+    task::JoinSet,
+};
 
 // The user hook may be trusted at home but disabled by a trusted project layer.
 // Ask Codex about those workspaces; never parse a project's config or run its hooks here.
@@ -36,12 +39,15 @@ fn layers(cwd: &Path) -> (String, bool) {
 }
 pub struct Checks {
     cache: Mutex<HashMap<(PathBuf, i64), (String, bool)>>,
+    running: Mutex<HashMap<ProbeKey, watch::Receiver<Option<bool>>>>,
     slots: Semaphore,
 }
+type ProbeKey = (PathBuf, i64, String);
 impl Checks {
     pub fn new() -> Self {
         Self {
             cache: Mutex::default(),
+            running: Mutex::default(),
             slots: Semaphore::new(2),
         }
     }
@@ -52,9 +58,10 @@ pub struct Eligibility {
     verified: HashMap<i64, String>,
 }
 impl Eligibility {
-    pub fn ready(&self, c: &Config, build: &Build) -> bool {
+    pub fn ready(&self, c: &Config, build: &Build, workspace: &Path) -> bool {
         let current = layers(&self.cwd);
-        current == self.layers
+        workspace == self.cwd
+            && current == self.layers
             && (current == (String::new(), false)
                 || self.verified.get(&c.id) == Some(&build.observer_stamp(c)))
     }
@@ -98,7 +105,7 @@ pub async fn check(s: &Shared, r: &Request) -> Result<Option<Eligibility>> {
         }
         let home_stamp = s.codex.observer_stamp(&c);
         let key = (cwd.clone(), c.id);
-        let sig = format!("{home_stamp}|{layer_stamp}");
+        let sig = format!("{home_stamp}|{}|{layer_stamp}", c.revision);
         if !recheck_home
             && !linked
             && let Some((prior, ok)) = s.workspace.cache.lock().unwrap().get(&key)
@@ -109,32 +116,55 @@ pub async fn check(s: &Shared, r: &Request) -> Result<Option<Eligibility>> {
             }
             continue;
         }
-        let a = s.clone();
-        let cwd = cwd.clone();
-        let cacheable = !*linked;
-        probes.spawn(async move {
-            let _slot = a.workspace.slots.acquire().await.ok()?;
-            // Workspace trust is not proof of global trust. Recheck the home in
-            // a neutral directory before evaluating any project override.
-            if recheck_home {
-                observer::check(&a.store, &a.codex, &c, &a.state_dir)
-                    .await
-                    .ok()?;
+        let flight = (cwd.clone(), c.id, sig.clone());
+        let mut running = s.workspace.running.lock().unwrap();
+        let mut wait = if let Some(rx) = running.get(&flight) {
+            rx.clone()
+        } else {
+            if running.len() >= 512 {
+                continue;
             }
-            if !workspace_probe {
-                return Some((c.id, home_stamp));
-            }
-            let valid = observer::trusted(&a.codex, &c, &a.state_dir, &cwd)
-                .await
-                .ok()?;
-            if cacheable {
-                let mut cache = a.workspace.cache.lock().unwrap();
-                if cache.len() >= 512 {
-                    cache.clear();
+            let (tx, rx) = watch::channel(None);
+            running.insert(flight.clone(), rx.clone());
+            let a = s.clone();
+            let cwd = cwd.clone();
+            let c = c.clone();
+            let cacheable = !*linked;
+            tokio::spawn(async move {
+                let result = async {
+                    let _slot = a.workspace.slots.acquire().await.ok()?;
+                    // Workspace trust is not proof of global trust. Recheck the home in
+                    // a neutral directory before evaluating any project override.
+                    if recheck_home {
+                        observer::check(&a.store, &a.codex, &c, Path::new("/"))
+                            .await
+                            .ok()?;
+                    }
+                    if !workspace_probe {
+                        return Some(true);
+                    }
+                    let valid = observer::trusted(&a.codex, &c, Path::new("/"), &cwd)
+                        .await
+                        .ok()?;
+                    if cacheable {
+                        let mut cache = a.workspace.cache.lock().unwrap();
+                        if cache.len() >= 512 {
+                            cache.clear();
+                        }
+                        cache.insert(key, (sig, valid));
+                    }
+                    Some(valid)
                 }
-                cache.insert(key, (sig, valid));
-            }
-            valid.then_some((c.id, home_stamp))
+                .await;
+                tx.send_replace(Some(result.unwrap_or(false)));
+                a.workspace.running.lock().unwrap().remove(&flight);
+            });
+            rx
+        };
+        drop(running);
+        probes.spawn(async move {
+            let valid = *wait.wait_for(Option::is_some).await.ok()?;
+            valid.unwrap_or(false).then_some((c.id, home_stamp))
         });
     }
     // Leave room for durable admission inside the client's five-second budget.

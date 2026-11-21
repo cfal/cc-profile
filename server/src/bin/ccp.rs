@@ -117,7 +117,12 @@ async fn request_plan(r: &Request) -> Result<Plan> {
         let (status, reply) = match timeout_at(deadline, socket::post("/v1/launch", &body)).await {
             Ok(Err(e)) if e.1 == "transport" && attempt == 0 => continue,
             Ok(result) => result?,
-            Err(_) => return Err(socket::unreachable()),
+            Err(_) => {
+                return Err(Error::unavailable(
+                    "timeout",
+                    "Timed out waiting for a routing decision. Nothing was executed.",
+                ));
+            }
         };
         if status != axum::http::StatusCode::OK {
             let msg = serde_json::from_slice::<Denial>(&reply)

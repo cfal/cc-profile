@@ -32,6 +32,9 @@ if sys.argv[1:2] == ["app-server"]:
             entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
             workspace = r["params"]["cwds"][0]
             with (home / "hook-checks").open("a") as f: f.write(workspace+"\n")
+            if (home/"delay").exists():
+                import time
+                time.sleep(float((home/"delay").read_text()))
             project = pathlib.Path(workspace) / ".codex/config.toml"
             enabled = not project.exists() or project.read_text() != "hooks=false"
             config = home / "config.toml"
@@ -228,7 +231,7 @@ else:
         p = self.cli("codex", "exec", "new chat")
         self.assertEqual(p.returncode, 0, p.stderr)
         probes = (home/"hook-checks").read_text().splitlines()
-        neutral = str(self.root/"state/cc-profile")
+        neutral = "/"
         self.assertEqual(probes.count(neutral), 2)
         self.assertEqual(self.cli("codex", "exec", "another").returncode, 0)
         self.assertEqual((home/"hook-checks").read_text().splitlines(), probes)
@@ -236,6 +239,24 @@ else:
         self.assertNotEqual(self.cli("codex", "exec", "no grant").returncode, 0)
         self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"], "no_ready_config")
         self.assertEqual((home/"hook-checks").read_text().splitlines(), probes+[neutral])
+
+    def test_slow_shared_workspace_check_finishes_after_its_callers_leave(self):
+        from concurrent.futures import ThreadPoolExecutor
+        c=self.account("codex","slow")
+        home=Path(c["home"])
+        route="accounts/%d/observer/"%c["id"]
+        for op in ["install","check"]:
+            self.assertEqual(self.api("POST",route+op,{"revision":c["revision"]})[0],200)
+        project=self.root/".codex"
+        project.mkdir()
+        (project/"config.toml").write_text("# workspace layer")
+        (home/"delay").write_text("3.5")
+        with ThreadPoolExecutor(3) as pool:
+            results=list(pool.map(lambda _:self.cli("codex","exec","hello"),range(3)))
+        self.assertTrue(all(p.returncode!=0 for p in results))
+        # The next caller can reuse the same unfinished check or its completed result.
+        self.assertEqual(self.cli("codex","exec","hello").returncode,0)
+        self.assertEqual((home/"hook-checks").read_text().splitlines(),["/",str(self.root)])
 
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")

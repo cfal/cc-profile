@@ -143,7 +143,7 @@ fn choose(
     build: &Build,
     req: &Request,
     i: &Invocation,
-    workspace_ready: &dyn Fn(&Config) -> bool,
+    workspace_ready: &dyn Fn(&Config, &std::path::Path) -> bool,
 ) -> Result<Selection> {
     let reject = |code| Selection::Refuse(None, denial(code, None, i.intent.id()));
     if !req.override_names.is_empty() {
@@ -167,7 +167,9 @@ fn choose(
                 })?;
             let next = all
                 .into_iter()
-                .filter(|c| c.enabled && build.ready(c) == "ready" && workspace_ready(c))
+                .filter(|c| {
+                    c.enabled && build.ready(c) == "ready" && workspace_ready(c, &i.workspace)
+                })
                 .min_by_key(|c| (c.id <= cursor, c.id));
             Ok(next
                 .map(|c| Selection::Allow(c, "round_robin"))
@@ -263,7 +265,7 @@ impl Prior {
         req: &Request,
         fingerprint: &[u8],
         parsed: Result<&Invocation>,
-        workspace_ready: &dyn Fn(&Config) -> bool,
+        workspace_ready: &dyn Fn(&Config, &std::path::Path) -> bool,
     ) -> Result<Plan> {
         if self.digest != fingerprint {
             return Err(Error::conflict(
@@ -283,7 +285,8 @@ impl Prior {
             c.present()
                 && c.enabled
                 && Some(c.revision) == self.revision
-                && (i.intent != Intent::New || (build.ready(c) == "ready" && workspace_ready(c)))
+                && (i.intent != Intent::New
+                    || (build.ready(c) == "ready" && workspace_ready(c, &i.workspace)))
         });
         if !valid
             || !matches!(self.state.as_str(), "routed" | "pending")
@@ -308,13 +311,13 @@ impl Prior {
 }
 
 pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
-    launch_in(store, build, req, &|_| true)
+    launch_in(store, build, req, &|_, _| true)
 }
 pub fn launch_in(
     store: &Store,
     build: &Build,
     req: &Request,
-    workspace_ready: &dyn Fn(&Config) -> bool,
+    workspace_ready: &dyn Fn(&Config, &std::path::Path) -> bool,
 ) -> Result<Plan> {
     check_req(req)?;
     let fingerprint =

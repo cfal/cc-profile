@@ -76,8 +76,9 @@ pub fn private(s: Shared) -> Router {
                 |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
                     let checks = super::workspace::check(&s, &r).await?;
                     blocking(move || {
-                        routing::launch_in(&s.store, s.build(&r.tool), &r, &|c| {
-                            checks.as_ref().is_none_or(|v| v.ready(c, &s.codex))
+                        routing::launch_in(&s.store, s.build(&r.tool), &r, &|c, ws| {
+                            c.tool != "codex"
+                                || checks.as_ref().is_some_and(|v| v.ready(c, &s.codex, ws))
                         })
                     })
                     .await
@@ -193,7 +194,7 @@ async fn hooks(
     revision(&body, &c)?;
     match op.as_str() {
         "install" => blocking(move || observer::install(&s.store, &c)).await?,
-        "check" => observer::check(&s.store, &s.codex, &c, &s.state_dir).await?,
+        "check" => observer::check(&s.store, &s.codex, &c, std::path::Path::new("/")).await?,
         _ => return Err(Error::missing("route", "Unknown observer action.")),
     }
     Ok(Json(json!({})))
