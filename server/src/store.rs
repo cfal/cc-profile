@@ -193,6 +193,8 @@ pub fn directory(path: &Path, state: &Path) -> Result<(u64, u64)> {
             .is_some_and(|h| Path::new(h).starts_with(path))
         || path.starts_with(state)
         || state.starts_with(path)
+        || crate::paths::runtime_dir()
+            .is_ok_and(|runtime| path.starts_with(&runtime) || runtime.starts_with(path))
     {
         return Err(bad());
     }
@@ -211,6 +213,12 @@ impl Store {
         )?;
         let v: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v == 0 {
+            if path.with_file_name("initialized").try_exists()? {
+                return Err(Error::unavailable(
+                    "missing_schema",
+                    "Previously initialized router database has no schema. Restore it from backup.",
+                ));
+            }
             db.execute_batch("BEGIN IMMEDIATE;")?;
             db.execute_batch(include_str!("schema.sql"))?;
             db.execute_batch("COMMIT;")?;

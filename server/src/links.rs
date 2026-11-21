@@ -219,13 +219,13 @@ pub fn configure(
                     }
                 }
             }
-            if let Some(old) = Projection::load(db, t)? {
-                if old.root.parent() != Some(rp) || old.outer != op {
-                    return Err(Error::conflict(
-                        "links_configured",
-                        "Disable the existing projection before changing its locations.",
-                    ));
-                }
+            if let Some(old) = Projection::load(db, t)?
+                && (old.root.parent() != Some(rp) || old.outer != op)
+            {
+                return Err(Error::conflict(
+                    "links_configured",
+                    "Disable the existing projection before changing its locations.",
+                ));
             }
             let expected = relative(parent, &rp.join(t).join("current/config"));
             if target(op)?.is_some_and(|v| v != expected) {

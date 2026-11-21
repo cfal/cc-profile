@@ -57,14 +57,13 @@ pub async fn login(State(s): State<Shared>, Json(v): Json<Login>) -> Result<Resp
     let csrf = paths::secret()?;
     let mut sessions = s.pairing.sessions.lock().map_err(|_| Error::denied())?;
     sessions.retain(|_, (_, until)| *until > now());
-    if sessions.len() >= 64 {
-        if let Some(k) = sessions
+    if sessions.len() >= 64
+        && let Some(k) = sessions
             .iter()
             .min_by_key(|(_, (_, until))| *until)
             .map(|(k, _)| k.clone())
-        {
-            sessions.remove(&k);
-        }
+    {
+        sessions.remove(&k);
     }
     sessions.insert(sid.clone(), (csrf.clone(), now() + 8 * 3_600_000));
     Ok((
@@ -106,16 +105,15 @@ pub async fn guard(State(s): State<Shared>, req: Request, next: Next) -> Respons
         }
         let path = req.uri().path();
         let mutation = !matches!(*req.method(), Method::GET | Method::HEAD);
-        if mutation {
-            if h.get(header::ORIGIN).and_then(|h| h.to_str().ok())
+        if mutation
+            && (h.get(header::ORIGIN).and_then(|h| h.to_str().ok())
                 != Some(&format!("http://{host}"))
                 || !h
                     .get(header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v.split(';').next() == Some("application/json"))
-            {
-                return Err(Error::denied());
-            }
+                    .is_some_and(|v| v.split(';').next() == Some("application/json")))
+        {
+            return Err(Error::denied());
         }
         if path.starts_with("/api/") && path != "/api/v1/login" {
             let csrf = s.pairing.csrf(h)?;

@@ -105,3 +105,13 @@ fn explicit_resume_and_filtered_pages_have_indexed_access_at_scale() {
         assert!(plan.contains("SEARCH sessions USING"), "{plan}");
     }
 }
+
+#[test]
+fn routing_state_cannot_be_registered_as_a_vendor_home() {
+    let f = Fixture::new();
+    assert!(
+        f.store
+            .register(&json!({"tool":"claude","label":"wrong","home":f.root.join("state")}))
+            .is_err()
+    );
+}
