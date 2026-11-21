@@ -61,8 +61,10 @@ ccp codex login status
 
 - **New:** deterministic round-robin per provider. Claude receives an unused UUID before exec. Codex chooses its own UUID; its trusted startup hook reports it, sometimes only on the first turn. A TUI closed at the idle prompt can leave a startup without a mapping.
 - **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native UUIDs are supported. A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.
-- **Miscellaneous:** help/version, supported auth, doctor, features and MCP management commands use Current. No Current means no launch.
+- **Miscellaneous:** help/version flags, supported auth, doctor, features and MCP management commands use Current. No Current means no launch. In Claude, `--help` shows help; the word `help` alone is a chat prompt.
 - **Unsupported:** `--last`, `claude -c`, pickers, forks, ephemeral/remote/background modes, hook or home overrides, and unrecognized routing-sensitive argument forms. The startup log is not the provider's activity history. In-app session navigation and raw native commands bypass the launcher.
+
+Interactive Claude can dispatch a subcommand even after `--`. The router refuses ambiguous forms such as `ccp claude -- rc` and `ccp claude -- update`; to use a verb as a literal one-word prompt, use print mode, e.g. `ccp claude -p -- rc`.
 
 **Startups** records decisions, denials, observed IDs and reported exec failures, not running processes or successful model calls. Full argv, prompts, tokens and proxy URLs are not logged. **Sessions** is a separately paginated, permanent mapping table, not a transcript viewer. Disabling a config blocks future admissions; it cannot revoke a delivered plan or stop an existing process.
 

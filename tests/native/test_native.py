@@ -18,6 +18,21 @@ class Native(unittest.TestCase):
         self.addCleanup(self.s.doCleanups)
         self.s.setUp()
 
+    def test_claude_delimiter_depends_on_print_mode(self):
+        c = self.s.account("claude","delimiter")
+        for verb in ("rc","remote-control"):
+            args=["--permission-mode","default","--",verb]
+            # This local validation error identifies dispatch without starting Remote Control.
+            native=subprocess.run(["claude","--session-id",str(uuid.uuid4()),*args],
+                                  env=dict(self.s.env,CLAUDE_CONFIG_DIR=c["home"]), cwd=self.s.root,
+                                  stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=5)
+            self.assertIn("before `remote-control` is not carried over",native.stderr)
+            self.assertNotEqual(self.s.cli("claude",*args).returncode,0)
+        self.assertFalse(self.s.api("GET","sessions")[1]["items"])
+        result=self.s.cli("claude","-p","--output-format","json","--","rc")
+        session=self.s.api("GET","sessions")[1]["items"][0]
+        self.assertEqual(json.loads(result.stdout)["session_id"],session["native_id"])
+
     def test_claude_assigns_exact_id_before_exec(self):
         c = self.s.account("claude","cc-home")
         self.s.cli("claude","-p","--output-format","json","Reply OK")

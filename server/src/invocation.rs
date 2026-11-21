@@ -39,6 +39,37 @@ fn unsupported() -> Error {
         "Unsupported or ambiguous invocation. Use a new chat, an exact resume UUID from Sessions, or a supported maintenance command.",
     )
 }
+fn claude_command(word: &str) -> bool {
+    matches!(
+        word,
+        "agents"
+            | "apply-project-settings"
+            | "attach"
+            | "auth"
+            | "auto-mode"
+            | "doctor"
+            | "gateway"
+            | "import"
+            | "import-conversations"
+            | "install"
+            | "kill"
+            | "logs"
+            | "mcp"
+            | "plugin"
+            | "plugins"
+            | "purge"
+            | "rc"
+            | "remote-control"
+            | "respawn"
+            | "rm"
+            | "sandbox"
+            | "setup-token"
+            | "stop"
+            | "ultrareview"
+            | "update"
+            | "upgrade"
+    )
+}
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let claude = tool == "claude";
     let mut workspace = cwd.to_owned();
@@ -46,6 +77,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut tail = false;
     let mut resume = None;
     let mut help = false;
+    let mut print_mode = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let arg = arg.as_str();
@@ -145,11 +177,10 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     return Err(unsupported());
                 }
             }
+            (true, "-p" | "--print") if inline.is_none() => print_mode = true,
             (
                 true,
-                "-p"
-                | "--print"
-                | "--verbose"
+                "--verbose"
                 | "--include-partial-messages"
                 | "--dangerously-skip-permissions"
                 | "--disable-slash-commands",
@@ -170,6 +201,16 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     }
     let command = words.first().filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
     let sub = words.get(1).filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
+    if claude
+        && let Some(&(word, before_delimiter)) = words.first()
+        && claude_command(word)
+    {
+        // Interactive Claude dispatches registered verbs even AFTER "--".
+        // Print mode accepts "-p -- <verb>" as a literal prompt instead.
+        if (!before_delimiter && !print_mode) || (before_delimiter && print_mode) {
+            return Err(unsupported());
+        }
+    }
     // Claude can dispatch Remote Control before handling ordinary help flags.
     // Codex's hidden subcommands and aliases are also reserved prompt words.
     if matches!(
@@ -197,19 +238,14 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         Intent::Misc
     } else if claude {
         match command {
-            Some("doctor" | "auth" | "help") if resume.is_none() => Intent::Misc,
+            Some("doctor" | "auth") if resume.is_none() => Intent::Misc,
             Some("mcp")
                 if resume.is_none()
                     && matches!(sub, Some("list" | "get" | "add" | "add-json" | "remove")) =>
             {
                 Intent::Misc
             }
-            Some(
-                "agents" | "attach" | "auto-mode" | "gateway" | "import" | "install" | "logs"
-                | "mcp" | "plugin" | "plugins" | "purge" | "respawn" | "rm" | "setup-token"
-                | "stop" | "kill" | "ultrareview" | "update" | "upgrade" | "auth" | "doctor"
-                | "help",
-            ) => return Err(unsupported()),
+            Some(word) if claude_command(word) => return Err(unsupported()),
             _ if words.len() <= 1 => resume.map(Intent::Resume).unwrap_or(Intent::New),
             _ => return Err(unsupported()),
         }
@@ -292,6 +328,10 @@ mod tests {
                 Intent::Resume(id.into()),
             ),
             ("codex", vec!["login", "status"], Intent::Misc),
+            ("claude", vec!["help"], Intent::New),
+            ("claude", vec!["--help"], Intent::Misc),
+            ("claude", vec!["auth", "status"], Intent::Misc),
+            ("claude", vec!["-p", "--", "doctor"], Intent::New),
         ] {
             assert_eq!(parse(t, &args).unwrap().intent, want)
         }
@@ -299,6 +339,11 @@ mod tests {
             ("claude", vec!["-r"]),
             ("claude", vec!["--session-id", id]),
             ("claude", vec!["--resume", id, "--fork-session"]),
+            ("claude", vec!["--", "update"]),
+            ("claude", vec!["--", "doctor"]),
+            ("claude", vec!["-p", "doctor"]),
+            ("claude", vec!["--", "sandbox"]),
+            ("claude", vec!["apply-project-settings"]),
             ("codex", vec!["resume", "--last"]),
             ("codex", vec!["exec", "resume", "name"]),
             ("codex", vec!["--disable", "hooks"]),
@@ -331,7 +376,13 @@ mod tests {
                     "unsupported_invocation"
                 );
             }
-            assert_eq!(parse(tool, &["--", cmd]).unwrap().intent, Intent::New);
+            let delimited = parse(tool, &["--", cmd]);
+            if tool == "claude" && matches!(cmd, "rc" | "remote-control") {
+                assert_eq!(delimited.err().unwrap().1, "unsupported_invocation");
+                assert_eq!(parse(tool, &["-p", "--", cmd]).unwrap().intent, Intent::New);
+            } else {
+                assert_eq!(delimited.unwrap().intent, Intent::New);
+            }
             assert_eq!(parse(tool, &["--model", cmd]).unwrap().intent, Intent::New);
         }
     }

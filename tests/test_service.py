@@ -178,9 +178,12 @@ else:
                 p=self.cli("claude",cmd,*flags)
                 self.assertNotEqual(p.returncode,0,cmd)
                 self.assertEqual(p.stdout,"")
+        for command in ["rc","remote-control","update","doctor"]:
+            p=self.cli("claude","--",command)
+            self.assertNotEqual(p.returncode,0,command)
         self.assertFalse(self.api("GET","sessions")[1]["items"])
         logs=self.api("GET","startups")[1]["items"]
-        self.assertEqual([row["reason"] for row in logs],["unsupported_invocation"]*10)
+        self.assertEqual([row["reason"] for row in logs],["unsupported_invocation"]*14)
 
     def test_web_authenticates_reads_and_mutations(self):
         self.assertEqual(self.api("GET","accounts?tool=codex",extra={"Cookie":""})[0],403)
