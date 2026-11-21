@@ -310,4 +310,14 @@ fn a_replaced_current_home_is_not_an_unset_current_or_a_new_registration() {
         .unwrap_err();
     assert_eq!(err.1, "home_replaced");
     assert!(err.2.contains("new path"));
+    for suffix in ["/", "//", "/./"] {
+        let alias = format!("{}{suffix}", c.home.display());
+        assert_eq!(
+            f.store
+                .register(&json!({"tool":"codex","label":"new","home":alias}))
+                .unwrap_err()
+                .1,
+            "home_replaced"
+        );
+    }
 }

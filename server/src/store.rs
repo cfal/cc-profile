@@ -42,7 +42,7 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
         id: r.get(0)?,
         tool: r.get(1)?,
         label: r.get(2)?,
-        home: PathBuf::from(r.get::<_, String>(3)?),
+        home: Path::new(&r.get::<_, String>(3)?).components().collect(),
         dev: r.get::<_, i64>(4)? as u64,
         ino: r.get::<_, i64>(5)? as u64,
         enabled: r.get(6)?,
@@ -319,16 +319,19 @@ impl Store {
     pub fn register(&self, v: &Value) -> Result<Config> {
         let t = tool(v["tool"].as_str().unwrap_or(""))?;
         let name = label(v["label"].as_str().unwrap_or(""))?;
-        let home = v["home"].as_str().unwrap_or("");
-        let (dev, ino, birth) = directory(Path::new(home), &self.state_dir)?;
+        let requested = Path::new(v["home"].as_str().unwrap_or(""));
+        let (dev, ino, birth) = directory(requested, &self.state_dir)?;
+        let normalized: PathBuf = requested.components().collect();
+        let home = normalized.to_str().ok_or_else(Error::denied)?;
         let (mode, http, https) = proxy_settings(v, None)?;
         self.write(|db|{
-            let replaced: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM configs WHERE home=? AND (dev!=? OR ino!=? OR birth_ns IS NOT ?))",
-                params![home,dev as i64,ino as i64,birth], |r| r.get(0))?;
-            if replaced {
+            // Legacy rows may contain a trailing slash or an embedded "./".
+            for tool in ["claude","codex"] {
+                if configs(db,tool)?.iter().any(|c| c.home == normalized && (c.dev != dev || c.ino != ino || c.birth_ns != Some(birth))) {
                 return Err(Error::conflict("home_replaced", format!(
                     "{home} belongs to a registered config whose directory was replaced. Restore the original directory to keep its sessions, or move the replacement to a new path and register it there."
                 )));
+                }
             }
             db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns,proxy_mode,http_proxy,https_proxy) VALUES(?,?,?,?,?,?,?,?,?)",
                 params![t,name,home,dev as i64,ino as i64,birth,mode,http,https])?;
