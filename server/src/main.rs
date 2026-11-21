@@ -1,5 +1,6 @@
 mod callback;
 mod pairing;
+mod quotas;
 mod service;
 use ccpd::{
     native::Build,
@@ -120,6 +121,7 @@ async fn run() -> Result<()> {
         state_dir: state,
         port,
         pairing: pairing::Pairing::new(&key),
+        quotas: quotas::Jobs::new(),
     });
     let a = app.clone();
     tokio::spawn(async move {

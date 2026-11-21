@@ -3,6 +3,7 @@ pub mod links;
 pub mod native;
 pub mod observer;
 pub mod paths;
+pub mod quota;
 pub mod routing;
 pub mod rpc;
 pub mod store;

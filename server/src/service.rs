@@ -31,6 +31,7 @@ pub struct App {
     pub state_dir: PathBuf,
     pub port: u16,
     pub pairing: Pairing,
+    pub quotas: super::quotas::Jobs,
 }
 impl App {
     pub fn build(&self, t: &str) -> &Build {
@@ -110,7 +111,7 @@ pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Resul
     blocking(move||{
         let db=s.store.db()?;let build=s.build(tool(&q.tool)?);
         let mut items=Vec::new();
-        for c in configs(&db,&q.tool)?{let mut v=c.public();v["readiness"]=build.ready(&c).into();items.push(v);}
+        for c in configs(&db,&q.tool)?{let mut v=c.public();v["readiness"]=build.ready(&c).into();v["quota"]=super::quotas::view(&db,&c,&s.quotas)?;items.push(v);}
         Ok(Json(json!({"items":items,"version":build.version,"supported":build.supported,"observer":observer::spec()?,"compatibility":links::status(&db,&q.tool)?})))
     }).await
 }
@@ -199,6 +200,11 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
         .route("/api/v1/accounts/{id}/observer/{op}", post(hooks))
+        .route(
+            "/api/v1/accounts/{id}/quota/refresh",
+            post(super::quotas::one),
+        )
+        .route("/api/v1/quota/refresh", post(super::quotas::bulk))
         .route("/api/v1/current/{tool}", put(current))
         .route("/api/v1/compatibility/{tool}", put(compatibility))
         .route(

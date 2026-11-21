@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -28,6 +29,7 @@ if sys.argv[1:2] == ["app-server"]:
             entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
             result = {"data": [{"errors": [], "hooks": [dict(eventName="sessionStart", handlerType="command", command=entry["command"], enabled=True, matcher="startup", source="user", sourcePath=str(home / "hooks.json"),trustStatus="trusted",currentHash="test")]}]}
         if r["method"] == "account/rateLimits/read":
+            with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":0,"resetsAt":2000000000}}}
         print(json.dumps({"id": r["id"], "result": result}), flush=True)
     sys.exit()
@@ -51,6 +53,17 @@ class Service(unittest.TestCase):
             bin = paths / tool
             bin.write_text("#!" + sys.executable + "\n" + FAKE)
             bin.chmod(0o700)
+        curl = paths / "curl"
+        curl.write_text("#!" + sys.executable + r'''
+import json, os, pathlib, sys
+home = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
+config = sys.stdin.read()
+assert 'Bearer private-test-token' in config and not any('private-test-token' in a for a in sys.argv)
+assert 'https://api.anthropic.com/api/oauth/usage' in config
+(home / "quota-count").write_text("fetch\n")
+print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\n', end="")
+''')
+        curl.chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
                     "XDG_RUNTIME_DIR": str(self.root / "run"), "XDG_STATE_HOME": str(self.root / "state")}
         self.p = subprocess.Popen([str(DAEMON), "--port", "0"], env=self.env, stderr=subprocess.PIPE, text=True)
@@ -138,3 +151,24 @@ class Service(unittest.TestCase):
             with self.subTest(extra=extra):
                 status, _, _ = self.api("POST", "accounts", {}, extra)
                 self.assertEqual(status, 403)
+
+    def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
+        cl = self.account("claude", "one")
+        cx = self.account("codex", "two")
+        (Path(cl["home"]) / ".credentials.json").write_text(json.dumps({"claudeAiOauth":{"accessToken":"private-test-token"}}))
+        for _ in range(2):
+            status, _, _ = self.api("POST", "quota/refresh", {"stale_only":True})
+            self.assertEqual(status, 202)
+        for c, want in [(cl,25),(cx,0)]:
+            for _ in range(100):
+                _, data, _ = self.api("GET", "accounts?tool=" + c["tool"])
+                q = data["items"][0]["quota"]
+                if not q["loading"] and q["status"] != "not_checked": break
+                time.sleep(0.02)
+            self.assertEqual(q["status"], "fresh", q)
+            self.assertEqual(q["snapshot"]["windows"][0]["used_pct"], want)
+            self.assertEqual(q["snapshot"]["windows"][0]["reset_at_ms"], 1893456000000 if c is cl else 2000000000000)
+            _, data, _ = self.api("POST", "accounts/%d/quota/refresh" % c["id"], {})
+            self.assertEqual(data["queued"], 0)
+            self.assertEqual((Path(c["home"]) / "quota-count").read_text(), "fetch\n")
+        self.assertEqual(self.api("GET", "startups")[1]["items"], [])
