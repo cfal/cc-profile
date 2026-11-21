@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>cc-profile | Launch router</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <a class="brand" href="#startups"
+          ><span class="brandmark"
+            ><svg aria-hidden="true"><use href="/icons.svg#route"></use></svg></span
+          >cc-profile</a
+        >
+        <nav aria-label="Workspace" hidden>
+          <a href="#startups">Startups</a><a href="#sessions">Sessions</a
+          ><a href="#accounts">Accounts</a>
+        </nav>
+        <div class="right">
+          <span class="local"><i></i>Local router</span
+          ><button type="button" class="icon logout" title="Sign out" aria-label="Sign out" hidden>
+            <svg aria-hidden="true"><use href="/icons.svg#log-out"></use></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"><p>Connecting to router...</p></main>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <dialog id="dialog">
+      <form id="form">
+        <div class="dialog-head">
+          <h2></h2>
+          <button type="button" class="icon close" aria-label="Close" title="Close">
+            <svg aria-hidden="true"><use href="/icons.svg#x"></use></svg>
+          </button>
+        </div>
+        <div class="fields"></div>
+        <p class="error" role="alert" hidden></p>
+        <footer>
+          <button type="button" class="cancel">Cancel</button
+          ><button type="submit" class="primary">Save</button>
+        </footer>
+      </form>
+    </dialog>
+  </body>
+</html>

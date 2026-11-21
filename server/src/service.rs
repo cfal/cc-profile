@@ -194,6 +194,41 @@ async fn hooks(
 }
 pub fn web(s: Shared) -> Router {
     Router::new()
+        .route(
+            "/",
+            get(|| async { axum::response::Html(include_str!("../web/index.html")) }),
+        )
+        .route(
+            "/style.css",
+            get(|| async {
+                (
+                    [("content-type", "text/css; charset=utf-8")],
+                    include_str!("../web/style.css"),
+                )
+            }),
+        )
+        .route(
+            "/app.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("../web/app.js"),
+                )
+            }),
+        )
+        .route(
+            "/icons.svg",
+            get(|| async {
+                (
+                    [("content-type", "image/svg+xml")],
+                    include_str!("../web/icons.svg"),
+                )
+            }),
+        )
+        .route(
+            "/LUCIDE-LICENSE.txt",
+            get(|| async { include_str!("../web/LUCIDE-LICENSE.txt") }),
+        )
         .route("/api/v1/login", post(pairing::login))
         .route("/api/v1/session", get(pairing::session))
         .route("/api/v1/logout", post(pairing::logout))
