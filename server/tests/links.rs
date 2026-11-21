@@ -29,7 +29,16 @@ fn current_projection_is_relative_optional_and_never_replaces_user_data() {
     fs::remove_file(&outer).unwrap();
     fs::write(&outer, "untouchable").unwrap();
     assert!(links::repair(&f.store, "claude").is_err());
-    assert_eq!(fs::read_to_string(outer).unwrap(), "untouchable");
+    assert_eq!(fs::read_to_string(&outer).unwrap(), "untouchable");
+    fs::remove_file(&outer).unwrap();
+    fs::create_dir(&outer).unwrap();
+    links::configure(&f.store, "claude", None, None, &state, &rt).unwrap();
+    assert!(outer.is_dir());
+    assert!(
+        links::status(&f.store.db().unwrap(), "claude")
+            .unwrap()
+            .is_null()
+    );
 }
 
 #[test]

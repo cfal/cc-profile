@@ -142,7 +142,12 @@ impl Projection {
         existing_safe_dir(&self.root).map(|_| ())
     }
     fn detach(&self) -> Result<()> {
-        let has_outer = existing_safe_dir(self.outer.parent().unwrap())?;
+        let has_outer = existing_safe_dir(self.outer.parent().unwrap())?
+            && match self.outer.symlink_metadata() {
+                Ok(m) => m.is_symlink(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e.into()),
+            };
         let has_inner =
             existing_safe_dir(self.root.parent().unwrap())? && existing_safe_dir(&self.root)?;
         let inner = self.root.join("current");
