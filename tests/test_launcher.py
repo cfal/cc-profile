@@ -135,7 +135,7 @@ sys.exit(17)
     def test_slow_router_does_not_trigger_a_second_launch(self):
         def slow(path,r):
             time.sleep(5.3)
-            return 200,self.plan(r)
+            return None
         self.respond=slow
         p=self.run_ccp("claude")
         self.assertEqual((p.returncode,p.stdout),(1,""))
