@@ -7,12 +7,12 @@
 The launcher and daemon are Rust executables for Linux. Building from source requires stable Rust, `pkg-config`, and SQLite development headers. At runtime the daemon uses system SQLite and `curl` for Claude quota; neither binary needs Python or uv. The verified launch grammar is for **Claude Code 2.1.329** and **Codex CLI 0.171.0**. Other builds can be used for maintenance, not trusted chat routing.
 
 ```sh
-CARGO_BUILD_JOBS=1 cargo install --locked --path server --root "$HOME/.local"
+CARGO_BUILD_JOBS=1 cargo install --locked --path . --root "$HOME/.local"
 ccp --version
 ccpd
 ```
 
-`ccp` remains the launcher; `cc-profile` is its compatibility alias. If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries. To distribute without a Rust toolchain on the destination, build with `cargo build --release --locked --manifest-path server/Cargo.toml --bins` and ship the binaries from `server/target/release/` together for the target Linux architecture and system libraries. The web assets are embedded in `ccpd`.
+`ccp` remains the launcher; `cc-profile` is its compatibility alias. If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries. To distribute without a Rust toolchain on the destination, run `cargo build --release --locked --bins` from the repository root and ship the binaries from `target/release/` together for the target Linux architecture and system libraries. The web assets are embedded in `ccpd`.
 
 Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
 
@@ -98,13 +98,15 @@ After moving `ccpd`, reinstall and approve the observer. The router replaces its
 
 ## Verification
 
+The root Cargo package builds both executables: [the launcher](src/bin/ccp.rs) and [the daemon](src/bin/ccpd/main.rs). Daemon-only HTTP handlers live beside its entry point; both binaries use [the internal library](src/lib.rs) for the launch protocol. Panel assets are in [web/](web/), and Rust and Python integration tests are in [tests/](tests/).
+
 ```sh
-CARGO_BUILD_JOBS=1 cargo test --locked --manifest-path server/Cargo.toml
-CARGO_BUILD_JOBS=1 cargo build --locked --manifest-path server/Cargo.toml
+CARGO_BUILD_JOBS=1 cargo test --locked
+CARGO_BUILD_JOBS=1 cargo build --locked --bins
 python3 -m unittest discover -s tests -v
 python3 tests/native/test_native.py -v  # optional: requires the verified native versions
 uv run --no-project --with playwright python -m playwright install chromium --only-shell
 uv run --no-project --with playwright python tests/panel/test_panel.py
 ```
 
-All tests use disposable homes. Native smoke tests use no real credentials; they verify UUID assignment/observation and resume, not live subscription balances. Panel assets are embedded, with no runtime Node dependencies. Icons are from Lucide 0.468.0; the license is included under `server/web/`.
+All tests use disposable homes. Native smoke tests use no real credentials; they verify UUID assignment/observation and resume, not live subscription balances. Panel assets are embedded, with no runtime Node dependencies. Icons are from Lucide 0.468.0; the [license](web/LUCIDE-LICENSE.txt) is included.

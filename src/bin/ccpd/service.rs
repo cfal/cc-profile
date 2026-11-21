@@ -203,14 +203,14 @@ pub fn web(s: Shared) -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { axum::response::Html(include_str!("../web/index.html")) }),
+            get(|| async { axum::response::Html(include_str!("../../../web/index.html")) }),
         )
         .route(
             "/style.css",
             get(|| async {
                 (
                     [("content-type", "text/css; charset=utf-8")],
-                    include_str!("../web/style.css"),
+                    include_str!("../../../web/style.css"),
                 )
             }),
         )
@@ -219,7 +219,7 @@ pub fn web(s: Shared) -> Router {
             get(|| async {
                 (
                     [("content-type", "text/javascript; charset=utf-8")],
-                    include_str!("../web/app.js"),
+                    include_str!("../../../web/app.js"),
                 )
             }),
         )
@@ -228,13 +228,13 @@ pub fn web(s: Shared) -> Router {
             get(|| async {
                 (
                     [("content-type", "image/svg+xml")],
-                    include_str!("../web/icons.svg"),
+                    include_str!("../../../web/icons.svg"),
                 )
             }),
         )
         .route(
             "/LUCIDE-LICENSE.txt",
-            get(|| async { include_str!("../web/LUCIDE-LICENSE.txt") }),
+            get(|| async { include_str!("../../../web/LUCIDE-LICENSE.txt") }),
         )
         .route("/api/v1/setup", post(auth::setup))
         .route("/api/v1/login", post(auth::login))

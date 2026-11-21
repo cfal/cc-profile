@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
 *_DESIGN.md
-/server/target/
+target/
 /build/
 /*.egg-info/
