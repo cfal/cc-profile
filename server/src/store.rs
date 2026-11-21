@@ -303,7 +303,9 @@ impl Store {
         for c in legacy {
             if let Some(birth) = c.observed_birth() {
                 tx.execute(
-                    "UPDATE configs SET birth_ns=? WHERE id=?",
+                    "UPDATE configs SET birth_ns=?1 WHERE id=?2 AND NOT EXISTS (
+                        SELECT 1 FROM configs other WHERE other.dev=configs.dev
+                        AND other.ino=configs.ino AND other.birth_ns=?1)",
                     params![birth, c.id],
                 )?;
             }
@@ -336,6 +338,12 @@ impl Store {
         let home = normalized.to_str().ok_or_else(Error::denied)?;
         let (mode, http, https) = proxy_settings(v, None)?;
         self.write(|db|{
+            let legacy: Option<String> = db.query_row(
+                "SELECT home FROM configs WHERE dev=? AND ino=? AND birth_ns IS NULL LIMIT 1",
+                params![dev as i64,ino as i64], |r| r.get(0)).optional()?;
+            if let Some(path) = legacy {
+                return Err(Error::conflict("legacy_home",format!("An older config at {path} has not been verified. Restore its original directory and restart ccpd, or register a separate new directory.")));
+            }
             // Legacy rows may contain a trailing slash or an embedded "./".
             for tool in ["claude","codex"] {
                 if configs(db,tool)?.iter().any(|c| c.home == normalized && (c.dev != dev || c.ino != ino || c.birth_ns != Some(birth))) {

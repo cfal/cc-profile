@@ -22,6 +22,11 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
             .unwrap()
             .present()
     );
+    let registration = json!({"tool":"codex","label":"second","home":f.root.join("original")});
+    assert_eq!(
+        upgraded.register(&registration).unwrap_err().1,
+        "legacy_home"
+    );
     std::fs::rename(f.root.join("original"), &offline.home).unwrap();
     assert!(config(&open().db().unwrap(), offline.id).unwrap().present());
     // Deterministic even on filesystems that don't immediately recycle a deleted inode.
@@ -31,6 +36,29 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
         .execute("UPDATE configs SET birth_ns=birth_ns-1 WHERE id=?", [c.id])
         .unwrap();
     assert!(!config(&open().db().unwrap(), c.id).unwrap().present());
+}
+
+#[test]
+fn a_conflicting_legacy_pin_never_prevents_opening_the_router() {
+    let f = Fixture::new();
+    let owner = f.add("codex", "owner");
+    let db = f.store.db().unwrap();
+    // An early v4 registration recorded this identity while the legacy home was offline.
+    let birth: i64 = db
+        .query_row("SELECT birth_ns FROM configs WHERE id=?", [owner.id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    db.execute("UPDATE configs SET birth_ns=NULL WHERE id=?", [owner.id])
+        .unwrap();
+    db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns) SELECT tool,'second',?,dev,ino,? FROM configs WHERE id=?",
+        rusqlite::params![f.root.join("moved").to_str(),birth,owner.id]).unwrap();
+    let second = db.last_insert_rowid();
+    drop(db);
+    let store = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    assert!(!config(&store.db().unwrap(), owner.id).unwrap().present());
+    std::fs::rename(&owner.home, f.root.join("moved")).unwrap();
+    assert!(config(&store.db().unwrap(), second).unwrap().present());
 }
 
 #[test]
