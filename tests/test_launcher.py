@@ -30,3 +30,14 @@ class Launcher(unittest.TestCase):
         request = p.call_args[0][1]
         self.assertIn("ANTHROPIC_API_KEY", request["override_names"])
         self.assertNotIn("never-on-wire", str(request))
+
+    def test_exec_failure_reports_same_ticket_without_allocating_again(self):
+        calls=[]
+        def post(route,request,**kwargs):
+            calls.append((route,request))
+            return dict(self.plan,request_id=request["request_id"]) if route=="launch" else {}
+        with patch.object(c,"post",side_effect=post), patch("shutil.which",return_value="/native/claude"), patch("os.execve",side_effect=PermissionError(13,"Denied")), redirect_stderr(io.StringIO()):
+            self.assertEqual(c.main(["claude","-p","hello"]),126)
+        self.assertEqual([r for r,_ in calls],["launch","exec-failure"])
+        for field in ("request_id","ticket"):
+            self.assertEqual(calls[0][1][field],calls[1][1][field])

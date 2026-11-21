@@ -128,7 +128,7 @@ def main(argv=None):
     tool, args = argv[0], argv[1:]
     path = shutil.which(tool)
     path = os.path.realpath(path) if path else None
-    if path == os.path.realpath(__file__) or (path and os.path.exists(sys.argv[0]) and os.path.samefile(path, sys.argv[0])):
+    if path and path in (os.path.realpath(__file__), os.path.realpath(sys.argv[0])):
         print("ccp: native command resolves to the launcher.", file=sys.stderr)
         return 2
     try:
