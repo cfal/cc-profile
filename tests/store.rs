@@ -4,6 +4,32 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn directory_identity_is_compatible_with_existing_native_databases() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    let c = f.add("claude", "work");
+    let metadata = std::fs::symlink_metadata(&c.home).unwrap();
+    assert_eq!((c.dev, c.ino), (metadata.dev(), metadata.ino()));
+    #[cfg(target_env = "gnu")]
+    {
+        let native_birth = metadata
+            .created()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let stored: i64 = f
+            .store
+            .db()
+            .unwrap()
+            .query_row("SELECT birth_ns FROM configs WHERE id=?", [c.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored as u128, native_birth.as_nanos());
+    }
+}
+
+#[test]
 fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
     let f = Fixture::new();
     let c = f.add("claude", "present");

@@ -3,14 +3,13 @@ use rusqlite::{
     Connection, OptionalExtension, Row, TransactionBehavior, params, params_from_iter,
     types::Value as SqlValue,
 };
+use rustix::fs::{AtFlags, CWD, FileType, StatxFlags, makedev, statx};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    fs,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 use url::Url;
 
@@ -57,16 +56,9 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
 }
 impl Config {
     fn observed_birth(&self) -> Option<i64> {
-        let m = fs::symlink_metadata(&self.home).ok()?;
-        if !m.is_dir()
-            || m.uid() != crate::paths::uid()
-            || m.dev() != self.dev
-            || m.ino() != self.ino
-            || self.home.canonicalize().ok()? != self.home
-        {
-            return None;
-        }
-        birth_ns(&m)
+        let (dev, ino, birth) = directory_identity(&self.home).ok()?;
+        (dev == self.dev && ino == self.ino && self.home.canonicalize().ok()? == self.home)
+            .then_some(birth)
     }
     pub fn present(&self) -> bool {
         self.birth_ns.is_some() && self.observed_birth() == self.birth_ns
@@ -187,22 +179,37 @@ pub fn revision(v: &Value, c: &Config) -> Result<()> {
         Ok(())
     }
 }
-fn birth_ns(m: &fs::Metadata) -> Option<i64> {
-    m.created()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_nanos()
-        .try_into()
-        .ok()
+fn bad_home() -> Error {
+    Error::bad(
+        "bad_home",
+        "Use an existing, user-owned physical config directory, not a symlink, home, or service directory.",
+    )
+}
+fn directory_identity(path: &Path) -> Result<(u64, u64, i64)> {
+    // Metadata::created() is unavailable on musl. Read the full identity in one statx call.
+    let basic = StatxFlags::TYPE | StatxFlags::UID | StatxFlags::INO;
+    let m = statx(
+        CWD,
+        path,
+        AtFlags::SYMLINK_NOFOLLOW,
+        basic | StatxFlags::BTIME,
+    )
+    .map_err(|_| bad_home())?;
+    let fields = StatxFlags::from_bits_retain(m.stx_mask);
+    if !fields.contains(basic)
+        || FileType::from_raw_mode(m.stx_mode.into()) != FileType::Directory
+        || m.stx_uid != crate::paths::uid()
+    {
+        return Err(bad_home());
+    }
+    let t = m.stx_btime;
+    let birth = t.tv_sec.checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(i64::from(t.tv_nsec)))
+        .filter(|&n| n >= 0 && fields.contains(StatxFlags::BTIME))
+        .ok_or_else(|| Error::bad("home_identity", "Use a filesystem that reports a directory creation time so ccp can detect replaced configs."))?;
+    Ok((makedev(m.stx_dev_major, m.stx_dev_minor), m.stx_ino, birth))
 }
 fn directory(path: &Path, state: &Path) -> Result<(u64, u64, i64)> {
-    let bad = || {
-        Error::bad(
-            "bad_home",
-            "Use an existing, user-owned physical config directory, not a symlink, home, or service directory.",
-        )
-    };
     if !path.is_absolute()
         || path.canonicalize().ok().as_deref() != Some(path)
         || path.parent().is_none()
@@ -217,14 +224,9 @@ fn directory(path: &Path, state: &Path) -> Result<(u64, u64, i64)> {
         || crate::paths::runtime_dir()
             .is_ok_and(|runtime| path.starts_with(&runtime) || runtime.starts_with(path))
     {
-        return Err(bad());
+        return Err(bad_home());
     }
-    let m = fs::symlink_metadata(path).map_err(|_| bad())?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } {
-        return Err(bad());
-    }
-    let birth = birth_ns(&m).ok_or_else(|| Error::bad("home_identity", "Use a filesystem that reports a directory creation time so ccp can detect replaced configs."))?;
-    Ok((m.dev(), m.ino(), birth))
+    directory_identity(path)
 }
 impl Store {
     pub fn user_db_path(state: &Path) -> PathBuf {

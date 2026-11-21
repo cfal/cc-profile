@@ -4,7 +4,7 @@
 
 ## Install
 
-The launcher and daemon are Rust executables for Linux. Building from source requires stable Rust, `pkg-config`, and SQLite development headers. At runtime the daemon uses system SQLite and `curl` for Claude quota; neither binary needs Python or uv. The verified launch grammar is for **Claude Code 2.1.329** and **Codex CLI 0.171.0**. Other builds can be used for maintenance, not trusted chat routing.
+The launcher and daemon are Rust executables for Linux. A native build requires stable Rust, `pkg-config`, and SQLite development headers, and the resulting daemon uses system SQLite. The static build below needs only Docker on the build machine and includes SQLite. Neither build needs Python or uv at runtime. The daemon uses the `curl` executable for Claude quota. The verified launch grammar is for **Claude Code 2.1.329** and **Codex CLI 0.171.0**. Other builds can be used for maintenance, not trusted chat routing.
 
 ```sh
 CARGO_BUILD_JOBS=1 cargo install --locked --path . --root "$HOME/.local"
@@ -12,7 +12,15 @@ ccp --version
 ccpd
 ```
 
-`ccp` remains the launcher; `cc-profile` is its compatibility alias. If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries. To distribute without a Rust toolchain on the destination, run `cargo build --release --locked --bins` from the repository root and ship the binaries from `target/release/` together for the target Linux architecture and system libraries. The web assets are embedded in `ccpd`.
+`ccp` remains the launcher; `cc-profile` is its compatibility alias. If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries.
+
+For distribution, build stripped, static Linux executables from the repository root:
+
+```sh
+./docker-build.sh --bins
+```
+
+On x86-64 the outputs are `target/x86_64-unknown-linux-musl/release/{ccp,ccpd,cc-profile}`. Ship `ccp` and `ccpd` to a Linux machine of the same architecture; the alias is optional. The panel assets are embedded in `ccpd`.
 
 Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
 
@@ -108,5 +116,7 @@ python3 tests/native/test_native.py -v  # optional: requires the verified native
 uv run --no-project --with playwright python -m playwright install chromium --only-shell
 uv run --no-project --with playwright python tests/panel/test_panel.py
 ```
+
+To exercise the static build instead of the debug build, set `CCPD_TEST_BIN` to the absolute path of the release `ccpd` when running the Python suite. It uses the `ccp` beside that binary.
 
 All tests use disposable homes. Native smoke tests use no real credentials; they verify UUID assignment/observation and resume, not live subscription balances. Panel assets are embedded, with no runtime Node dependencies. Icons are from Lucide 0.468.0; the [license](web/LUCIDE-LICENSE.txt) is included.
