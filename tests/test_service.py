@@ -41,6 +41,7 @@ if sys.argv[1:2] == ["app-server"]:
             config = home / "config.toml"
             enabled &= not config.exists() or config.read_text() != "trust revoked"
             result = {"data": [{"errors": [], "hooks": [dict(eventName="sessionStart", handlerType="command", command=entry["command"], enabled=enabled, matcher="startup", source="user", sourcePath=str(home / "hooks.json"),trustStatus="trusted",currentHash="test")]}]}
+            if (home/"metadata-error").exists(): result["data"][0]["errors"]=["temporary fixture error"]
         if r["method"] == "account/rateLimits/read":
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":0,"resetsAt":2000000000}}}
@@ -228,12 +229,16 @@ else:
         self.assertEqual(self.api("POST", route+"check", body)[0], 503)
         (home/"offline").unlink()
         self.assertEqual(self.api("GET","accounts?tool=codex")[1]["items"][0]["readiness"],"ready")
+        (home/"metadata-error").touch()
+        self.assertEqual(self.api("POST", route+"check", body)[0], 503)
+        (home/"metadata-error").unlink()
+        self.assertEqual(self.cli("codex","exec","after recovery").returncode,0)
         (home/"config.toml").write_text("ordinary native update")
         p = self.cli("codex", "exec", "new chat")
         self.assertEqual(p.returncode, 0, p.stderr)
         probes = (home/"hook-checks").read_text().splitlines()
         neutral = "/"
-        self.assertEqual(probes.count(neutral), 2)
+        self.assertEqual(probes.count(neutral), 3)
         self.assertEqual(self.cli("codex", "exec", "another").returncode, 0)
         self.assertEqual((home/"hook-checks").read_text().splitlines(), probes)
         (home/"config.toml").write_text("trust revoked")

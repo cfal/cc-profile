@@ -120,23 +120,30 @@ pub async fn trusted(build: &Build, c: &Config, neutral: &Path, workspace: &Path
     }
     let v = rpc::codex(build, c, neutral, "hooks/list", json!({"cwds":[workspace]})).await?;
     let path = c.home.join("hooks.json");
-    Ok(v["data"].as_array().is_some_and(|a| {
-        a.iter().any(|entry| {
-            entry["errors"].as_array().is_some_and(Vec::is_empty)
-                && entry["hooks"].as_array().is_some_and(|h| {
-                    h.iter().any(|h| {
-                        h["eventName"] == "sessionStart"
-                            && h["handlerType"] == "command"
-                            && h["command"] == observer.command
-                            && h["enabled"] == true
-                            && h["matcher"] == "startup"
-                            && h["source"] == "user"
-                            && h["sourcePath"].as_str() == path.to_str()
-                            && h["trustStatus"] == "trusted"
-                            && h["currentHash"].as_str().is_some_and(|s| !s.is_empty())
-                    })
-                })
-        })
+    let failed = || {
+        Error::unavailable(
+            "hook_metadata",
+            "Codex could not inspect hooks for this workspace. Try again.",
+        )
+    };
+    let entries = v["data"].as_array().ok_or_else(failed)?;
+    let [entry] = entries.as_slice() else {
+        return Err(failed());
+    };
+    if !entry["errors"].as_array().is_some_and(Vec::is_empty) {
+        return Err(failed());
+    }
+    let hooks = entry["hooks"].as_array().ok_or_else(failed)?;
+    Ok(hooks.iter().any(|h| {
+        h["eventName"] == "sessionStart"
+            && h["handlerType"] == "command"
+            && h["command"] == observer.command
+            && h["enabled"] == true
+            && h["matcher"] == "startup"
+            && h["source"] == "user"
+            && h["sourcePath"].as_str() == path.to_str()
+            && h["trustStatus"] == "trusted"
+            && h["currentHash"].as_str().is_some_and(|s| !s.is_empty())
     }))
 }
 pub async fn check(store: &Store, build: &Build, c: &Config, cwd: &Path) -> Result<()> {
