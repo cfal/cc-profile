@@ -74,6 +74,9 @@ pub fn save(store: &Store, hash: String, first_only: bool) -> Result<i64> {
     })
 }
 pub fn prompt() -> Result<()> {
+    let state = ccpd::paths::state_dir()?;
+    let database = Store::user_db_path(&state);
+    eprintln!("Panel database: {}", database.display());
     let read = |prompt| {
         rpassword::prompt_password(prompt).map_err(|_| {
             Error::bad(
@@ -90,8 +93,11 @@ pub fn prompt() -> Result<()> {
         ));
     }
     let verifier = hash(&new)?;
-    let store = Store::open_user(&ccpd::paths::state_dir()?)?;
+    let store = Store::open_user(&state)?;
     save(&store, verifier, false)?;
-    eprintln!("Panel password set. Previous browser sessions are signed out.");
+    eprintln!(
+        "Password set for {}. Previous browser sessions for this panel are signed out.",
+        database.display()
+    );
     Ok(())
 }

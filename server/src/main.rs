@@ -108,8 +108,9 @@ async fn run() -> Result<()> {
         }
     });
     eprintln!(
-        "ccpd {}: http://127.0.0.1:{port}\nlaunch socket: {}",
+        "ccpd {}: http://127.0.0.1:{port}\npanel database: {}\nlaunch socket: {}",
         env!("CARGO_PKG_VERSION"),
+        Store::user_db_path(&app.state_dir).display(),
         sock.display()
     );
     tokio::select! {

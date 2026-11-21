@@ -45,19 +45,24 @@ class PanelPassword(unittest.TestCase):
         if pid==0:
             os.execve(str(test_service.DAEMON),["ccpd","set-password"],self.s.env)
         try:
+            seen=b""
             for prompt, value in [(b"characters): ",password),(b"Confirm new password: ",confirmation)]:
                 output=b""
                 deadline=time.monotonic()+8
                 while prompt not in output:
                     self.assertTrue(select.select([fd],[],[],max(0,deadline-time.monotonic()))[0],"password prompt timed out")
                     output+=os.read(fd,1024)
+                seen+=output
                 os.write(fd,(value+"\n").encode())
-            return os.waitstatus_to_exitcode(os.waitpid(pid,0)[1])
+            status=os.waitstatus_to_exitcode(os.waitpid(pid,0)[1])
+            self.assertIn(os.fsencode(self.s.root/"state/cc-profile/router.sqlite3"),seen)
+            return status
         finally:
             os.close(fd)
 
     def test_terminal_setup_and_reset_revoke_existing_logins(self):
         s=self.s
+        self.assertIn(str(s.root/"state/cc-profile/router.sqlite3"),s.p.stderr.readline())
         s.stop()
         self.assertEqual(self.set_local(s.password,s.password),0)
         s.start()

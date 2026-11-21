@@ -205,9 +205,12 @@ pub fn directory(path: &Path, state: &Path) -> Result<(u64, u64)> {
     Ok((m.dev(), m.ino()))
 }
 impl Store {
+    pub fn user_db_path(state: &Path) -> PathBuf {
+        state.join("router.sqlite3")
+    }
     pub fn open_user(state: &Path) -> Result<Self> {
         crate::paths::private_dir(state)?;
-        let path = state.join("router.sqlite3");
+        let path = Self::user_db_path(state);
         let marker = state.join("initialized");
         if marker.try_exists()? && !path.try_exists()? {
             return Err(Error::unavailable(
