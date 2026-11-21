@@ -40,6 +40,10 @@ async fn run() -> Result<()> {
     while let Some(k) = args.next() {
         match k.as_str() {
             "set-password" if args.len() == 0 => return password::prompt(),
+            "-V" | "--version" => {
+                println!("ccpd {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             "observe" => return callback::run().await,
             "-h" | "--help" => {
                 println!("{}", bad());

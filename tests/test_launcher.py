@@ -1,43 +1,130 @@
-import io
+"""Run the shipped ccp executable against a disposable, same-UID socket."""
+from http.server import BaseHTTPRequestHandler
+import json
 import os
+from pathlib import Path
+import socketserver
+import subprocess
+import sys
+import tempfile
+import threading
 import unittest
-from contextlib import redirect_stderr
-from unittest.mock import patch
-import cc_profile as c
 
+from test_service import LAUNCHER
+
+
+@unittest.skipUnless(LAUNCHER.is_file(), "build ccp first")
 class Launcher(unittest.TestCase):
     def setUp(self):
-        self.req = {"request_id": "x", "tool": "claude", "ticket": "t"}
-        self.plan = {"v": 1, "request_id": "x", "tool": "claude", "label": "work", "argv": ["--", "a b", ""],
-                     "env_set": {"CLAUDE_CONFIG_DIR": "/physical/home"}, "env_unset": list(c.MARKERS)}
+        temp=tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root=Path(temp.name)
+        self.directory=self.root/"cc-profile"
+        self.directory.mkdir(mode=0o700)
+        self.native=self.root/"claude"
+        self.native.write_text("#!"+sys.executable+"\n"+'''
+import json,os,sys
+print(json.dumps([sys.argv[1:],os.getenv("CLAUDE_CONFIG_DIR"),os.getenv("EDITOR"),os.getenv("CCP_OBSERVE_TICKET"),sys.stdin.read(),os.getpid()]))
+sys.exit(17)
+''')
+        self.native.chmod(0o700)
+        self.calls=[]
+        self.respond=lambda path,r: (200,self.plan(r))
+        case=self
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                raw=self.rfile.read(int(self.headers["content-length"]))
+                case.calls.append((self.path,raw))
+                reply=case.respond(self.path,json.loads(raw))
+                if reply is None: return
+                status,data=reply
+                body=json.dumps(data).encode()
+                self.send_response(status)
+                self.send_header("Content-Length",str(len(body)))
+                self.end_headers()
+                try: self.wfile.write(body)
+                except BrokenPipeError: pass
+            def log_message(self,*args): pass
+        server=socketserver.UnixStreamServer(str(self.directory/"launch.sock"),Handler)
+        thread=threading.Thread(target=server.serve_forever,kwargs={"poll_interval":0.02},daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.env={"PATH":str(self.root),"HOME":str(self.root),"XDG_RUNTIME_DIR":str(self.root),
+                  "EDITOR":"test-editor","CCP_OBSERVE_TICKET":"old-ticket","HTTPS_PROXY":"http://127.0.0.1:9"}
 
-    def test_allowlist_applies_to_additions_and_removals(self):
-        for key, bad in [("env_unset", ["PATH"]), ("env_set", {"LD_PRELOAD": "bad"}),
-                         ("env_set", {"CODEX_HOME": "/other"}), ("tool", "codex"), ("argv", "shell")]:
-            with self.subTest(key=key), self.assertRaises(c.Refusal):
-                c.validate(dict(self.plan, **{key: bad}), self.req)
+    def plan(self,r):
+        return {"v":1,"request_id":r["request_id"],"tool":r["tool"],"label":"work","decision":"current","config_id":1,
+                "argv":r["argv"],"env_set":{"CLAUDE_CONFIG_DIR":"/physical/home"},
+                "env_unset":["CCP_LAUNCH_ID","CCP_OBSERVE_TICKET"]}
 
-    def test_args_and_unrelated_environment_survive(self):
-        with patch.dict(os.environ, {"CCP_OBSERVE_TICKET": "old", "EDITOR": "vi"}, clear=True):
-            args, env, home = c.validate(self.plan, self.req)
-        self.assertEqual((args, home), (["--", "a b", ""], "/physical/home"))
-        self.assertEqual(env, {"EDITOR": "vi", "CLAUDE_CONFIG_DIR": home})
+    def run_ccp(self,*args):
+        return subprocess.run([str(LAUNCHER),*args],env=self.env,cwd=self.root,input="stdin with spaces\n",
+                              capture_output=True,text=True,timeout=8)
 
-    def test_denial_does_not_exec_and_request_contains_only_override_names(self):
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "never-on-wire"}), patch.object(c, "post", side_effect=c.Refusal("disabled")) as p, patch("os.execve") as execute, redirect_stderr(io.StringIO()):
-            self.assertEqual(c.main(["claude", "--resume", "id"]), 1)
-        execute.assert_not_called()
-        request = p.call_args[0][1]
-        self.assertIn("ANTHROPIC_API_KEY", request["override_names"])
-        self.assertNotIn("never-on-wire", str(request))
+    def test_same_exec_pid_argv_environment_stdin_and_exit_status(self):
+        p=subprocess.Popen([str(LAUNCHER),"claude","--","a b",""],env=self.env,cwd=self.root,text=True,
+                           stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        out,err=p.communicate("input\n",timeout=8)
+        self.assertEqual(json.loads(out),[["--","a b",""],"/physical/home","test-editor",None,"input\n",p.pid])
+        self.assertEqual(p.returncode,17)
+        self.assertEqual(err,"ccp: claude/work -> /physical/home\n")
 
-    def test_exec_failure_reports_same_ticket_without_allocating_again(self):
-        calls=[]
-        def post(route,request,**kwargs):
-            calls.append((route,request))
-            return dict(self.plan,request_id=request["request_id"]) if route=="launch" else {}
-        with patch.object(c,"post",side_effect=post), patch("shutil.which",return_value="/native/claude"), patch("os.execve",side_effect=PermissionError(13,"Denied")), redirect_stderr(io.StringIO()):
-            self.assertEqual(c.main(["claude","-p","hello"]),126)
-        self.assertEqual([r for r,_ in calls],["launch","exec-failure"])
-        for field in ("request_id","ticket"):
-            self.assertEqual(calls[0][1][field],calls[1][1][field])
+    def test_invalid_plans_never_execute(self):
+        for bad in [{"env_unset":["PATH"]},{"env_set":{"CLAUDE_CONFIG_DIR":"relative"}},
+                    {"env_set":{"CLAUDE_CONFIG_DIR":"/profile","UNEXPECTED_KEY":"bad"}},
+                    {"env_set":{"CLAUDE_CONFIG_DIR":"/profile","CCP_OBSERVE_TICKET":"unissued"},"env_unset":[]},
+                    {"env_unset":["CCP_LAUNCH_ID"]},{"argv":["a\0b"]},{"tool":"codex"},{"request_id":"other"},
+                    {"argv":"not-an-array"},{"v":2}]:
+            self.respond=lambda path,r: (200,dict(self.plan(r),**bad))
+            with self.subTest(bad=bad):
+                p=self.run_ccp("claude")
+                self.assertEqual((p.returncode,p.stdout),(1,""))
+
+    def test_denial_sends_override_names_not_values_and_does_not_retry(self):
+        self.env["ANTHROPIC_API_KEY"]="private-override"
+        self.respond=lambda path,r:(409,{"message":"owner disabled"})
+        p=self.run_ccp("claude","--resume","id")
+        self.assertEqual((p.returncode,p.stdout,p.stderr),(1,"","ccp: owner disabled\n"))
+        (path,raw),=self.calls
+        self.assertEqual(path,"/v1/launch")
+        self.assertEqual(json.loads(raw)["override_names"],["ANTHROPIC_API_KEY"])
+        self.assertNotIn(b"private-override",raw)
+
+    def test_transport_retry_is_byte_identical(self):
+        self.respond=lambda path,r: None if len(self.calls)==1 else (200,self.plan(r))
+        self.assertEqual(self.run_ccp("claude").returncode,17)
+        self.assertEqual(len(self.calls),2)
+        self.assertEqual(self.calls[0],self.calls[1])
+
+    def test_native_exec_failure_once_and_no_implicit_shell(self):
+        for code in [126,127]:
+            self.calls.clear()
+            if code==126:
+                self.native.write_text("echo implicit-shell\n")
+            def respond(path,r):
+                if path=="/v1/exec-failure": return 200,{}
+                if code==127: self.native.unlink()
+                return 200,self.plan(r)
+            self.respond=respond
+            p=self.run_ccp("claude")
+            self.assertEqual((p.returncode,p.stdout),(code,""))
+            self.assertEqual([path for path,_ in self.calls],["/v1/launch","/v1/exec-failure"])
+            req,failure=[json.loads(raw) for _,raw in self.calls]
+            for key in ["request_id","ticket"]: self.assertEqual(req[key],failure[key])
+
+    def test_oversized_replies_and_requests_fail_closed(self):
+        self.respond=lambda path,r:(200,{"padding":"x"*(512*1024)})
+        self.assertIn("reply too large",self.run_ccp("claude").stderr)
+        self.assertEqual(len(self.calls),1)
+        self.assertIn("request too large",self.run_ccp("claude",*(["x"*64000]*5)).stderr)
+        self.assertEqual(len(self.calls),1)
+
+    def test_help_unsupported_commands_encoding_and_self_resolution_are_offline(self):
+        self.assertIn("Usage: ccp",self.run_ccp("--help").stdout)
+        self.assertEqual(self.run_ccp("run","claude").returncode,2)
+        self.assertIn("UTF-8",self.run_ccp("claude",b"\xff").stderr)
+        self.native.unlink()
+        self.native.symlink_to(LAUNCHER)
+        self.assertEqual(self.run_ccp("claude").returncode,2)
+        self.assertFalse(self.calls)

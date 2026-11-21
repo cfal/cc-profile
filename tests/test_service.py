@@ -14,6 +14,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 DAEMON = Path(os.environ.get("CCPD_TEST_BIN", ROOT / "server/target/debug/ccpd"))
+LAUNCHER = Path(os.environ.get("CCP_TEST_BIN", DAEMON.with_name("ccp")))
 FAKE = r'''
 import json, os, pathlib, shlex, subprocess, sys, uuid
 t = pathlib.Path(sys.argv[0]).name
@@ -127,7 +128,7 @@ else:
         return c
 
     def cli(self, *args):
-        return subprocess.run([sys.executable, str(ROOT / "cc_profile.py"), *args], env=self.env,
+        return subprocess.run([str(LAUNCHER), *args], env=self.env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, cwd=self.root,
                               timeout=30 if getattr(self,"native",False) else 8)
 

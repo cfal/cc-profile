@@ -4,15 +4,17 @@
 
 ## Install
 
-Linux, Python 3.8+, a recent stable Rust toolchain, `pkg-config`, SQLite development headers, and `curl` (for Claude quota). The verified launch grammar is for **Claude Code 2.1.329** and **Codex CLI 0.171.0**. Other builds can be used for maintenance, not trusted chat routing.
+The launcher and daemon are Rust executables for Linux. Building from source requires stable Rust, `pkg-config`, and SQLite development headers. At runtime the daemon uses system SQLite and `curl` for Claude quota; neither binary needs Python or uv. The verified launch grammar is for **Claude Code 2.1.329** and **Codex CLI 0.171.0**. Other builds can be used for maintenance, not trusted chat routing.
 
 ```sh
 CARGO_BUILD_JOBS=1 cargo install --locked --path server --root "$HOME/.local"
-uv tool install .
+ccp --version
 ccpd
 ```
 
-Both `ccp` and `cc-profile` launch the same stdlib-only client. Alternatively, symlink the executable `cc_profile.py` onto PATH as `ccp`. Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
+`ccp` remains the launcher; `cc-profile` is its compatibility alias. If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries. To distribute without a Rust toolchain on the destination, build with `cargo build --release --locked --manifest-path server/Cargo.toml --bins` and ship the binaries from `server/target/release/` together for the target Linux architecture and system libraries. The web assets are embedded in `ccpd`.
+
+Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
 
 Open **http://127.0.0.1:8743**. On the first visit, set a panel password; subsequent visits use **Sign in**. No pairing token is needed. The first visitor can claim an unconfigured panel, so on a shared machine run **`ccpd set-password` before starting the service**. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. Use `--port PORT` to change the panel port. For a VM, forward the same loopback port using SSH. Do not expose the panel publicly.
 
