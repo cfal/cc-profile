@@ -1,0 +1,13 @@
+[Unit]
+Description=cc-profile local launch router
+
+[Service]
+ExecStart=%h/.local/bin/ccpd
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
