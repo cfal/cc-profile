@@ -19,7 +19,7 @@ class PanelPassword(unittest.TestCase):
 
     def test_only_one_first_visitor_can_claim_and_it_survives_restart(self):
         s = self.s
-        self.assertEqual(s.api("GET","session")[1], {"setup_required":True,"csrf":None})
+        self.assertEqual(s.api("GET","session")[1], {"setup_required":True,"signed_in":False})
         self.assertFalse((s.root/"run/cc-profile/pairing-token").exists())
         self.assertNotEqual(s.api("POST","login",{"token":"obsolete token"})[0],200)
         self.assertEqual(s.api("GET","accounts?tool=claude")[0],403)
@@ -32,7 +32,7 @@ class PanelPassword(unittest.TestCase):
         winner=next(i for i,r in enumerate(results) if r[0]==200)
         s.stop()
         s.start()
-        self.assertEqual(s.api("GET","session")[1],{"setup_required":False,"csrf":None})
+        self.assertEqual(s.api("GET","session")[1],{"setup_required":False,"signed_in":False})
         self.assertEqual(s.api("POST","login",{"password":passwords[1-winner]})[0],401)
         self.assertEqual(s.api("POST","login",{"password":passwords[winner]})[0],200)
         with sqlite3.connect(s.root/"state/cc-profile/router.sqlite3") as db:
@@ -68,7 +68,7 @@ class PanelPassword(unittest.TestCase):
         s.start()
         self.assertEqual(s.api("POST","setup",{"password":"overwriting passphrase"})[0],409)
         _,data,headers=s.api("POST","login",{"password":s.password})
-        s.cookie,s.csrf=headers["set-cookie"].split(";")[0],data["csrf"]
+        s.session=data["session"]
         self.assertEqual(s.api("GET","accounts?tool=claude")[0],200)
         new="replacement passphrase"
         self.assertNotEqual(self.set_local(new,"mismatch"),0)
@@ -90,7 +90,7 @@ class PanelPassword(unittest.TestCase):
         s.start()
         self.assertTrue(s.api("GET","session")[1]["setup_required"])
         _,data,headers=s.api("POST","setup",{"password":s.password})
-        s.cookie,s.csrf=headers["set-cookie"].split(";")[0],data["csrf"]
+        s.session=data["session"]
         self.assertEqual(s.api("GET","sessions")[1]["items"][0]["native_id"],"existing-mapping")
 
     def test_password_guessing_is_throttled(self):

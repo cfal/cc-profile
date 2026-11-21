@@ -23,7 +23,7 @@ use std::{
 use tokio::sync::Semaphore;
 
 pub struct Auth {
-    sessions: Mutex<HashMap<String, (String, i64, i64)>>,
+    sessions: Mutex<HashMap<String, (i64, i64)>>,
     slots: Arc<Semaphore>,
     failures: Mutex<Option<(i64, u8, Instant)>>,
 }
@@ -35,22 +35,19 @@ impl Auth {
             failures: Mutex::default(),
         }
     }
-    fn cookie(headers: &HeaderMap) -> &str {
+    fn token(headers: &HeaderMap) -> &str {
         headers
-            .get(header::COOKIE)
+            .get("x-ccp-session")
             .and_then(|s| s.to_str().ok())
             .unwrap_or("")
-            .split(';')
-            .find_map(|kv| kv.trim().strip_prefix("ccp_session="))
-            .unwrap_or("")
     }
-    fn csrf(&self, h: &HeaderMap, revision: i64) -> Result<String> {
+    fn signed_in(&self, h: &HeaderMap, revision: i64) -> Result<()> {
         self.sessions
             .lock()
             .map_err(|_| Error::denied())?
-            .get(Self::cookie(h))
-            .filter(|(_, until, rev)| *until > now() && *rev == revision)
-            .map(|(csrf, _, _)| csrf.clone())
+            .get(Self::token(h))
+            .filter(|(until, rev)| *until > now() && *rev == revision)
+            .map(|_| ())
             .ok_or_else(Error::denied)
     }
 }
@@ -123,32 +120,24 @@ async fn authenticate(s: Shared, v: Login, setup: bool) -> Result<Response> {
     })
     .await?;
     let sid = paths::secret()?;
-    let csrf = paths::secret()?;
     let mut sessions = s.auth.sessions.lock().map_err(|_| Error::denied())?;
-    sessions.retain(|_, (_, until, rev)| *until > now() && *rev >= revision);
+    sessions.retain(|_, (until, rev)| *until > now() && *rev >= revision);
     if sessions.len() >= 64
         && let Some(k) = sessions
             .iter()
-            .min_by_key(|(_, (_, until, _))| *until)
+            .min_by_key(|(_, (until, _))| *until)
             .map(|(k, _)| k.clone())
     {
         sessions.remove(&k);
     }
-    sessions.insert(sid.clone(), (csrf.clone(), now() + 8 * 3_600_000, revision));
-    Ok((
-        [(
-            header::SET_COOKIE,
-            format!("ccp_session={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800"),
-        )],
-        Json(json!({"csrf":csrf})),
-    )
-        .into_response())
+    sessions.insert(sid.clone(), (now() + 8 * 3_600_000, revision));
+    Ok(Json(json!({"session":sid})).into_response())
 }
 pub async fn session(State(s): State<Shared>, h: HeaderMap) -> Result<Json<Value>> {
     let a = s.clone();
     let rev = blocking(move || password::revision(&a.store)).await?;
     Ok(Json(
-        json!({"setup_required":rev==0,"csrf":s.auth.csrf(&h,rev).ok()}),
+        json!({"setup_required":rev==0,"signed_in":s.auth.signed_in(&h,rev).is_ok()}),
     ))
 }
 pub async fn logout(State(s): State<Shared>, h: HeaderMap) -> Result<Response> {
@@ -156,15 +145,8 @@ pub async fn logout(State(s): State<Shared>, h: HeaderMap) -> Result<Response> {
         .sessions
         .lock()
         .map_err(|_| Error::denied())?
-        .remove(Auth::cookie(&h));
-    Ok((
-        [(
-            header::SET_COOKIE,
-            "ccp_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
-        )],
-        Json(json!({})),
-    )
-        .into_response())
+        .remove(Auth::token(&h));
+    Ok(Json(json!({})).into_response())
 }
 async fn check(s: &Shared, method: &Method, path: &str, h: &HeaderMap) -> Result<()> {
     let host = h
@@ -189,10 +171,7 @@ async fn check(s: &Shared, method: &Method, path: &str, h: &HeaderMap) -> Result
     {
         let a = s.clone();
         let rev = blocking(move || password::revision(&a.store)).await?;
-        let csrf = s.auth.csrf(h, rev)?;
-        if mutation && h.get("x-csrf-token").and_then(|h| h.to_str().ok()) != Some(&csrf) {
-            return Err(Error::denied());
-        }
+        s.auth.signed_in(h, rev)?;
     }
     Ok(())
 }

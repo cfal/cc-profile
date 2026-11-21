@@ -25,7 +25,7 @@ const quotaStates = {
   unavailable: "Unavailable",
   fresh: "Checked",
 };
-let csrf = "",
+let sessionToken = sessionStorage.getItem("ccp_session") || "",
   needsSetup = false,
   version = 0,
   cursors = [null],
@@ -109,15 +109,16 @@ function guard(fn) {
 async function api(path, method = "GET", body) {
   const opts = {
     method,
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+    credentials: "omit",
+    headers: { "Content-Type": "application/json", "X-CCP-Session": sessionToken },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch("/api/v1/" + path, opts);
   const v = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (r.status === 403 && csrf) {
-      csrf = "";
+    if (r.status === 403 && sessionToken) {
+      sessionToken = "";
+      sessionStorage.removeItem("ccp_session");
       passwordForm();
     }
     throw Object.assign(new Error(v.message || "Request failed (" + r.status + ")."), {code: v.error});
@@ -203,7 +204,8 @@ function passwordForm() {
     submit.disabled = true;
     try {
       if (confirm && password.value !== confirm.value) throw new Error("Passwords do not match.");
-      csrf = (await api(setup ? "setup" : "login", "POST", {password: password.value})).csrf;
+      sessionToken = (await api(setup ? "setup" : "login", "POST", {password: password.value})).session;
+      sessionStorage.setItem("ccp_session",sessionToken);
       password.value = "";
       if (confirm) confirm.value = "";
       needsSetup = false;
@@ -224,7 +226,8 @@ function passwordForm() {
 }
 $(".logout").onclick = guard(async () => {
   await api("logout", "POST", {});
-  csrf = "";
+  sessionToken = "";
+  sessionStorage.removeItem("ccp_session");
   passwordForm();
 });
 function empty(glyph, heading, description, action) {
@@ -862,7 +865,7 @@ async function accounts(params, ver, enter) {
     timer = setTimeout(() => render().catch((e) => notice(e.message)), 1000);
 }
 async function render() {
-  if (!csrf) {
+  if (!sessionToken) {
     passwordForm();
     return;
   }
@@ -895,7 +898,10 @@ async function connect() {
       btn("Retry", connect, "refresh-cw")));
     return;
   }
-  csrf = session.csrf || "";
+  if (!session.signed_in) {
+    sessionToken = "";
+    sessionStorage.removeItem("ccp_session");
+  }
   needsSetup = session.setup_required;
   await render();
 }

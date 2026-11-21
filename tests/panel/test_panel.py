@@ -41,7 +41,9 @@ class Panel(unittest.TestCase):
             page.get_by_role("button",name="Sign in").click()
             expect(page.get_by_role("heading",name="Startups")).to_be_visible()
             _, session, headers = service.api("POST","login",{"password":service.password})
-            service.cookie,service.csrf=headers["set-cookie"].split(";")[0],session["csrf"]
+            service.session=session["session"]
+            page.reload()
+            expect(page.get_by_role("heading",name="Startups")).to_be_visible()
             page.get_by_role("navigation").get_by_text("Accounts").click()
             page.get_by_role("button",name="Add config").first.click()
             page.get_by_label("Label",exact=True).fill("Work")
