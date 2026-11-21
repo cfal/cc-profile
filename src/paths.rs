@@ -32,10 +32,14 @@ pub fn runtime_dir() -> Result<PathBuf> {
 }
 pub fn profile_root(tool: &str) -> Result<PathBuf> {
     let tool = crate::types::tool(tool)?;
-    env_dir("XDG_DATA_HOME")
+    let data = env_dir("XDG_DATA_HOME")
         .or_else(|| env_dir("HOME").map(|p| p.join(".local/share")))
-        .map(|p| p.join("cc-profile/profiles").join(tool))
-        .ok_or_else(Error::denied)
+        .ok_or_else(Error::denied)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&data)?;
+    Ok(data.canonicalize()?.join("cc-profile/profiles").join(tool))
 }
 pub fn private_dir(p: &Path) -> Result<()> {
     fs::DirBuilder::new()

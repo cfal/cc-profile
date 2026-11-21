@@ -339,9 +339,9 @@ impl Store {
                 "Choose either a new profile or an existing directory.",
             ));
         }
-        let root = crate::paths::profile_root(v["tool"].as_str().unwrap_or(""))?;
         label(v["label"].as_str().unwrap_or(""))?;
         proxy_settings(&v, None)?;
+        let root = crate::paths::profile_root(v["tool"].as_str().unwrap_or(""))?;
         crate::paths::private_dir(&root)?;
         let home = root.join(uuid::Uuid::new_v4().to_string());
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;

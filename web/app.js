@@ -643,6 +643,27 @@ function capacity(c) {
   }
   return section;
 }
+// A poll or full Accounts refresh may overlap a cancel/retry. Only use a
+// status read taken after the latest action in this tab has settled.
+let loginWrite = Promise.resolve();
+function changeLogin(path, payload) {
+  const result = loginWrite.then(() => api(path, "POST", payload));
+  loginWrite = result.then(() => {}, () => {});
+  return result;
+}
+async function readLogin(path) {
+  for (;;) {
+    const write = loginWrite;
+    await write;
+    if (write !== loginWrite) continue;
+    try {
+      const value = await api(path);
+      if (write === loginWrite) return value;
+    } catch (err) {
+      if (write === loginWrite) throw err;
+    }
+  }
+}
 function signInPanel(c, initial, supported) {
   const section = el("section", {}, el("h3", {}, "Profile sign-in"));
   if (c.tool === "claude") {
@@ -661,7 +682,7 @@ function signInPanel(c, initial, supported) {
     const refresh = async () => {
       if (!section.isConnected) return;
       try {
-        const fresh = await api(endpoint);
+        const fresh = await readLogin(endpoint);
         if (section.isConnected) update(fresh);
       } catch (err) {
         if (section.isConnected) {
@@ -679,7 +700,7 @@ function signInPanel(c, initial, supported) {
       button.disabled = true;
       clearTimeout(poll);
       try {
-        const next = await api(path, "POST", payload);
+        const next = await changeLogin(path, payload);
         if (section.isConnected) update(next);
       } catch (err) {
         button.disabled = false;
@@ -703,7 +724,7 @@ function signInPanel(c, initial, supported) {
         completed: "Device sign-in completed for " + c.label + ".",
         expired: "Device code expired. Start again for a new code.",
         failed: "Device sign-in did not complete. Check that device login is allowed for your ChatGPT account or workspace, then try again.",
-        cancelled: "Sign-in cancelled.",
+        cancelled: "Stopped waiting for sign-in.",
       };
       body.replaceChildren(...(messages[v.state] ? [el("p", {}, messages[v.state])] : []), start);
     }
@@ -716,7 +737,7 @@ async function accounts(params, ver, enter) {
     data = await api("accounts?tool=" + t);
   if (ver !== version) return;
   const c = data.items.find((c) => String(c.id) === params.get("id")) || data.items[0];
-  const login = c && t === "codex" ? await api("accounts/" + c.id + "/device-login") : null;
+  const login = c && t === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
   if (ver !== version) return;
   const tabs = el(
     "div",
@@ -770,7 +791,7 @@ async function accounts(params, ver, enter) {
   }
   const detail = el("div", { class: "detail" });
   if (c) {
-    const enabled = el("input", { type: "checkbox", checked: c.enabled, "aria-label": "Enabled" });
+    const enabled = el("input", { type: "checkbox", checked: c.enabled, "aria-describedby": "routing-note" });
     enabled.onchange = guard(async () => {
       const next = enabled.checked;
       if (
@@ -873,7 +894,8 @@ async function accounts(params, ver, enter) {
       );
     }
     detail.append(el("section", {}, el("h3", {}, "Chat routing"),
-      el("label", {class: "switch"}, enabled, "Enable for new chats"),
+      el("label", {class: "switch"}, enabled, "Enable profile"),
+      el("p", {id: "routing-note", class: "caption"}, "Disabling this profile blocks new chats and resumes. Chats already running are not stopped."),
       el("dl", {class: "facts"},
         datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
         datum("Current", current),

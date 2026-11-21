@@ -38,10 +38,14 @@ if sys.argv[1:2] == ["app-server"]:
             login_id = str(uuid.uuid4())
             result = {"type":"chatgptDeviceCode","loginId":login_id,"verificationUrl":"https://auth.openai.com/codex/device","userCode":"TEST-ONLY"}
             def complete():
-                while not (home / "finish-login").exists(): time.sleep(.02)
+                wrong = home / "unrelated-login"
+                while not (home / "finish-login").exists():
+                    if wrong.exists():
+                        print(json.dumps({"method":"account/login/completed","params":{"loginId":"unrelated","success":False}}), flush=True)
+                        wrong.unlink()
+                    time.sleep(.02)
                 print(json.dumps({"method":"account/login/completed","params":{"loginId":login_id,"success":True}}), flush=True)
             threading.Thread(target=complete,daemon=True).start()
-            print(json.dumps({"method":"account/login/completed","params":{"loginId":"unrelated","success":True}}), flush=True)
         if r["method"] == "account/login/cancel":
             assert r["params"]["loginId"] == login_id
             (home/"login-cancelled").touch()
@@ -185,6 +189,21 @@ else:
         self.assertEqual(json.loads(self.cli("claude","auth","status").stdout)["home"],work["home"])
         self.assertEqual(self.api("GET","sessions")[1]["items"], [])
 
+    def test_managed_profile_under_relocated_data_home(self):
+        data = self.root / "relocated-share"
+        data.mkdir()
+        share = self.root / ".local/share"
+        share.parent.mkdir(exist_ok=True)
+        share.symlink_to(data, target_is_directory=True)
+        status, c, _ = self.api("POST", "accounts", {"tool":"claude","label":"Personal","create":True})
+        self.assertEqual(status, 201, c)
+        home = Path(c["home"])
+        self.assertEqual(home.parent, data / "cc-profile/profiles/claude")
+        self.assertTrue(c["present"])
+        alias = share / "cc-profile/profiles/claude" / home.name
+        status, error, _ = self.api("POST", "accounts", {"tool":"claude","label":"Existing","home":str(alias)})
+        self.assertEqual((status, error["error"]), (400, "bad_home"))
+
     def test_profile_device_sign_in_lifecycle(self):
         def create(label):
             status, c, _ = self.api("POST", "accounts", {"tool":"codex","label":label,"create":True,
@@ -214,6 +233,13 @@ else:
         self.assertTrue((home/"login-cancelled").exists())
         self.api("POST",path,body)
         wait(path, "waiting")
+        wrong = home/"unrelated-login"
+        wrong.touch()
+        for _ in range(100):
+            if not wrong.exists(): break
+            time.sleep(.03)
+        self.assertFalse(wrong.exists(), "fixture did not emit the unrelated completion")
+        self.assertEqual(self.api("GET",path)[1]["state"], "waiting")
         (home/"finish-login").touch()
         self.assertNotIn("code", wait(path, "completed"))
         (home/"login-fails").touch()
