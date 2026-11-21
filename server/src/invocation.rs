@@ -91,6 +91,27 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 if inline.is_none() && words.first() == Some(&("login", true)) => {}
             (true, "--console" | "--claudeai" | "--sso" | "--text")
                 if inline.is_none() && words.first() == Some(&("auth", true)) => {}
+            (true, "--client-secret")
+                if inline.is_none() && words.first() == Some(&("mcp", true)) => {}
+            (
+                true,
+                "-s" | "--scope" | "-t" | "--transport" | "-e" | "--env" | "-H" | "--header"
+                | "--callback-port" | "--client-id",
+            )
+            | (
+                false,
+                "--env"
+                | "--url"
+                | "--bearer-token-env-var"
+                | "--oauth-client-id"
+                | "--oauth-client-secret"
+                | "--oauth-client-registration"
+                | "--oauth-resource",
+            ) if words.first() == Some(&("mcp", true)) => {
+                if value()?.starts_with('-') && inline.is_none() {
+                    return Err(unsupported());
+                }
+            }
             (
                 true,
                 "--model"
@@ -149,6 +170,26 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     }
     let command = words.first().filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
     let sub = words.get(1).filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
+    // Claude can dispatch Remote Control before handling ordinary help flags.
+    // Codex's hidden subcommands and aliases are also reserved prompt words.
+    if matches!(
+        (claude, command),
+        (true, Some("remote-control" | "rc"))
+            | (
+                false,
+                Some(
+                    "cloud"
+                        | "cloud-tasks"
+                        | "remote-control"
+                        | "tcp-tunnel"
+                        | "git-credential"
+                        | "execpolicy"
+                        | "responses-api-proxy"
+                )
+            )
+    ) {
+        return Err(unsupported());
+    }
     let mut interactive = false;
     let intent = if help {
         Intent::Misc
@@ -199,10 +240,10 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 exact(1)?
             }
             Some(
-                "agents" | "review" | "mcp" | "plugin" | "app-server" | "remote-control"
-                | "completion" | "update" | "sandbox" | "debug" | "apply" | "a" | "queue"
-                | "archive" | "delete" | "migrate-rollouts" | "migrate-nfs-db" | "unarchive"
-                | "fork" | "cloud" | "exec-server" | "exec" | "e",
+                "agents" | "review" | "mcp" | "plugin" | "app-server" | "completion" | "update"
+                | "sandbox" | "debug" | "apply" | "a" | "queue" | "archive" | "delete"
+                | "migrate-rollouts" | "migrate-nfs-db" | "unarchive" | "fork" | "exec-server"
+                | "exec" | "e",
             ) => return Err(unsupported()),
             _ if words.len() <= 1 => {
                 interactive = true;
@@ -265,5 +306,76 @@ mod tests {
         ] {
             assert!(parse(t, &args).is_err(), "{args:?}")
         }
+    }
+    #[test]
+    fn native_service_commands_are_not_local_chats() {
+        for (tool, cmd) in [
+            ("claude", "remote-control"),
+            ("claude", "rc"),
+            ("codex", "cloud-tasks"),
+            ("codex", "cloud"),
+            ("codex", "remote-control"),
+            ("codex", "tcp-tunnel"),
+            ("codex", "git-credential"),
+            ("codex", "execpolicy"),
+            ("codex", "responses-api-proxy"),
+        ] {
+            for args in [vec![cmd], vec![cmd, "--help"]] {
+                assert_eq!(
+                    parse(tool, &args).err().unwrap().1,
+                    "unsupported_invocation"
+                );
+            }
+            assert_eq!(parse(tool, &["--", cmd]).unwrap().intent, Intent::New);
+            assert_eq!(parse(tool, &["--model", cmd]).unwrap().intent, Intent::New);
+        }
+    }
+
+    #[test]
+    fn mcp_maintenance_accepts_native_flag_values_only_under_mcp() {
+        for (tool, args) in [
+            (
+                "claude",
+                vec![
+                    "mcp",
+                    "add",
+                    "--transport",
+                    "http",
+                    "--scope=user",
+                    "srv",
+                    "https://localhost/mcp",
+                ],
+            ),
+            ("claude", vec!["mcp", "add-json", "-s", "user", "srv", "-"]),
+            (
+                "codex",
+                vec![
+                    "mcp",
+                    "add",
+                    "srv",
+                    "--env",
+                    "A=B",
+                    "--",
+                    "command",
+                    "--child-option",
+                ],
+            ),
+            (
+                "codex",
+                vec![
+                    "mcp",
+                    "add",
+                    "srv",
+                    "--url",
+                    "https://localhost/mcp",
+                    "--bearer-token-env-var",
+                    "MCP_TOKEN",
+                ],
+            ),
+        ] {
+            assert_eq!(parse(tool, &args).unwrap().intent, Intent::Misc);
+        }
+        assert!(parse("claude", &["--scope", "user"]).is_err());
+        assert!(parse("codex", &["--url", "https://localhost"]).is_err());
     }
 }
