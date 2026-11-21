@@ -24,9 +24,9 @@ class PanelPassword(unittest.TestCase):
         self.assertFalse((s.root/"run/cc-profile/pairing-token").exists())
         self.assertNotEqual(s.api("POST","login",{"token":"obsolete token"})[0],200)
         self.assertEqual(s.api("GET","accounts?tool=claude")[0],403)
-        self.assertEqual(s.api("POST","setup",{"password":"short"})[0],400)
+        self.assertEqual(s.api("POST","setup",{"password":"abc"})[0],400)
         self.assertEqual(s.api("POST","setup",{"password":s.password},{"Origin":"https://example.invalid"})[0],403)
-        passwords = [" first panel passphrase ", "second panel passphrase"]
+        passwords = ["1234", " a b"]
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             results=list(pool.map(lambda p:s.api("POST","setup",{"password":p}),passwords))
         self.assertCountEqual([r[0] for r in results],[200,409])
@@ -71,7 +71,7 @@ class PanelPassword(unittest.TestCase):
         _,data,headers=s.api("POST","login",{"password":s.password})
         s.session=data["session"]
         self.assertEqual(s.api("GET","accounts?tool=claude")[0],200)
-        new="replacement passphrase"
+        new="aaaa"
         self.assertNotEqual(self.set_local(new,"mismatch"),0)
         self.assertEqual(s.api("GET","accounts?tool=claude")[0],200)
         self.assertEqual(self.set_local(new,new),0)

@@ -193,7 +193,7 @@ function passwordForm() {
     { class: "password-form" },
     el("span", { class: "brandmark" }, icon("key-round")),
     el("h1", {}, heading),
-    setup && el("p", { class: "muted" }, "Use at least 12 characters."),
+    setup && el("p", { class: "muted" }, "Use at least 4 characters."),
     field(setup ? "New password" : "Password", password),
     confirm && field("Confirm password", confirm),
     error,
@@ -450,13 +450,15 @@ function accountForm(t, c) {
     c?.proxy_mode || "inherit",
   );
   const http = el("input", {
-    type: "password",
-    autocomplete: "new-password",
+    type: "text",
+    autocomplete: "off",
+    spellcheck: "false",
     placeholder: c?.http_proxy?.url || "http://proxy:3128",
   });
   const https = el("input", {
-    type: "password",
-    autocomplete: "new-password",
+    type: "text",
+    autocomplete: "off",
+    spellcheck: "false",
     placeholder: c?.https_proxy?.url || "http://proxy:3128",
   });
   const fields = el(
@@ -844,7 +846,7 @@ async function accounts(params, ver, enter) {
       signInPanel(c, login, data.supported),
     );
     if (t === "codex") {
-      const cmd = "CODEX_HOME=" + shell(c.home) + " codex --no-daemon";
+      const cmd = "ccp login " + c.id;
       detail.append(
         el(
           "section",
@@ -853,7 +855,7 @@ async function accounts(params, ver, enter) {
           el(
             "p",
             { class: "caption" },
-            "Native approval: run the scoped command, then open /hooks.",
+            "Run this command, approve the observer in /hooks, then exit Codex and select Check observer.",
           ),
           el(
             "div",

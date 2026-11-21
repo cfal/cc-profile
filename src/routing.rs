@@ -1,7 +1,7 @@
 use crate::{
     invocation::{Intent, Invocation, classify, native_id},
     native::{Build, env_patch, validate_binary},
-    protocol::{Plan, VERSION},
+    protocol::{Plan, VERSION, profile_login_args},
     store::{Config, Store, config, configs},
     types::{Error, Result, now, tool},
 };
@@ -18,12 +18,13 @@ fn check_req(r: &Request) -> Result<()> {
     tool(&r.tool)?;
     if let Some(id) = r.login_profile
         && (id <= 0
-            || r.tool != "claude"
-            || !matches!(r.argv.as_slice(), [cmd, op] if cmd == "auth" && matches!(op.as_str(), "login" | "status")))
+            || ![false, true].into_iter().any(|status| {
+                profile_login_args(&r.tool, status).is_some_and(|args| r.argv.as_slice() == args)
+            }))
     {
         return Err(Error::bad(
             "bad_request",
-            "A profile sign-in only accepts Claude login or status.",
+            "Unsupported profile setup command.",
         ));
     }
     if Uuid::parse_str(&r.request_id).is_err()
@@ -76,7 +77,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
         "no_current" => Error::conflict("no_current", "Set current for this tool in Accounts."),
         "login_profile" => Error::conflict(
             "login_profile",
-            "This Claude profile is missing, replaced, or belongs to another provider.",
+            "This profile is missing, replaced, or belongs to another provider.",
         ),
         "current_missing" => Error::conflict(
             "current_missing",
@@ -347,7 +348,17 @@ pub fn launch_in(
     check_req(req)?;
     let fingerprint =
         digest(serde_json::to_vec(req).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
-    let parsed = classify(&req.tool, &req.argv, &req.cwd);
+    // The exact setup commands were checked above. The Codex /hooks TUI is
+    // maintenance here; the same argv without a named profile is a new chat.
+    let parsed = if req.login_profile.is_some() {
+        Ok(Invocation {
+            intent: Intent::Misc,
+            workspace: req.cwd.clone(),
+            interactive_codex: false,
+        })
+    } else {
+        classify(&req.tool, &req.argv, &req.cwd)
+    };
     store.write(|db| {
         if let Some(prior) = Prior::find(db, &req.request_id)? {
             return Ok(prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone),workspace_ready));

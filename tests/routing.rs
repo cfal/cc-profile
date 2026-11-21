@@ -72,6 +72,38 @@ fn login_plan_targets_only_the_named_claude_profile_even_on_retry() {
     );
 }
 #[test]
+fn codex_profile_setup_is_maintenance_only_for_exact_setup_argv() {
+    let f = Fixture::new();
+    let exe = build();
+    let c = f.add("codex", "work");
+    f.store
+        .edit(c.id, &json!({"revision":c.revision, "enabled":false}))
+        .unwrap();
+    let mut r = req(&f, "codex", &["--no-daemon"], &exe);
+    assert_eq!(
+        launch(&f.store, &exe, &r).unwrap_err().1,
+        "no_enabled_config"
+    );
+    r.request_id = Uuid::new_v4().to_string();
+    r.login_profile = Some(c.id);
+    let p = launch(&f.store, &exe, &r).unwrap();
+    assert_eq!(p, launch(&f.store, &exe, &r).unwrap());
+    assert_eq!(p.decision, "profile_login");
+    assert_eq!(p.argv, ["--no-daemon"]);
+    assert!(!p.env_set.contains_key("CCP_LAUNCH_ID"));
+    assert_eq!(
+        f.store
+            .db()
+            .unwrap()
+            .query_row("SELECT cursor FROM tools WHERE tool='codex'", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    r.argv.push("chat".into());
+    assert_eq!(launch(&f.store, &exe, &r).unwrap_err().1, "bad_request");
+}
+#[test]
 fn retries_disabled_resumes_and_redacted_log() {
     let f = Fixture::new();
     let a = f.add("claude", "a");

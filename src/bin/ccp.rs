@@ -1,11 +1,11 @@
 use ccpd::{
     native::{MARKERS, PROXIES, executable},
     paths,
-    protocol::{Failure, Plan, Request, VERSION},
+    protocol::{Failure, Plan, Request, VERSION, profile_login_args},
     socket,
     types::{Error, Result},
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     env,
     ffi::{CString, OsString},
@@ -24,7 +24,7 @@ const HELP: &str = "Usage: ccp <claude|codex> [native arguments...]
   ccp codex exec --json 'review these changes'
   ccp claude --resume <session-uuid>
   ccp codex resume <session-uuid>
-  ccp login <claude-profile-id> [--status]
+  ccp login <profile-id> [--status]
 
 New chats rotate; exact resumes use their original config. No transfers,
 pickers or --last. Manage accounts and Current in the ccpd web panel
@@ -87,7 +87,8 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
         return Err(invalid());
     }
     if MARKERS.iter().any(|k| plan.env_set.contains_key(*k)) {
-        if req.tool != "codex"
+        if req.login_profile.is_some()
+            || req.tool != "codex"
             || plan.env_set.get(MARKERS[0]) != Some(&req.request_id)
             || plan.env_set.get(MARKERS[1]) != Some(&req.ticket)
         {
@@ -107,18 +108,20 @@ struct Denial {
     message: String,
 }
 
-async fn request_plan(r: &Request) -> Result<Plan> {
-    let body = serde_json::to_vec(r).map_err(|_| utf8())?;
+async fn request<T: DeserializeOwned>(
+    route: &'static str,
+    body: &[u8],
+    deadline: Instant,
+) -> Result<T> {
     if body.len() > 256 * 1024 {
         return Err(Error::bad(
             "request_size",
             "Launch request too large; use stdin for a long prompt.",
         ));
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
     for attempt in 0..2 {
         // Retry transport failures only, with identical bytes and the original deadline.
-        let (status, reply) = match timeout_at(deadline, socket::post("/v1/launch", &body)).await {
+        let (status, reply) = match timeout_at(deadline, socket::post(route, body)).await {
             Ok(Err(e)) if e.1 == "transport" && attempt == 0 => continue,
             Ok(result) => result?,
             Err(_) => {
@@ -131,7 +134,7 @@ async fn request_plan(r: &Request) -> Result<Plan> {
         if status != axum::http::StatusCode::OK {
             let msg = serde_json::from_slice::<Denial>(&reply)
                 .map(|v| v.message)
-                .unwrap_or_else(|_| format!("Router refused the launch ({status})."));
+                .unwrap_or_else(|_| format!("Router refused the request ({status}). Check that ccp and ccpd are up to date."));
             return Err(Error(status, "refused", msg));
         }
         return serde_json::from_slice(&reply).map_err(|_| invalid());
@@ -179,7 +182,9 @@ async fn run() -> Result<ExitCode> {
     let mut args = env::args_os().skip(1);
     let first = args.next();
     let mut login_profile = None;
-    let tool = match first
+    let login_tool: String;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (tool, argv) = match first
         .as_deref()
         .map(|s| s.to_str().ok_or_else(utf8))
         .transpose()?
@@ -192,38 +197,41 @@ async fn run() -> Result<ExitCode> {
             println!("ccp {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
         }
-        Some(t @ ("claude" | "codex")) => t,
+        Some(t @ ("claude" | "codex")) => (
+            t,
+            args.map(OsString::into_string)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| utf8())?,
+        ),
         Some("login") => {
             login_profile = args
                 .next()
                 .and_then(|s| s.to_str()?.parse::<i64>().ok())
                 .filter(|id| *id > 0);
-            if login_profile.is_none() {
-                eprintln!("Usage: ccp login <claude-profile-id> [--status]");
+            let Some(id) = login_profile else {
+                eprintln!("Usage: ccp login <profile-id> [--status]");
                 return Ok(ExitCode::from(2));
-            }
-            "claude"
+            };
+            let status = match args.next() {
+                None => false,
+                Some(s) if s == "--status" && args.next().is_none() => true,
+                _ => {
+                    eprintln!("Usage: ccp login <profile-id> [--status]");
+                    return Ok(ExitCode::from(2));
+                }
+            };
+            login_tool = request("/v1/profile-tool", id.to_string().as_bytes(), deadline).await?;
+            let native = profile_login_args(&login_tool, status).ok_or_else(invalid)?;
+            (
+                login_tool.as_str(),
+                native.iter().map(|s| s.to_string()).collect(),
+            )
         }
         _ => {
             eprintln!("{HELP}");
             return Ok(ExitCode::from(2));
         }
     };
-    let mut argv: Vec<String> = args
-        .map(OsString::into_string)
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|_| utf8())?;
-    if login_profile.is_some() {
-        let op = match argv.as_slice() {
-            [] => "login",
-            [arg] if arg == "--status" => "status",
-            _ => {
-                eprintln!("Usage: ccp login <claude-profile-id> [--status]");
-                return Ok(ExitCode::from(2));
-            }
-        };
-        argv = vec!["auth".into(), op.into()];
-    }
     let binary = executable(tool);
     if let Some(path) = &binary {
         if let (Ok(own), Ok(native)) = (fs::metadata("/proc/self/exe"), fs::metadata(path))
@@ -257,13 +265,19 @@ async fn run() -> Result<ExitCode> {
         binary,
         override_names,
     };
-    let plan = request_plan(&req).await?;
+    let body = serde_json::to_vec(&req).map_err(|_| utf8())?;
+    let plan = request("/v1/launch", &body, deadline).await?;
     let home = validate(&plan, &req)?;
     let binary = req
         .binary
         .as_deref()
         .ok_or_else(|| Error::bad("binary", "Native executable not found on PATH."))?;
     eprintln!("ccp: {tool}/{} -> {home}", plan.label);
+    if req.login_profile.is_some() && tool == "codex" && req.argv == ["--no-daemon"] {
+        eprintln!(
+            "ccp: Profile setup. Sign in or open /hooks, then exit. Start managed chats with ccp codex."
+        );
+    }
     let error = exec_native(binary, &req, &plan);
     let errno = error.raw_os_error().unwrap_or(libc::EIO);
     let failure = Failure {

@@ -72,6 +72,12 @@ async fn same_uid(req: Request, next: Next) -> Response {
 pub fn private(s: Shared) -> Router {
     Router::new()
         .route(
+            "/v1/profile-tool",
+            post(|State(s): State<Shared>, Json(id): Json<i64>| async move {
+                blocking(move || Ok(Json(config(&*s.store.db()?, id)?.tool))).await
+            }),
+        )
+        .route(
             "/v1/launch",
             post(
                 |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {

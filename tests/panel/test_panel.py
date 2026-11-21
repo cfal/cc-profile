@@ -16,6 +16,7 @@ class Panel(unittest.TestCase):
     def test_accounts_pagination_and_mobile(self):
         service = test_service.Service("test_web_authenticates_reads_and_mutations")
         service.claim = False
+        service.password = "1234"
         self.addCleanup(service.doCleanups)
         service.setUp()
         port = service.port
@@ -65,6 +66,8 @@ class Panel(unittest.TestCase):
             expect(page.locator(".account-row").get_by_text("Current")).to_be_visible()
             page.get_by_role("button",name="Edit config").click()
             page.get_by_label("Proxy mode").select_option("custom")
+            for name in ("HTTP_PROXY","HTTPS_PROXY"):
+                expect(page.get_by_label(name,exact=True)).to_have_attribute("type","text")
             page.get_by_label("HTTPS_PROXY",exact=True).fill("http://user:proxysecret@proxy.example:8080")
             page.get_by_role("button",name="Save changes").click()
             expect(page.locator(".detail")).to_contain_text("proxy.example")
@@ -122,6 +125,8 @@ class Panel(unittest.TestCase):
             expect(completed).to_be_visible()
             expect(verification).to_have_count(0)
             expect(page.get_by_role("button",name="Check observer")).to_be_visible()
+            page.get_by_role("button",name="Copy approval command").click()
+            self.assertEqual(page.evaluate("navigator.clipboard.readText()"), "ccp login " + str(codex["id"]))
             expect(enabled).not_to_be_checked()
             self.snapshot(page,"accounts")
             page.set_viewport_size({"width":390,"height":844})

@@ -68,6 +68,7 @@ impl Eligibility {
 }
 pub async fn check(s: &Shared, r: &Request) -> Result<Option<Eligibility>> {
     if r.tool != "codex"
+        || r.login_profile.is_some()
         || !r.override_names.is_empty()
         || r.binary.as_deref() != Some(&s.codex.bin)
         || !s.codex.supported

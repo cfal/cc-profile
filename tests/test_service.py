@@ -250,6 +250,27 @@ else:
         self.assertEqual(self.api("GET","startups")[1]["items"], [])
         self.assertEqual(self.api("GET","sessions")[1]["items"], [])
 
+    def test_codex_terminal_setup_and_status_use_named_profile_proxy(self):
+        work = self.account("codex", "Work")
+        self.assertEqual(self.api("PUT", "current/codex", {"config_id":work["id"]})[0], 200)
+        self.env["HTTPS_PROXY"] = "http://from-shell.invalid:8888"
+        for mode, expected in [("custom","http://profile.invalid:3128/"), ("inherit",self.env["HTTPS_PROXY"]), ("direct",None)]:
+            data = {"create":True,"tool":"codex","label":mode,"proxy_mode":mode}
+            if mode == "custom": data["http_proxy"] = "http://profile.invalid:3128"
+            status, c, _ = self.api("POST", "accounts", data)
+            self.assertEqual(status, 201, c)
+            self.assertFalse(c["enabled"] or c["current"])
+            for options, argv in [([], ["--no-daemon"]), (["--status"], ["login", "status"])]:
+                p = self.cli("login", str(c["id"]), *options)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                native = json.loads(p.stdout)
+                self.assertEqual((native["home"],native["argv"],native["proxy"],native["id"]),
+                                 (c["home"],argv,expected,None))
+        self.assertEqual(json.loads(self.cli("codex","login","status").stdout)["home"],work["home"])
+        self.assertEqual(self.api("GET","sessions")[1]["items"], [])
+        rows = self.api("GET","startups")[1]["items"]
+        self.assertTrue(all(r["intent"] == "misc" and r["state"] == "routed" for r in rows))
+
     def test_claude_exec_stickiness_and_fail_closed_controls(self):
         c = self.account("claude", "one")
         self.account("claude", "two")

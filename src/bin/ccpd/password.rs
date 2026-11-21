@@ -27,10 +27,10 @@ fn hashing_error() -> Error {
     )
 }
 pub fn hash(password: &str) -> Result<String> {
-    if password.len() > 1024 || password.chars().count() < 12 {
+    if password.len() > 1024 || password.chars().count() < 4 {
         return Err(Error::bad(
             "password_length",
-            "Use at least 12 characters and at most 1024 bytes.",
+            "Use at least 4 characters and at most 1024 bytes.",
         ));
     }
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(|_| hashing_error())?;
@@ -85,7 +85,7 @@ pub fn prompt() -> Result<()> {
             )
         })
     };
-    let new = read("New panel password (at least 12 characters): ")?;
+    let new = read("New panel password (at least 4 characters): ")?;
     if read("Confirm new password: ")? != new {
         return Err(Error::bad(
             "mismatch",
