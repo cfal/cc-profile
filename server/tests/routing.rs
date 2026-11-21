@@ -70,6 +70,62 @@ fn retries_disabled_resumes_and_redacted_log() {
     assert!(!rows.to_string().contains("private prompt"));
 }
 #[test]
+fn restart_revalidates_the_native_executable_on_replay() {
+    let f = Fixture::new();
+    let original = build();
+    f.add("claude", "a");
+    let r = req(&f, "claude", &[], &original);
+    let first = launch(&f.store, &original, &r).unwrap();
+    let resume = req(&f, "claude", &["--resume", &first.argv[1]], &original);
+    launch(&f.store, &original, &resume).unwrap();
+    let mut changed = original.clone();
+    changed.bin = f.root.join("other-version");
+    std::fs::write(&changed.bin, "new native installation").unwrap();
+    changed.fingerprint = stamp(&changed.bin);
+    let reopened =
+        ccpd::store::Store::open(&ccpd::store::Store::user_db_path(&f.root.join("state"))).unwrap();
+    for request in [&r, &resume] {
+        assert_eq!(
+            launch(&reopened, &changed, request).unwrap_err().1,
+            "stale_plan"
+        );
+    }
+    let unverified = Build {
+        supported: false,
+        ..original
+    };
+    assert_eq!(
+        launch(&reopened, &unverified, &resume).unwrap_err().1,
+        "stale_plan"
+    );
+}
+
+#[test]
+fn replay_preserves_a_denied_workspace_error() {
+    let f = Fixture::new();
+    let b = build();
+    let request = req(&f, "codex", &["-C", "missing"], &b);
+    for _ in 0..2 {
+        assert_eq!(launch(&f.store, &b, &request).unwrap_err().1, "bad_cwd");
+    }
+}
+
+#[test]
+fn replay_does_not_follow_a_redirected_workspace() {
+    let f = Fixture::new();
+    let b = build();
+    let c = f.add("codex", "a");
+    approve(&f, &b, &c);
+    let alias = f.root.join("work");
+    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
+    let request = req(&f, "codex", &["-C", "work", "exec"], &b);
+    launch(&f.store, &b, &request).unwrap();
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&c.home, alias).unwrap();
+    assert_eq!(launch(&f.store, &b, &request).unwrap_err().1, "stale_plan");
+}
+
+#[test]
 fn simultaneous_new_chats_split_evenly_and_survive_reopen() {
     let f = Fixture::new();
     let a = f.add("claude", "a");

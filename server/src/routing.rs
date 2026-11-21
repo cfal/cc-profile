@@ -82,6 +82,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "Unset inherited authentication or storage overrides before launching.",
         ),
         "exact_id_required" => native_id("").unwrap_err(),
+        "bad_cwd" => Error::bad("bad_cwd", "Working directory is unavailable."),
         _ => Error::bad(
             "unsupported_invocation",
             "Unsupported or ambiguous invocation. See ccp --help.",
@@ -243,14 +244,15 @@ struct Prior {
     config: Option<i64>,
     revision: Option<i64>,
     created: i64,
+    workspace: std::path::PathBuf,
 }
 impl Prior {
     fn find(db: &Connection, request_id: &str) -> Result<Option<Self>> {
         Ok(db.query_row(
-            "SELECT digest,state,reason,native_id,config_id,revision,created_ms FROM launches WHERE request_id=?",
+            "SELECT digest,state,reason,native_id,config_id,revision,created_ms,workspace FROM launches WHERE request_id=?",
             [request_id], |s| Ok(Self {
                 digest:s.get(0)?, state:s.get(1)?, reason:s.get(2)?, native_id:s.get(3)?,
-                config:s.get(4)?, revision:s.get(5)?, created:s.get(6)?,
+                config:s.get(4)?, revision:s.get(5)?, created:s.get(6)?, workspace:s.get::<_,String>(7)?.into(),
             })
         ).optional()?)
     }
@@ -286,7 +288,9 @@ impl Prior {
         if !valid
             || !matches!(self.state.as_str(), "routed" | "pending")
             || now() - self.created > 30_000
-            || !build.unchanged()
+            || validate_binary(build, req.binary.as_deref()).is_err()
+            || (!build.supported && i.intent != Intent::Misc)
+            || self.workspace != i.workspace
         {
             return Err(Error::conflict(
                 "stale_plan",
