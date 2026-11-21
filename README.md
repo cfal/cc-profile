@@ -83,7 +83,7 @@ ccp codex login status
 
 Interactive Claude can dispatch a subcommand even after `--`. The router refuses ambiguous forms such as `ccp claude -- rc` and `ccp claude -- update`; to use a verb as a literal one-word prompt, use print mode, e.g. `ccp claude -p -- rc`.
 
-**Startups** records decisions, denials, observed IDs and reported exec failures, not running processes or successful model calls. Full argv, prompts, tokens and proxy URLs are not logged. **Sessions** is a separately paginated, permanent mapping table, not a transcript viewer. Disabling a config blocks future admissions; it cannot revoke a delivered plan or stop an existing process.
+The **Dashboard** shows account quotas first, then **Startup logs** with routing decisions, denials, observed IDs and reported exec failures. The logs do not track running processes or successful model calls. Full argv, prompts, tokens and proxy URLs are not logged. **Sessions** is a separately paginated, permanent mapping table, not a transcript viewer. Disabling a config blocks future admissions; it cannot revoke a delivered plan or stop an existing process.
 
 ## Proxies and quota
 
@@ -97,7 +97,7 @@ When Custom has only an HTTP proxy, that address is used for HTTPS requests too.
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
 - Claude: Linux file-backed OAuth token in the selected `CLAUDE_CONFIG_DIR`, read-only GET to the vendor usage endpoint. Expired credentials require native renewal; the dashboard does not rotate a refresh token behind an active session.
-- Accounts opening refreshes stale enabled rows; explicit Refresh can check one disabled row. Results are cached for five minutes, two upstream jobs maximum, single-flight per config with backoff. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Neither quota nor provider connectivity participates in routing. Inherit uses the service environment for quota, the caller's environment for launches.
+- Opening Dashboard or Accounts refreshes stale enabled profiles; a profile's own refresh button can also check it while disabled. Both views share the same five-minute cache, with at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Neither quota nor provider connectivity participates in routing. Inherit uses the service environment for quota, the caller's environment for launches.
 
 ## Storage and recovery
 

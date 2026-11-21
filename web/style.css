@@ -468,6 +468,35 @@ td .uuid {
 .quota time {
   font-size: 13px;
 }
+.quota-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.quota-grid > section {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 12px 14px;
+  overflow-wrap: anywhere;
+}
+.quota-grid h3 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.quota-grid .caption {
+  margin: 5px 0 10px;
+}
+#startup-logs {
+  margin-top: 28px;
+}
+#startup-logs > .sectionhead {
+  margin-bottom: 10px;
+}
 .compatibility,
 .detail .row + .actions {
   margin-top: 12px;

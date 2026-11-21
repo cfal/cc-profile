@@ -128,7 +128,7 @@ async function api(path, method = "GET", body) {
 function locationState() {
   const [v, q] = location.hash.slice(1).split("?");
   return {
-    view: ["accounts", "sessions", "startups"].includes(v) ? v : "startups",
+    view: ["accounts", "sessions"].includes(v) ? v : "dashboard",
     params: new URLSearchParams(q),
   };
 }
@@ -238,19 +238,23 @@ function empty(heading, description, action) {
     action,
   );
 }
-async function logs(view, params, ver) {
+async function loadProfiles() {
+  const registries = await Promise.all(Object.keys(names).map((tool) => api("accounts?tool=" + tool)));
+  return registries.flatMap((r) => r.items);
+}
+async function logs(view, params, ver, enter) {
   const sessions = view === "sessions",
     t = params.get("tool") || "",
     id = params.get("config_id") || "",
     result = params.get("state") || "";
   const q = new URLSearchParams(params);
   if (cursors.at(-1)) q.set("before", cursors.at(-1));
-  const [page, ...registries] = await Promise.all([
-    api(view + "?" + q),
-    ...Object.keys(names).map((t) => api("accounts?tool=" + t)),
+  const [page, profiles] = await Promise.all([
+    api((sessions ? "sessions" : "startups") + "?" + q),
+    loadProfiles(),
   ]);
   if (ver !== version) return;
-  const configs = registries.flatMap((r) => r.items).filter((c) => !t || c.tool === t);
+  const configs = profiles.filter((c) => !t || c.tool === t);
   function filter(k, v) {
     const next = Object.fromEntries(params);
     next[k] = v;
@@ -379,16 +383,19 @@ async function logs(view, params, ver) {
   let records;
   if (page.items.length) records = el("div", { class: "tablewrap" }, table);
   else if (cursors.length > 1) records = empty("No records on this page");
-  else if (params.size) records = empty("No matching " + view, null, btn("Clear filters", () => go(view)));
+  else if (params.size) records = empty(sessions ? "No matching sessions" : "No matching startups",
+    null, btn("Clear filters", () => go(view)));
   else records = sessions
     ? empty("No session mappings", "Session IDs appear here when assigned or observed.")
     : empty("No startup requests", "Only launches through ccp appear here.");
 
-  main.replaceChildren(title(sessions ? "Sessions" : "Startups", ib("Refresh", "refresh-cw", render)),
-    filters, records);
+  const root = sessions ? main : ((!enter && $("#startup-logs")) || openDashboard(profiles));
+  root.replaceChildren(sessions ? title("Sessions", ib("Refresh", "refresh-cw", render)) :
+    el("div", {class: "sectionhead"}, el("h2", {id: "logs-heading"}, "Startup logs"),
+      ib("Refresh startup logs", "refresh-cw", render)), filters, records);
   const paginated = cursors.length > 1 || page.next_cursor != null;
   if (!page.items.length && !paginated) return;
-  main.append(el(
+  root.append(el(
     "div",
     { class: "pages" },
     text(page.items.length + (page.items.length === 1 ? " record" : " records") +
@@ -557,7 +564,7 @@ function resetTime(ms) {
     ? text("Reset unknown")
     : el("time", { datetime: d.toISOString(), title: d.toLocaleString() }, fmt(ms) + " · " + delta);
 }
-function capacity(c) {
+function capacity(c, heading = "Quota & resets", refreshed = render) {
   const q = c.quota,
     s = q.snapshot;
   const section = el(
@@ -566,13 +573,13 @@ function capacity(c) {
     el(
       "div",
       { class: "sectionhead" },
-      el("h3", {}, "Quota & resets"),
+      el("h3", {}, heading),
       ib(
         "Refresh quota",
         "refresh-cw",
         async () => {
           await api("accounts/" + c.id + "/quota/refresh", "POST", {});
-          await render();
+          await refreshed();
         },
         q.loading,
       ),
@@ -635,6 +642,40 @@ function capacity(c) {
     );
   }
   return section;
+}
+function openDashboard(profiles) {
+  const grid = el("div", {class: "quota-grid"});
+  const refresh = async (staleOnly) => {
+    await api("quota/refresh", "POST", {stale_only: staleOnly});
+    await read();
+  };
+  const all = ib("Refresh enabled quotas", "refresh-cw", () => refresh(false));
+  const overview = el("section", {"aria-labelledby": "quota-heading"},
+    el("div", {class: "sectionhead"}, el("h2", {id: "quota-heading"}, "Account quotas"), all), grid);
+  const log = el("section", {id: "startup-logs", "aria-labelledby": "logs-heading"});
+  main.replaceChildren(title("Dashboard"), overview, log);
+
+  // Quota polling replaces only the meters, never a log filter being edited.
+  let seq = 0, poll;
+  async function read() {
+    if (!overview.isConnected) return;
+    clearTimeout(poll);
+    const current = ++seq;
+    const rows = await loadProfiles();
+    if (current === seq && overview.isConnected) draw(rows);
+  }
+  function draw(rows) {
+    all.disabled = !rows.some((c) => c.enabled);
+    grid.replaceChildren(...rows.map((c) => capacity(c, [
+      el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id}, names[c.tool] + " / " + c.label),
+      !c.enabled && pill("Disabled"),
+    ], read)));
+    if (!rows.length) grid.append(el("p", {}, "No profiles yet. ", el("a", {href: "#accounts"}, "Add a profile")));
+    if (rows.some((c) => c.quota.loading)) poll = setTimeout(guard(read), 1000);
+  }
+  draw(profiles);
+  if (profiles.some((c) => c.enabled)) guard(() => refresh(true))();
+  return log;
 }
 // A poll or full Accounts refresh may overlap a cancel/retry. Only use a
 // status read taken after the latest action in this tab has settled.
@@ -959,7 +1000,7 @@ async function render() {
       : a.removeAttribute("aria-current");
   document.title = view[0].toUpperCase() + view.slice(1) + " | cc-profile";
   if (view === "accounts") await accounts(params, ver, enter);
-  else await logs(view, params, ver);
+  else await logs(view, params, ver, enter);
 }
 window.onhashchange = guard(async () => {
   cursors = [null];

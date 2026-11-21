@@ -20,7 +20,7 @@ async fn deliver(body: &[u8]) -> Result<()> {
     if status.is_client_error() {
         return Err(Error::bad(
             "rejected",
-            "Codex session observation refused; check Startups.",
+            "Codex session observation refused; check Startup logs on the Dashboard.",
         ));
     }
     if !status.is_success() {
