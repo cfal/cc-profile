@@ -40,6 +40,16 @@ struct Cache {
     fails: i64,
     snapshot: Option<String>,
 }
+impl Cache {
+    fn retry_for(&self, stamp: &str) -> i64 {
+        if self.stamp == stamp || self.fails == 0 || self.status == "rate_limited" {
+            self.retry
+        } else {
+            // A new login or proxy can resolve the previous input's error.
+            0
+        }
+    }
+}
 // Bind numbers to the inputs used to fetch them, not to label, Current or Enabled.
 fn inputs(c: &Config) -> Option<String> {
     if !c.present() {
@@ -70,7 +80,12 @@ pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
         return Ok(json!({"status":"not_checked","loading":busy}));
     };
     if cache.stamp != stamp {
-        return Ok(json!({"status":"not_checked","loading":busy,"retry_ms":cache.retry}));
+        let status = if cache.status == "rate_limited" && now() < cache.retry {
+            "rate_limited"
+        } else {
+            "not_checked"
+        };
+        return Ok(json!({"status":status,"loading":busy,"retry_ms":cache.retry_for(&stamp)}));
     }
     let snapshot = cache
         .snapshot
@@ -97,7 +112,7 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
             let Some(stamp) = inputs(&c) else { continue };
             let cache = cached(&db, c.id)?;
             if cache.as_ref().is_some_and(|r| {
-                now() < r.retry
+                now() < r.retry_for(&stamp)
                     || (stale_only
                         && r.stamp == stamp
                         && r.status == "fresh"
@@ -132,17 +147,17 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
                     let (status, failures, retry, success, snapshot) = match result {
                         Ok(v) => ("fresh", 0, ms + 30000, Some(ms), Some(v.to_string())),
                         Err(e) => {
-                            let fails = prior.as_ref().map_or(1, |q| q.fails + 1);
+                            let fails = prior.as_ref().filter(|q| q.stamp==stamp || q.status=="rate_limited").map_or(1, |q| q.fails + 1);
                             let delay = (30000_i64 << (fails-1).min(6)).max(e.retry_after_ms.unwrap_or(0));
                             let last = prior.filter(|q| q.stamp == stamp);
                             (e.status, fails, ms.saturating_add(delay), last.as_ref().and_then(|q| q.success), last.and_then(|q| q.snapshot))
                         }
                     };
-                    // Discard data if the credentials changed in flight, but honor the cooldown.
+                    // Discard numbers if inputs changed in flight, not a provider's Retry-After.
                     let (status, success, snapshot) = if inputs(&config(db, id)?).as_ref() == Some(&stamp) {
                         (status, success, snapshot)
                     } else {
-                        ("unavailable", None, None)
+                        (if status=="fresh" { "unavailable" } else { status }, None, None)
                     };
                     db.execute("INSERT INTO quota_cache(config_id,revision,attempt_ms,success_ms,retry_ms,failures,status,stamp,snapshot) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(config_id) DO UPDATE SET revision=excluded.revision,attempt_ms=excluded.attempt_ms,success_ms=excluded.success_ms,retry_ms=excluded.retry_ms,failures=excluded.failures,status=excluded.status,stamp=excluded.stamp,snapshot=excluded.snapshot",
                        params![id,c.revision,ms,success,retry,failures,status,stamp,snapshot])?;

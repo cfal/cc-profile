@@ -271,15 +271,30 @@ else:
         self.assertEqual(wait_status("rate_limited"),q)
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         edit(proxy_mode="direct")
-        hidden=wait_status("not_checked")
+        hidden=wait_status("rate_limited")
         self.assertFalse(hidden.get("snapshot"))
         self.assertEqual(hidden["retry_ms"],q["retry_ms"])
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         edit(proxy_mode="inherit")
         (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"different"}}')
-        self.assertFalse(wait_status("not_checked").get("snapshot"))
+        self.assertFalse(wait_status("rate_limited").get("snapshot"))
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         self.assertEqual((home/"quota-count").read_text(),"fetch\n"*2)
+
+    def test_new_login_can_refresh_after_a_sign_in_error(self):
+        c = self.account("claude","signed-out")
+        route = "accounts/%d/quota/refresh" % c["id"]
+        def refresh(want):
+            self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+            for _ in range(100):
+                quota=self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
+                if not quota["loading"] and quota["status"]==want: return quota
+                time.sleep(.02)
+            self.fail("quota did not reach "+want)
+        self.assertGreater(refresh("sign_in_required")["retry_ms"],0)
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
+        (Path(c["home"])/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
+        self.assertEqual(refresh("fresh")["snapshot"]["windows"][0]["used_pct"],25)
 
 
 @unittest.skipUnless(DAEMON.is_file(), "build ccpd first")
