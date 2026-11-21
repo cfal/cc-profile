@@ -252,6 +252,13 @@ impl Store {
         let (dev, ino) = directory(Path::new(home), &self.state_dir)?;
         let (mode, http, https) = proxy_settings(v, None)?;
         self.write(|db|{
+            let replaced: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM configs WHERE home=? AND (dev!=? OR ino!=?))",
+                params![home,dev as i64,ino as i64], |r| r.get(0))?;
+            if replaced {
+                return Err(Error::conflict("home_replaced", format!(
+                    "{home} belongs to a registered config whose directory was replaced. Restore the original directory to keep its sessions, or move the replacement to a new path and register it there."
+                )));
+            }
             db.execute("INSERT INTO configs(tool,label,home,dev,ino,proxy_mode,http_proxy,https_proxy) VALUES(?,?,?,?,?,?,?,?)",
                 params![t,name,home,dev as i64,ino as i64,mode,http,https])?;
             config(db,db.last_insert_rowid())

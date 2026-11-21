@@ -2,7 +2,7 @@ mod common;
 use ccpd::{
     native::{Build, stamp},
     routing::{Observation, Request, launch, observe},
-    store::{Page, config},
+    store::{Config, Page, config},
 };
 use common::Fixture;
 use serde_json::json;
@@ -26,6 +26,16 @@ fn req(f: &Fixture, t: &str, args: &[&str], b: &Build) -> Request {
         binary: Some(b.bin.clone()),
         override_names: vec![],
     }
+}
+fn approve(f: &Fixture, build: &Build, c: &Config) {
+    f.store
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE configs SET observer_stamp=? WHERE id=?",
+            rusqlite::params![build.observer_stamp(c), c.id],
+        )
+        .unwrap();
 }
 #[test]
 fn retries_disabled_resumes_and_redacted_log() {
@@ -117,14 +127,7 @@ fn a_retry_cannot_resurrect_a_disabled_plan_or_change_the_native_arguments() {
     let f = Fixture::new();
     let b = build();
     let c = f.add("codex", "x");
-    f.store
-        .db()
-        .unwrap()
-        .execute(
-            "UPDATE configs SET observer_stamp=? WHERE id=?",
-            rusqlite::params![b.observer_stamp(&c), c.id],
-        )
-        .unwrap();
+    approve(&f, &b, &c);
     let r = req(&f, "codex", &["--no-daemon", "--", "--no-daemon"], &b);
     assert_eq!(launch(&f.store, &b, &r).unwrap()["argv"], json!(r.argv));
     f.store
@@ -147,14 +150,7 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
     let a = f.add("codex", "a");
     let b = f.add("codex", "b");
     for c in [&a, &b] {
-        f.store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE configs SET observer_stamp=? WHERE id=?",
-                rusqlite::params![exe.observer_stamp(c), c.id],
-            )
-            .unwrap();
+        approve(&f, &exe, c);
     }
     let x = req(&f, "codex", &[], &exe);
     let y = req(&f, "codex", &["exec", "--json"], &exe);
@@ -194,4 +190,72 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
         assert_eq!(observe(&f.store, &o).unwrap_err().1, "observation_conflict");
     }
     assert!(!config(&f.store.db().unwrap(), a.id).unwrap().enabled);
+}
+
+#[test]
+fn a_second_config_observing_an_owned_uuid_is_always_a_conflict() {
+    let f = Fixture::new();
+    let exe = build();
+    let first = f.add("codex", "first");
+    let other = f.add("codex", "other");
+    for c in [&first, &other] {
+        approve(&f, &exe, c);
+    }
+    let uid = Uuid::new_v4().to_string();
+    for c in [&first, &other] {
+        let r = req(&f, "codex", &["exec"], &exe);
+        assert_eq!(launch(&f.store, &exe, &r).unwrap()["config_id"], c.id);
+        let o = Observation {
+            request_id: r.request_id,
+            ticket: r.ticket,
+            native_id: uid.clone(),
+            event: "SessionStart".into(),
+            source: "startup".into(),
+        };
+        if c.id == first.id {
+            observe(&f.store, &o).unwrap();
+        } else {
+            for _ in 0..2 {
+                assert_eq!(observe(&f.store, &o).unwrap_err().1, "observation_conflict");
+            }
+        }
+    }
+    assert_eq!(
+        f.store.page(true, &Page::default()).unwrap()["items"][0]["config_id"],
+        first.id
+    );
+    let log = f.store.page(false, &Page::default()).unwrap();
+    assert_eq!(log["items"][0]["state"], "conflict");
+    assert_eq!(log["items"][0]["native_id"], uid);
+}
+
+#[test]
+fn a_replaced_current_home_is_not_an_unset_current_or_a_new_registration() {
+    let f = Fixture::new();
+    let exe = build();
+    let c = f.add("claude", "original");
+    assert_eq!(
+        launch(&f.store, &exe, &req(&f, "claude", &["--version"], &exe))
+            .unwrap_err()
+            .1,
+        "no_current"
+    );
+    f.store.current("claude", Some(c.id)).unwrap();
+    std::fs::rename(&c.home, f.root.join("backup")).unwrap();
+    std::fs::create_dir(&c.home).unwrap();
+    let op = req(&f, "claude", &["auth", "status"], &exe);
+    for _ in 0..2 {
+        assert_eq!(
+            launch(&f.store, &exe, &op).unwrap_err().1,
+            "current_missing"
+        );
+    }
+    let log = f.store.page(false, &Page::default()).unwrap();
+    assert_eq!(log["items"][0]["config_id"], c.id);
+    let err = f
+        .store
+        .register(&json!({"tool":"claude","label":"replacement","home":c.home}))
+        .unwrap_err();
+    assert_eq!(err.1, "home_replaced");
+    assert!(err.2.contains("new path"));
 }

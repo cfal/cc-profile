@@ -75,6 +75,10 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             }
         }
         "no_current" => Error::conflict("no_current", "Set current for this tool in Accounts."),
+        "current_missing" => Error::conflict(
+            "current_missing",
+            "The Current config directory is missing or replaced. Restore it or set another Current in Accounts.",
+        ),
         "no_enabled_config" => Error::conflict(
             "no_enabled_config",
             "Enable a config for this tool in Accounts.",
@@ -194,11 +198,16 @@ fn choose(
             }
             Ok(Selection::Allow(c, "sticky"))
         }
-        Intent::Misc => Ok(configs(db, &req.tool)?
-            .into_iter()
-            .find(|c| c.current && c.enabled && c.present())
-            .map(|c| Selection::Allow(c, "current"))
-            .unwrap_or_else(|| reject("no_current"))),
+        Intent::Misc => Ok(
+            match configs(db, &req.tool)?
+                .into_iter()
+                .find(|c| c.current && c.enabled)
+            {
+                Some(c) if c.present() => Selection::Allow(c, "current"),
+                Some(c) => Selection::Refuse(Some(c), denial("current_missing", None, None)),
+                None => reject("no_current"),
+            },
+        ),
     }
 }
 
@@ -365,8 +374,8 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
     store.write(|db|{
         let (state,old,owner,ws,created):(String,Option<String>,i64,String,i64)=db.query_row("SELECT state,native_id,config_id,workspace,created_ms FROM launches WHERE tool='codex' AND intent='new' AND request_id=? AND ticket_digest=?",params![o.request_id,digest(&o.ticket)],|s|Ok((s.get(0)?,s.get(1)?,s.get(2)?,s.get(3)?,s.get(4)?))).optional()?.ok_or_else(Error::denied)?;
         if state=="observed"&&old.as_deref()==Some(&uid){return Ok(Ok(()))}
-        if state=="observed" || (state=="pending" && db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='codex' AND native_id=?)",[&uid],|r|r.get::<_,bool>(0))?){
-            db.execute("UPDATE launches SET reason='observation_conflict',state=CASE WHEN state='pending' THEN 'conflict' ELSE state END WHERE request_id=?",[&o.request_id])?;
+        if state=="conflict" || state=="observed" || (state=="pending" && db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='codex' AND native_id=?)",[&uid],|r|r.get::<_,bool>(0))?){
+            db.execute("UPDATE launches SET reason='observation_conflict',native_id=COALESCE(native_id,?),state=CASE WHEN state='pending' THEN 'conflict' ELSE state END WHERE request_id=?", params![uid,o.request_id])?;
             return Ok(Err(Error::conflict("observation_conflict","Conflicting session observation; existing owner preserved.")))
         }
         if state!="pending"||now()-created>86_400_000{return Ok(Err(Error::conflict("ticket_expired","Observation ticket has expired or is no longer pending.")))}

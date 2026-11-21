@@ -40,13 +40,18 @@ async fn deliver(body: &[u8]) -> Result<()> {
         .header("Content-Type", "application/json")
         .body(Body::from(body.to_owned()))
         .map_err(|_| failed())?;
-    if !sender
+    let status = sender
         .send_request(req)
         .await
         .map_err(|_| failed())?
-        .status()
-        .is_success()
-    {
+        .status();
+    if status.is_client_error() {
+        return Err(Error::bad(
+            "rejected",
+            "Codex session observation refused; check Startups.",
+        ));
+    }
+    if !status.is_success() {
         return Err(failed());
     }
     Ok(())
@@ -70,11 +75,10 @@ pub async fn run() -> Result<()> {
     }
     let body=json!({"request_id":id,"ticket":ticket,"event":"SessionStart","source":"startup","native_id":v["session_id"]}).to_string();
     for _ in 0..2 {
-        if matches!(
-            tokio::time::timeout(Duration::from_secs(2), deliver(body.as_bytes())).await,
-            Ok(Ok(()))
-        ) {
-            return Ok(());
+        match tokio::time::timeout(Duration::from_secs(2), deliver(body.as_bytes())).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) if e.0.is_client_error() => return Err(e),
+            _ => {}
         }
     }
     Err(Error::unavailable(
