@@ -74,6 +74,8 @@ import json, os, pathlib, sys, time
 home = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
 config = sys.stdin.read()
 assert 'proxy =' not in config  # curl uses the launch environment, not a second proxy policy.
+with (home / "quota-proxies").open("w") as f:
+    json.dump([os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],f)
 assert 'Bearer private-test-token' in config and not any('private-test-token' in a for a in sys.argv)
 assert 'https://api.anthropic.com/api/oauth/usage' in config
 with (home / "quota-count").open("a") as stream: stream.write("fetch\n")
@@ -293,6 +295,8 @@ else:
             self.assertEqual(data["queued"], 0)
             self.assertEqual((Path(c["home"]) / "quota-count").read_text(), "fetch\n")
         self.assertEqual(self.api("GET", "startups")[1]["items"], [])
+        self.assertEqual(json.loads((Path(cl["home"])/"quota-proxies").read_text()),["http://fixture.invalid:3128/"]*4)
+        self.assertEqual(json.loads(self.cli("claude","hello").stdout)["proxy"],"http://fixture.invalid:3128/")
 
     def test_throttled_background_refresh_keeps_last_good_and_does_not_block_launch(self):
         import sqlite3

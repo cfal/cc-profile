@@ -80,6 +80,8 @@ Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per dire
 
 Quota is **informational**. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
 
+When Custom has only an HTTP proxy, that address is used for HTTPS requests too. Set an explicit HTTPS proxy to override it. Launches and quota checks use this same rule.
+
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
 - Claude: Linux file-backed OAuth token in the selected `CLAUDE_CONFIG_DIR`, read-only GET to the vendor usage endpoint. Expired credentials require native renewal; the dashboard does not rotate a refresh token behind an active session.
 - Accounts opening refreshes stale enabled rows; explicit Refresh can check one disabled row. Results are cached for five minutes, two upstream jobs maximum, single-flight per config with backoff. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Neither quota nor provider connectivity participates in routing. Inherit uses the service environment for quota, the caller's environment for launches.
