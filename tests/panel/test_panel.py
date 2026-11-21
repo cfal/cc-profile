@@ -25,7 +25,9 @@ class Panel(unittest.TestCase):
             page = browser.new_page(viewport={"width": 1240, "height": 850}, permissions=["clipboard-read", "clipboard-write"])
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
+            page.route("**/api/v1/session",lambda route: route.fulfill(status=503,body=""),times=1)
             page.goto(f"http://127.0.0.1:{port}")
+            page.get_by_role("button",name="Retry").click()
             page.get_by_label("New password",exact=True).fill(service.password)
             confirm=page.get_by_label("Confirm password",exact=True)
             confirm.fill("different password")

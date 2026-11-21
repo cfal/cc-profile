@@ -884,11 +884,17 @@ window.onhashchange = guard(async () => {
   expanded = null;
   await render();
 });
-try {
-  const session = await api("session");
+async function connect() {
+  let session;
+  try {
+    session = await api("session");
+  } catch (err) {
+    main.replaceChildren(empty("route", "Could not load the panel", err.message,
+      btn("Retry", connect, "refresh-cw")));
+    return;
+  }
   csrf = session.csrf || "";
   needsSetup = session.setup_required;
   await render();
-} catch (err) {
-  notice(err.message);
 }
+await connect().catch((err) => notice(err.message));
