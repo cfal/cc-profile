@@ -11,6 +11,7 @@ use axum::{
     serve::IncomingStream,
 };
 use ccpd::{
+    links,
     native::Build,
     observer, paths,
     routing::{self, Failure, Observation},
@@ -110,7 +111,7 @@ pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Resul
         let db=s.store.db()?;let build=s.build(tool(&q.tool)?);
         let mut items=Vec::new();
         for c in configs(&db,&q.tool)?{let mut v=c.public();v["readiness"]=build.ready(&c).into();items.push(v);}
-        Ok(Json(json!({"items":items,"version":build.version,"supported":build.supported,"observer":observer::spec()?})))
+        Ok(Json(json!({"items":items,"version":build.version,"supported":build.supported,"observer":observer::spec()?,"compatibility":links::status(&db,&q.tool)?})))
     }).await
 }
 async fn add(State(s): State<Shared>, Json(v): Json<Value>) -> Result<(StatusCode, Json<Value>)> {
@@ -126,7 +127,15 @@ async fn edit(
     Path(id): Path<i64>,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>> {
-    blocking(move || s.store.edit(id, &v).map(|c| Json(c.public()))).await
+    blocking(move || {
+        let c = s.store.edit(id, &v)?;
+        let mut out = c.public();
+        if !c.enabled && links::repair(&s.store, &c.tool).is_err() {
+            out["link_warning"] = "Compatibility link needs repair.".into();
+        }
+        Ok(Json(out))
+    })
+    .await
 }
 #[derive(Deserialize)]
 struct Selection {
@@ -137,8 +146,36 @@ async fn current(
     Path(tool): Path<String>,
     Json(v): Json<Selection>,
 ) -> Result<Json<Value>> {
-    blocking(move || s.store.current(&tool, v.config_id)).await?;
-    Ok(Json(json!({})))
+    blocking(move || {
+        s.store.current(&tool, v.config_id)?;
+        Ok(Json(
+            json!({"link_needs_repair":links::repair(&s.store,&tool).is_err()}),
+        ))
+    })
+    .await
+}
+#[derive(Deserialize)]
+struct LinkPaths {
+    root: Option<String>,
+    outer: Option<String>,
+}
+async fn compatibility(
+    State(s): State<Shared>,
+    Path(t): Path<String>,
+    Json(v): Json<LinkPaths>,
+) -> Result<Json<Value>> {
+    blocking(move || {
+        links::configure(
+            &s.store,
+            &t,
+            v.root.as_deref(),
+            v.outer.as_deref(),
+            &s.state_dir,
+            &paths::runtime_dir()?,
+        )?;
+        Ok(Json(links::status(&*s.store.db()?, &t)?))
+    })
+    .await
 }
 async fn hooks(
     State(s): State<Shared>,
@@ -163,6 +200,17 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/accounts/{id}", patch(edit))
         .route("/api/v1/accounts/{id}/observer/{op}", post(hooks))
         .route("/api/v1/current/{tool}", put(current))
+        .route("/api/v1/compatibility/{tool}", put(compatibility))
+        .route(
+            "/api/v1/current/{tool}/repair",
+            post(
+                |State(s): State<Shared>, Path(t): Path<String>| async move {
+                    blocking(move || links::repair(&s.store, &t))
+                        .await
+                        .map(|_| Json(json!({})))
+                },
+            ),
+        )
         .route(
             "/api/v1/sessions",
             get(

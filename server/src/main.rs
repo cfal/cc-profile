@@ -66,6 +66,11 @@ async fn run() -> Result<()> {
     }
     let store = Store::open(&db)?;
     store.prune()?;
+    for t in ["claude", "codex"] {
+        if ccpd::links::repair(&store, t).is_err() {
+            eprintln!("ccpd: {t} compatibility link needs repair (Accounts).");
+        }
+    }
     if !initialized.exists() {
         paths::replace(&initialized, b"router schema 1\n", None)?;
     }
