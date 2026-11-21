@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 from test_service import LAUNCHER
@@ -130,6 +131,16 @@ sys.exit(17)
         self.assertEqual(self.run_ccp("claude").returncode,17)
         self.assertEqual(len(self.calls),2)
         self.assertEqual(self.calls[0],self.calls[1])
+
+    def test_slow_router_does_not_trigger_a_second_launch(self):
+        def slow(path,r):
+            time.sleep(5.3)
+            return 200,self.plan(r)
+        self.respond=slow
+        p=self.run_ccp("claude")
+        self.assertEqual((p.returncode,p.stdout),(1,""))
+        self.assertIn("Timed out waiting",p.stderr)
+        self.assertEqual(len(self.calls),1)
 
     def test_native_exec_failure_once_and_no_implicit_shell(self):
         for code in [126,127]:

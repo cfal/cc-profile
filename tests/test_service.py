@@ -269,6 +269,7 @@ else:
         with ThreadPoolExecutor(3) as pool:
             results=list(pool.map(lambda _:self.cli("codex","exec","hello"),range(3)))
         self.assertTrue(all(p.returncode!=0 for p in results))
+        self.assertIn("retry",results[0].stderr)
         # The next caller can reuse the same unfinished check or its completed result.
         self.assertEqual(self.cli("codex","exec","hello").returncode,0)
         self.assertEqual((home/"hook-checks").read_text().splitlines(),["/",str(self.root)])

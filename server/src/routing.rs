@@ -74,7 +74,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
         ),
         "no_ready_config" => Error::conflict(
             "no_ready_config",
-            "No enabled config is ready. Check its directory and observer in Accounts.",
+            "No enabled config is ready. If a workspace check is still running, retry in a few seconds. Otherwise check the directory and observer in Accounts.",
         ),
         "unsupported_build" => crate::native::unsupported_build(),
         "identity_override" => Error::bad(

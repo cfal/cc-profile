@@ -45,6 +45,10 @@ class Panel(unittest.TestCase):
             service.session=session["session"]
             page.reload()
             expect(page.get_by_role("heading",name="Startups")).to_be_visible()
+            tab=page.context.new_page()
+            tab.goto(f"http://127.0.0.1:{port}")
+            expect(tab.get_by_role("heading",name="Sign in")).to_be_visible()
+            tab.close()
             page.get_by_role("navigation").get_by_text("Accounts").click()
             page.get_by_role("button",name="Add config").first.click()
             page.get_by_label("Label",exact=True).fill("Work")

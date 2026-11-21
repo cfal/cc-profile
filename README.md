@@ -18,6 +18,8 @@ Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its
 
 Open **http://127.0.0.1:8743**. On the first visit, set a panel password; subsequent visits use **Sign in**. No pairing token is needed. The first visitor can claim an unconfigured panel, so on a shared machine run **`ccpd set-password` before starting the service**. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and the daemon startup log show the database path: use the same `XDG_STATE_HOME` in your shell and service so they address the same panel. Use `--port PORT` to change the panel port. For a VM, forward the same loopback port using SSH. Do not expose the panel publicly.
 
+Sign-in survives reloads in the same tab. A separately opened tab signs in independently.
+
 For a persistent service after installing the binary:
 
 ```sh
@@ -45,7 +47,7 @@ Restart with `systemctl --user restart ccpd` after changing PATH or updating eit
 
 For a workspace with local Codex settings, the router also checks whether the approved observer is enabled **in that workspace**. It asks the native metadata service rather than interpreting project TOML. Changes to user or system config trigger a recheck of prior approval on the next new chat. A rejected or unverified hook never admits a new chat on that config.
 
-Simultaneous launches share a workspace check. A slow check may outlast the first launch; retry after it finishes. Linked worktrees are checked on each launch because their settings can live outside the working tree. A compatibility link at `~/.codex` can also supply settings to workspaces below your home, so those workspaces are checked rather than assumed ready.
+Simultaneous launches share a workspace check. A slow check may outlast the first launch; ordinary workspaces can reuse its result. Linked worktrees request a fresh check because their settings can live outside the working tree: they can join a running check, but a native check that consistently exceeds the time budget can prevent new launches there. A compatibility link at `~/.codex` can also supply settings to workspaces below your home, so those workspaces are checked rather than assumed ready.
 
 Config identity includes the directory's device, inode and creation time. This detects reuse of a deleted directory's inode without writing markers into provider homes. Use a filesystem that exposes creation time (such as ext4). When upgrading an older router, make sure the original directories are mounted: the first open pins the creation time of homes matching their previously recorded device and inode. Restore any offline original and restart the daemon to finish pinning it.
 
