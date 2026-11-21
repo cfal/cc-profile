@@ -13,12 +13,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_service
 
 class Panel(unittest.TestCase):
-    def test_accounts_pagination_and_mobile(self):
+    def start_service(self, claim=True):
         service = test_service.Service("test_web_authenticates_reads_and_mutations")
-        service.claim = False
+        service.claim = claim
         service.password = "1234"
         self.addCleanup(service.doCleanups)
         service.setUp()
+        return service
+
+    def test_accounts_pagination_and_mobile(self):
+        service = self.start_service(claim=False)
         port = service.port
         config = service.root / "panel-config"
         config.mkdir()
@@ -30,12 +34,16 @@ class Panel(unittest.TestCase):
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.route("**/api/v1/session",lambda route: route.fulfill(status=503,body=""),times=1)
             page.goto(f"http://127.0.0.1:{port}")
+            page.set_viewport_size({"width":390,"height":844})
             page.get_by_role("button",name="Retry").click()
-            page.get_by_label("New password",exact=True).fill(service.password)
+            new_password=page.get_by_label("New password",exact=True)
+            expect(new_password).to_have_accessible_description("Use at least 4 characters.")
+            new_password.fill(service.password)
             confirm=page.get_by_label("Confirm password",exact=True)
             confirm.fill("different password")
             page.get_by_role("button",name="Set password").click()
             expect(page.get_by_role("alert")).to_have_text("Passwords do not match.")
+            self.check_layout(page,"setup-mobile")
             confirm.fill(service.password)
             page.get_by_role("button",name="Set password").click()
             expect(page.get_by_role("heading",name="Startups")).to_be_visible()
@@ -52,7 +60,17 @@ class Panel(unittest.TestCase):
             expect(tab.get_by_role("heading",name="Sign in")).to_be_visible()
             tab.close()
             page.get_by_role("navigation").get_by_text("Accounts").click()
-            page.get_by_role("button",name="Add profile").first.click()
+            page.get_by_role("button",name="Compatibility links").click()
+            compat = page.get_by_role("dialog",name="Compatibility links")
+            root = compat.get_by_label("Existing profile root")
+            expect(root).to_be_disabled()
+            compat.get_by_role("checkbox",name="Link native path to Current").check()
+            root.fill("/fixture")
+            expect(compat).to_contain_text("/fixture/claude/current/config")
+            self.check_layout(page,"compatibility-mobile")
+            compat.get_by_role("button",name="Cancel").click()
+            page.set_viewport_size({"width":1240,"height":850})
+            page.get_by_role("button",name="Add profile").click()
             page.get_by_label("Label",exact=True).fill("Work")
             page.get_by_label("Profile directory",exact=True).select_option("existing")
             page.get_by_label("Existing config directory").fill(str(config))
@@ -72,6 +90,21 @@ class Panel(unittest.TestCase):
             page.get_by_role("button",name="Save changes").click()
             expect(page.locator(".detail")).to_contain_text("proxy.example")
             self.assertNotIn("proxysecret",page.locator("body").inner_text())
+            page.get_by_role("button",name="Edit config").click()
+            proxy = page.get_by_role("textbox",name="HTTPS_PROXY",exact=True)
+            expect(proxy).to_have_value("")
+            expect(proxy).to_have_accessible_description("Leave a proxy blank to keep its saved value.")
+            self.check_layout(page,"edit-proxy")
+            page.get_by_role("button",name="Save changes").click()
+            expect(page.locator(".detail")).to_contain_text("proxy.example")
+            page.get_by_role("button",name="Edit config").click()
+            page.get_by_role("checkbox",name="Clear saved HTTPS_PROXY").check()
+            page.get_by_role("button",name="Save changes").click()
+            expect(page.get_by_role("alert")).to_have_text("Set an HTTP or HTTPS proxy for Custom mode.")
+            page.get_by_role("textbox",name="HTTP_PROXY",exact=True).fill("http://other.invalid:3128")
+            page.get_by_role("button",name="Save changes").click()
+            expect(page.get_by_role("dialog")).to_be_hidden()
+            expect(page.locator(".detail")).not_to_contain_text("proxy.example")
             page.on("dialog", lambda d: d.accept())
             enabled.click()
             expect(page.get_by_role("button",name="Set current")).to_be_disabled()
@@ -127,11 +160,26 @@ class Panel(unittest.TestCase):
             expect(page.get_by_role("button",name="Check observer")).to_be_visible()
             page.get_by_role("button",name="Copy approval command").click()
             self.assertEqual(page.evaluate("navigator.clipboard.readText()"), "ccp login " + str(codex["id"]))
+            page.get_by_role("button",name="Install observer").click()
+            install = page.get_by_role("dialog",name="Install observer")
+            expect(install).to_contain_text("hooks.json")
+            install.get_by_role("button",name="Install",exact=True).click()
+            page.get_by_role("button",name="Check observer").click()
+            expect(page.get_by_text("Ready",exact=True)).to_be_visible()
+            page.get_by_role("button",name="Refresh quota",exact=True).click()
+            expect(page.get_by_role("progressbar").first).to_have_attribute("value","100")
+            expect(page.locator(".quota time").first).to_have_attribute("datetime","2033-05-18T03:33:20.000Z")
+            accounts = service.api("GET","accounts?tool=codex")[1]
+            accounts["items"][0]["quota"].update(stale=True, status="rate_limited")
+            page.route("**/accounts?tool=codex", lambda route: route.fulfill(json=accounts), times=1)
+            page.get_by_role("button",name="Refresh enabled quotas").click()
+            quota = page.locator("section").filter(has=page.get_by_role("heading",name="Quota & resets"))
+            for value in ("Stale", "Rate limited", "Last checked", "100% left"):
+                expect(quota).to_contain_text(value)
             expect(enabled).not_to_be_checked()
-            self.snapshot(page,"accounts")
+            self.check_layout(page,"accounts")
             page.set_viewport_size({"width":390,"height":844})
-            self.snapshot(page,"accounts-mobile")
-            self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),390)
+            self.check_layout(page,"accounts-mobile")
             page.set_viewport_size({"width":1240,"height":850})
             sql="INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) VALUES('claude',?,1,'assigned','/work',1,1)"
             with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
@@ -152,15 +200,57 @@ class Panel(unittest.TestCase):
                 expect(page.get_by_role("status")).to_contain_text("Copied")
                 expect(page.get_by_role("cell",name="/work",exact=True).first).to_be_visible()
                 self.assertTrue(page.evaluate("navigator.clipboard.readText()").startswith("cd '/work' && ccp claude --resume "))
-                self.snapshot(page,"sessions")
+                self.check_layout(page,"sessions")
             self.assertEqual(errors,[])
             browser.close()
 
-    def snapshot(self,page,name):
+    def test_log_filters_and_session_navigation(self):
+        service = self.start_service()
+        profile = service.account("claude", "Work" * 24)
+        launch = service.cli("claude", "--print", "fixture")
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        record, = service.api("GET", "startups")[1]["items"]
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width": 1240, "height": 850})
+            fonts = []
+            page.on("request", lambda req: fonts.append(req.url) if req.resource_type == "font" else None)
+            page.goto(f"http://127.0.0.1:{service.port}")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            page.get_by_role("button", name="Startup details").click()
+            expect(page.get_by_role("button", name="Startup details", expanded=True)).to_be_visible()
+            expect(page.get_by_text(record["request_id"], exact=True)).to_be_visible()
+            expect(page.get_by_text("round robin", exact=True)).to_have_count(1)
+            self.check_layout(page, "startups")
+            page.set_viewport_size({"width": 320, "height": 720})
+            config_filter = page.get_by_role("combobox", name="Config", exact=True)
+            config_filter.select_option(str(profile["id"]))
+            expect(config_filter).to_have_value(str(profile["id"]))
+            self.check_layout(page, "startups-mobile")
+            page.locator("tbody .uuid").click()
+            expect(page.get_by_role("heading", name="Sessions", exact=True)).to_be_visible()
+            search = page.get_by_role("searchbox", name="Session UUID")
+            expect(search).to_have_value(record["native_id"])
+            expect(page.get_by_role("button", name="Copy resume command")).to_be_enabled()
+            expect(page.get_by_role("button", name="Next page")).to_have_count(0)
+            self.check_layout(page, "sessions-mobile")
+            search.fill(str(uuid.uuid4()))
+            search.press("Enter")
+            expect(page.get_by_role("heading", name="No matching sessions")).to_be_visible()
+            expect(page.get_by_role("table")).to_have_count(0)
+            page.get_by_role("button", name="Clear filters").click()
+            page.get_by_role("button", name=profile["label"], exact=True).click()
+            expect(page.get_by_role("heading", name=profile["label"])).to_be_visible()
+            self.check_layout(page, "profile-mobile")
+            self.assertEqual(fonts, [])
+            self.assertEqual(page.evaluate("document.fonts.size"), 0)
+
+    def check_layout(self,page,name):
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),page.viewport_size["width"],name)
         path=os.environ.get("CCP_SCREENSHOTS")
         if path:
             Path(path).mkdir(exist_ok=True)
-            page.screenshot(path=str(Path(path)/(name+".png")))
+            page.screenshot(path=str(Path(path)/(name+".png")),full_page=True)
 
 if __name__=="__main__":
     unittest.main()
