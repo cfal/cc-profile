@@ -1,27 +1,16 @@
 use crate::{
     invocation::{Intent, Invocation, classify, native_id},
     native::{Build, env_patch, validate_binary},
+    protocol::{Plan, VERSION},
     store::{Config, Store, config, configs},
     types::{Error, Result, now, tool},
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub request_id: String,
-    pub ticket: String,
-    pub tool: String,
-    pub argv: Vec<String>,
-    pub cwd: PathBuf,
-    pub binary: Option<PathBuf>,
-    pub override_names: Vec<String>,
-}
+pub use crate::protocol::{Failure, Request};
 fn digest(v: impl AsRef<[u8]>) -> Vec<u8> {
     Sha256::digest(v.as_ref()).to_vec()
 }
@@ -99,7 +88,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
         ),
     }
 }
-fn plan(r: &Request, c: &Config, i: &Invocation, session: Option<&str>, reason: &str) -> Value {
+fn plan(r: &Request, c: &Config, i: &Invocation, session: Option<&str>, reason: &str) -> Plan {
     let (mut set, mut unset) = env_patch(c);
     let mut args = r.argv.clone();
     if i.intent == Intent::New {
@@ -119,7 +108,17 @@ fn plan(r: &Request, c: &Config, i: &Invocation, session: Option<&str>, reason: 
     {
         args.insert(0, "--no-daemon".into());
     }
-    json!({"v":1,"request_id":r.request_id,"tool":r.tool,"config_id":c.id,"label":c.label,"decision":reason,"env_set":set,"env_unset":unset,"argv":args})
+    Plan {
+        v: VERSION,
+        request_id: r.request_id.clone(),
+        tool: r.tool.clone(),
+        config_id: c.id,
+        label: c.label.clone(),
+        decision: reason.into(),
+        env_set: set,
+        env_unset: unset,
+        argv: args,
+    }
 }
 fn insert_binding(
     db: &Connection,
@@ -263,7 +262,7 @@ impl Prior {
         fingerprint: &[u8],
         parsed: Result<&Invocation>,
         workspace_ready: &dyn Fn(&Config) -> bool,
-    ) -> Result<Value> {
+    ) -> Result<Plan> {
         if self.digest != fingerprint {
             return Err(Error::conflict(
                 "request_conflict",
@@ -304,7 +303,7 @@ impl Prior {
     }
 }
 
-pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Value> {
+pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
     launch_in(store, build, req, &|_| true)
 }
 pub fn launch_in(
@@ -312,7 +311,7 @@ pub fn launch_in(
     build: &Build,
     req: &Request,
     workspace_ready: &dyn Fn(&Config) -> bool,
-) -> Result<Value> {
+) -> Result<Plan> {
     check_req(req)?;
     let fingerprint =
         digest(serde_json::to_vec(req).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
@@ -382,12 +381,6 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
         let ms=now();insert_binding(db,"codex",&uid,owner,&ws,"observed",ms)?;
         db.execute("UPDATE launches SET native_id=?,state='observed',observed_ms=? WHERE request_id=?",params![uid,ms,o.request_id])?;Ok(Ok(()))
     })?
-}
-#[derive(Deserialize)]
-pub struct Failure {
-    pub request_id: String,
-    pub ticket: String,
-    pub errno: i32,
 }
 pub fn exec_failure(store: &Store, x: &Failure) -> Result<()> {
     let reason = match x.errno {

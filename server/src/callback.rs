@@ -1,50 +1,22 @@
-use axum::body::Body;
 use ccpd::{
-    paths,
+    socket,
     types::{Error, Result},
 };
-use hyper::{Request, client::conn::http1};
-use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use std::{
     env,
     io::{self, Read},
-    os::unix::fs::MetadataExt,
     time::Duration,
 };
-use tokio::net::UnixStream;
 
 async fn deliver(body: &[u8]) -> Result<()> {
-    let dir = paths::runtime_dir()?;
-    let m = std::fs::symlink_metadata(&dir)?;
-    if !m.is_dir() || dir.canonicalize()? != dir || m.uid() != paths::uid() || m.mode() & 0o077 != 0
-    {
-        return Err(Error::denied());
-    }
-    let s = UnixStream::connect(dir.join("launch.sock")).await?;
-    if s.peer_cred()?.uid() != paths::uid() {
-        return Err(Error::denied());
-    }
+    let (status, _) = socket::post("/v1/observations", body).await?;
     let failed = || {
         Error::unavailable(
             "callback",
             "Unable to deliver the Codex session ID to ccpd.",
         )
     };
-    let (mut sender, conn) = http1::handshake(TokioIo::new(s))
-        .await
-        .map_err(|_| failed())?;
-    tokio::spawn(conn);
-    let req = Request::post("/v1/observations")
-        .header("Host", "localhost")
-        .header("Content-Type", "application/json")
-        .body(Body::from(body.to_owned()))
-        .map_err(|_| failed())?;
-    let status = sender
-        .send_request(req)
-        .await
-        .map_err(|_| failed())?
-        .status();
     if status.is_client_error() {
         return Err(Error::bad(
             "rejected",

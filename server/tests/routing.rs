@@ -45,17 +45,17 @@ fn retries_disabled_resumes_and_redacted_log() {
     let exe = build();
     let mut x = req(&f, "claude", &["-p", "private prompt"], &exe);
     let p = launch(&f.store, &exe, &x).unwrap();
-    assert_eq!(p["config_id"], a.id);
+    assert_eq!(p.config_id, a.id);
     assert_eq!(p, launch(&f.store, &exe, &x).unwrap());
     x.argv.clear();
     assert_eq!(
         launch(&f.store, &exe, &x).unwrap_err().1,
         "request_conflict"
     );
-    let id = p["argv"][1].as_str().unwrap();
+    let id = p.argv[1].as_str();
     f.store.current("claude", Some(b.id)).unwrap();
     let r = req(&f, "claude", &["--resume", id], &exe);
-    assert_eq!(launch(&f.store, &exe, &r).unwrap()["config_id"], a.id);
+    assert_eq!(launch(&f.store, &exe, &r).unwrap().config_id, a.id);
     f.store
         .edit(a.id, &json!({"enabled":false,"revision":a.revision}))
         .unwrap();
@@ -82,14 +82,16 @@ fn simultaneous_new_chats_split_evenly_and_survive_reopen() {
         assert_eq!(
             jobs.into_iter()
                 .map(|h| h.join().unwrap())
-                .filter(|p| p["config_id"] == a.id)
+                .filter(|p| p.config_id == a.id)
                 .count(),
             10
         );
     });
     let reopened = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     assert_eq!(
-        launch(&reopened, &exe, &req(&f, "claude", &[], &exe)).unwrap()["config_id"],
+        launch(&reopened, &exe, &req(&f, "claude", &[], &exe))
+            .unwrap()
+            .config_id,
         a.id
     );
 }
@@ -119,7 +121,7 @@ fn failed_audit_insert_rolls_back_the_assignment_and_cursor() {
     );
     db.execute_batch("DROP TRIGGER broken_log").unwrap();
     drop(db);
-    assert_eq!(launch(&f.store, &b, &r).unwrap()["config_id"], a.id);
+    assert_eq!(launch(&f.store, &b, &r).unwrap().config_id, a.id);
 }
 
 #[test]
@@ -129,7 +131,7 @@ fn a_retry_cannot_resurrect_a_disabled_plan_or_change_the_native_arguments() {
     let c = f.add("codex", "x");
     approve(&f, &b, &c);
     let r = req(&f, "codex", &["--no-daemon", "--", "--no-daemon"], &b);
-    assert_eq!(launch(&f.store, &b, &r).unwrap()["argv"], json!(r.argv));
+    assert_eq!(launch(&f.store, &b, &r).unwrap().argv, r.argv);
     f.store
         .edit(c.id, &json!({"enabled":false,"revision":c.revision}))
         .unwrap();
@@ -154,14 +156,8 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
     }
     let x = req(&f, "codex", &[], &exe);
     let y = req(&f, "codex", &["exec", "--json"], &exe);
-    assert_eq!(
-        launch(&f.store, &exe, &x).unwrap()["argv"],
-        json!(["--no-daemon"])
-    );
-    assert_eq!(
-        launch(&f.store, &exe, &y).unwrap()["argv"],
-        json!(["exec", "--json"])
-    );
+    assert_eq!(launch(&f.store, &exe, &x).unwrap().argv, ["--no-daemon"]);
+    assert_eq!(launch(&f.store, &exe, &y).unwrap().argv, ["exec", "--json"]);
     f.store
         .edit(a.id, &json!({"enabled":false,"revision":a.revision}))
         .unwrap();
@@ -204,7 +200,7 @@ fn a_second_config_observing_an_owned_uuid_is_always_a_conflict() {
     let uid = Uuid::new_v4().to_string();
     for c in [&first, &other] {
         let r = req(&f, "codex", &["exec"], &exe);
-        assert_eq!(launch(&f.store, &exe, &r).unwrap()["config_id"], c.id);
+        assert_eq!(launch(&f.store, &exe, &r).unwrap().config_id, c.id);
         let o = Observation {
             request_id: r.request_id,
             ticket: r.ticket,
