@@ -129,12 +129,35 @@ impl Projection {
             &self.root.join("current/config"),
         )
     }
+    fn checked_sources(&self) -> Result<()> {
+        safe_dir(self.root.parent().unwrap())?;
+        safe_dir(self.outer.parent().unwrap())?;
+        match self.root.symlink_metadata() {
+            Ok(_) => safe_dir(&self.root),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn detach(&self) -> Result<()> {
+        self.checked_sources()?;
+        let inner = self.root.join("current");
+        let outer_target = self.outer_target();
+        // Preflight both sources before removing either one.
+        if target(&self.outer)?.is_some_and(|p| p != outer_target)
+            || target(&inner)?.is_some_and(|p| Some(p) != self.prior)
+        {
+            return Err(occupied());
+        }
+        link(&self.outer, None, Some(&outer_target))?;
+        link(&inner, None, self.prior.as_deref())
+    }
     fn view(&self) -> Value {
         let inner = self.root.join("current");
         let want = self.outer_target();
         let actual_inner = target(&inner);
         let actual_outer = target(&self.outer);
-        let healthy = actual_inner.as_ref().is_ok_and(|v| v == &self.entry)
+        let healthy = self.checked_sources().is_ok()
+            && actual_inner.as_ref().is_ok_and(|v| v == &self.entry)
             && actual_outer
                 .as_ref()
                 .is_ok_and(|v| v.as_ref() == Some(&want))
@@ -146,8 +169,7 @@ impl Projection {
             "current":inner,"current_target":self.entry,"observed_current":actual_inner.ok().flatten(),"needs_repair":!healthy})
     }
     fn apply(&self) -> Result<()> {
-        safe_dir(self.root.parent().unwrap())?;
-        safe_dir(self.outer.parent().unwrap())?;
+        self.checked_sources()?;
         let outer_target = self.outer_target();
         if target(&self.outer)?.is_some_and(|p| p != outer_target) {
             return Err(occupied());
@@ -237,9 +259,7 @@ pub fn configure(
             )?;
         } else if root.is_none() && outer.is_none() {
             if let Some(p) = Projection::load(db, t)? {
-                let want = p.outer_target();
-                link(&p.outer, None, Some(&want))?;
-                link(&p.root.join("current"), None, p.prior.as_deref())?;
+                p.detach()?;
                 db.execute(
                     "UPDATE tools SET link_root=NULL,outer_path=NULL,projected=NULL WHERE tool=?",
                     [t],
