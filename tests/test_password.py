@@ -83,6 +83,7 @@ class PanelPassword(unittest.TestCase):
         s.stop()
         with sqlite3.connect(s.root/"state/cc-profile/router.sqlite3") as db:
             db.execute("DROP TABLE panel_password")
+            db.execute("ALTER TABLE configs DROP COLUMN birth_ns")
             db.execute("PRAGMA user_version=1")
             db.execute("INSERT INTO configs(tool,label,home,dev,ino) VALUES('claude','existing','/missing',1,1)")
             db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) VALUES('claude','existing-mapping',1,'assigned','/work',1,1)")

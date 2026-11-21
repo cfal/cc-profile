@@ -10,7 +10,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 use url::Url;
 
@@ -27,6 +27,7 @@ pub struct Config {
     pub home: PathBuf,
     pub dev: u64,
     pub ino: u64,
+    birth_ns: Option<i64>,
     pub enabled: bool,
     pub current: bool,
     pub revision: i64,
@@ -35,7 +36,7 @@ pub struct Config {
     pub https: Option<String>,
     pub observer: Option<String>,
 }
-const FIELDS: &str = "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,http_proxy,https_proxy,observer_stamp";
+const FIELDS: &str = "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,http_proxy,https_proxy,observer_stamp,birth_ns";
 fn row(r: &Row) -> rusqlite::Result<Config> {
     Ok(Config {
         id: r.get(0)?,
@@ -51,13 +52,24 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
         http: r.get(10)?,
         https: r.get(11)?,
         observer: r.get(12)?,
+        birth_ns: r.get(13)?,
     })
 }
 impl Config {
+    fn observed_birth(&self) -> Option<i64> {
+        let m = fs::symlink_metadata(&self.home).ok()?;
+        if !m.is_dir()
+            || m.uid() != crate::paths::uid()
+            || m.dev() != self.dev
+            || m.ino() != self.ino
+            || self.home.canonicalize().ok()? != self.home
+        {
+            return None;
+        }
+        birth_ns(&m)
+    }
     pub fn present(&self) -> bool {
-        fs::symlink_metadata(&self.home)
-            .is_ok_and(|m| m.is_dir() && m.dev() == self.dev && m.ino() == self.ino)
-            && self.home.canonicalize().is_ok_and(|p| p == self.home)
+        self.birth_ns.is_some() && self.observed_birth() == self.birth_ns
     }
     pub fn public(&self) -> Value {
         fn redact(raw: &Option<String>) -> Value {
@@ -175,7 +187,16 @@ pub fn revision(v: &Value, c: &Config) -> Result<()> {
         Ok(())
     }
 }
-pub fn directory(path: &Path, state: &Path) -> Result<(u64, u64)> {
+fn birth_ns(m: &fs::Metadata) -> Option<i64> {
+    m.created()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .try_into()
+        .ok()
+}
+fn directory(path: &Path, state: &Path) -> Result<(u64, u64, i64)> {
     let bad = || {
         Error::bad(
             "bad_home",
@@ -202,7 +223,8 @@ pub fn directory(path: &Path, state: &Path) -> Result<(u64, u64)> {
     if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } {
         return Err(bad());
     }
-    Ok((m.dev(), m.ino()))
+    let birth = birth_ns(&m).ok_or_else(|| Error::bad("home_identity", "Use a filesystem that reports a directory creation time so ccp can detect replaced configs."))?;
+    Ok((m.dev(), m.ino(), birth))
 }
 impl Store {
     pub fn user_db_path(state: &Path) -> PathBuf {
@@ -249,11 +271,32 @@ impl Store {
         }
         if v == 0 || v == 1 {
             tx.execute_batch(include_str!("panel_password.sql"))?;
-        } else if v != 2 {
+        }
+        if (0..=2).contains(&v) {
+            tx.execute_batch(
+                "ALTER TABLE configs ADD COLUMN birth_ns INTEGER; PRAGMA user_version=3;",
+            )?;
+        } else if v != 3 {
             return Err(Error::unavailable(
                 "schema",
                 "Unsupported router database version.",
             ));
+        }
+        // Older databases know only the device and inode. Pin creation time once,
+        // including when an original home was offline during the upgrade.
+        let legacy = tx
+            .prepare(&format!(
+                "SELECT {FIELDS} FROM configs WHERE birth_ns IS NULL"
+            ))?
+            .query_map([], row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for c in legacy {
+            if let Some(birth) = c.observed_birth() {
+                tx.execute(
+                    "UPDATE configs SET birth_ns=? WHERE id=?",
+                    params![birth, c.id],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(Self {
@@ -277,18 +320,18 @@ impl Store {
         let t = tool(v["tool"].as_str().unwrap_or(""))?;
         let name = label(v["label"].as_str().unwrap_or(""))?;
         let home = v["home"].as_str().unwrap_or("");
-        let (dev, ino) = directory(Path::new(home), &self.state_dir)?;
+        let (dev, ino, birth) = directory(Path::new(home), &self.state_dir)?;
         let (mode, http, https) = proxy_settings(v, None)?;
         self.write(|db|{
-            let replaced: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM configs WHERE home=? AND (dev!=? OR ino!=?))",
-                params![home,dev as i64,ino as i64], |r| r.get(0))?;
+            let replaced: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM configs WHERE home=? AND (dev!=? OR ino!=? OR birth_ns IS NOT ?))",
+                params![home,dev as i64,ino as i64,birth], |r| r.get(0))?;
             if replaced {
                 return Err(Error::conflict("home_replaced", format!(
                     "{home} belongs to a registered config whose directory was replaced. Restore the original directory to keep its sessions, or move the replacement to a new path and register it there."
                 )));
             }
-            db.execute("INSERT INTO configs(tool,label,home,dev,ino,proxy_mode,http_proxy,https_proxy) VALUES(?,?,?,?,?,?,?,?)",
-                params![t,name,home,dev as i64,ino as i64,mode,http,https])?;
+            db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns,proxy_mode,http_proxy,https_proxy) VALUES(?,?,?,?,?,?,?,?,?)",
+                params![t,name,home,dev as i64,ino as i64,birth,mode,http,https])?;
             config(db,db.last_insert_rowid())
         })
     }

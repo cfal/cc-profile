@@ -153,6 +153,16 @@ else:
         self.assertNotIn("private prompt", str(data))
         self.assertNotIn("ticket", str(data))
 
+    def test_recreating_a_home_does_not_inherit_its_session(self):
+        home=Path(self.account("claude","recycled")["home"])
+        launched=self.cli("claude","first")
+        uid=json.loads(launched.stdout)["argv"][1]
+        home.rmdir()
+        home.mkdir()
+        refused=self.cli("claude","--resume",uid)
+        self.assertNotEqual(refused.returncode,0)
+        self.assertIn("replaced",refused.stderr)
+
     def test_observer_enters_via_private_socket_and_can_resume(self):
         c = self.account("codex", "cx")
         self.assertNotEqual(self.cli("codex", "exec", "first").returncode, 0)

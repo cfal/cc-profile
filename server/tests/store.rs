@@ -4,6 +4,36 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
+    let f = Fixture::new();
+    let c = f.add("claude", "present");
+    let offline = f.add("codex", "offline");
+    std::fs::rename(&offline.home, f.root.join("original")).unwrap();
+    f.store
+        .db()
+        .unwrap()
+        .execute_batch("ALTER TABLE configs DROP COLUMN birth_ns; PRAGMA user_version=2;")
+        .unwrap();
+    let open = || ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    let upgraded = open();
+    assert!(config(&upgraded.db().unwrap(), c.id).unwrap().present());
+    assert!(
+        !config(&upgraded.db().unwrap(), offline.id)
+            .unwrap()
+            .present()
+    );
+    std::fs::rename(f.root.join("original"), &offline.home).unwrap();
+    assert!(config(&open().db().unwrap(), offline.id).unwrap().present());
+    // Deterministic even on filesystems that don't immediately recycle a deleted inode.
+    upgraded
+        .db()
+        .unwrap()
+        .execute("UPDATE configs SET birth_ns=birth_ns-1 WHERE id=?", [c.id])
+        .unwrap();
+    assert!(!config(&open().db().unwrap(), c.id).unwrap().present());
+}
+
+#[test]
 fn current_is_per_provider_and_disable_does_not_elect_a_replacement() {
     let f = Fixture::new();
     let a = f.add("claude", "a");
