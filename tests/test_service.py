@@ -67,6 +67,7 @@ class Service(unittest.TestCase):
 import json, os, pathlib, sys, time
 home = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
 config = sys.stdin.read()
+assert 'proxy =' not in config  # curl uses the launch environment, not a second proxy policy.
 assert 'Bearer private-test-token' in config and not any('private-test-token' in a for a in sys.argv)
 assert 'https://api.anthropic.com/api/oauth/usage' in config
 with (home / "quota-count").open("a") as stream: stream.write("fetch\n")
@@ -234,6 +235,8 @@ else:
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")
         cx = self.account("codex", "two")
+        self.assertEqual(self.api("PATCH", "accounts/%d"%cl["id"], {"revision":cl["revision"],
+            "proxy_mode":"custom","http_proxy":"http://fixture.invalid:3128"})[0],200)
         (Path(cl["home"]) / ".credentials.json").write_text(json.dumps({"claudeAiOauth":{"accessToken":"private-test-token"}}))
         for _ in range(2):
             status, _, _ = self.api("POST", "quota/refresh", {"stale_only":True})

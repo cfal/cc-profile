@@ -173,16 +173,11 @@ async fn claude(c: &Config, curl: &Path, cwd: &Path) -> Fetch {
     if oauth["expiresAt"].as_i64().is_some_and(|t| t <= now()) {
         return Err(signin().into());
     }
-    let mut opts = format!(
+    let opts = format!(
         "url = \"https://api.anthropic.com/api/oauth/usage\"\nheader = {}\nheader = \"Accept: application/json\"\nheader = \"anthropic-beta: oauth-2025-04-20\"\nuser-agent = \"cc-profile/{}\"\n",
         curl_string(&format!("Authorization: Bearer {token}"))?,
         env!("CARGO_PKG_VERSION")
     );
-    if c.mode == "custom"
-        && let Some(p) = c.https.as_ref().or(c.http.as_ref())
-    {
-        opts += &format!("proxy = {}\n", curl_string(p)?);
-    }
     let mut child = clean_command(curl, cwd, Some(c))
         .args([
             "-q",
