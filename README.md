@@ -26,7 +26,14 @@ systemctl --user enable --now ccpd
 journalctl --user -u ccpd -n 10
 ```
 
-Stop any foreground instance first. Use a systemd user override for installation-specific binary paths. No root daemon is needed.
+Stop any foreground instance first. The user unit does not source shell startup files. For an npm/fnm installation, both the native launcher **and its Node interpreter** must be on the service PATH; an absolute `--codex-bin` alone will not fix a missing `node`. Run `command -v node` in your shell, then use `systemctl --user edit ccpd` with its **stable installation directory**, not a temporary multishell path:
+
+```ini
+[Service]
+Environment=PATH=/absolute/node/installation/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+Restart with `systemctl --user restart ccpd` after changing PATH or updating either native executable. A verified build is required for new chats and resumes; a provider auto-update can require a cc-profile adapter update.
 
 ## Accounts
 

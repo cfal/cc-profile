@@ -141,6 +141,12 @@ impl Build {
                 .collect(),
             _ => String::new(),
         };
+        if version.is_empty() {
+            eprintln!(
+                "ccpd: {tool} found at {} but --version failed. Check execute permission and the service PATH (npm installations need node).",
+                bin.display()
+            );
+        }
         let supported = match tool {
             "claude" => version.split_whitespace().next() == Some("2.1.329"),
             _ => version == "codex-cli 0.171.0",
