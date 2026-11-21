@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
 };
 use ccpd::{
-    native::executable,
+    native::{PROXIES, executable},
     quota::{self, auth_stamp},
     store::{Config, config, configs},
     types::{Error, Result, now},
@@ -13,6 +13,7 @@ use ccpd::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, path::PathBuf, sync::Mutex};
 use tokio::sync::Semaphore;
 
@@ -31,6 +32,7 @@ impl Jobs {
     }
 }
 struct Cache {
+    stamp: String,
     status: String,
     attempt: i64,
     success: Option<i64>,
@@ -38,15 +40,38 @@ struct Cache {
     fails: i64,
     snapshot: Option<String>,
 }
-fn cached(db: &Connection, c: &Config) -> Result<Option<Cache>> {
-    Ok(db.query_row("SELECT status,attempt_ms,success_ms,retry_ms,failures,snapshot FROM quota_cache WHERE config_id=? AND revision=? AND stamp=?",
-        params![c.id,c.revision,auth_stamp(c)],|r|Ok(Cache{status:r.get(0)?,attempt:r.get(1)?,success:r.get(2)?,retry:r.get(3)?,fails:r.get(4)?,snapshot:r.get(5)?})).optional()?)
+// Bind numbers to the inputs used to fetch them, not to label, Current or Enabled.
+fn inputs(c: &Config) -> Option<String> {
+    if !c.present() {
+        return None;
+    }
+    let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
+    let fields = json!([
+        c.dev,
+        c.ino,
+        auth_stamp(c),
+        c.mode,
+        c.http,
+        c.https,
+        inherited
+    ]);
+    Some(format!("{:x}", Sha256::digest(fields.to_string())))
+}
+fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {
+    Ok(db.query_row("SELECT status,attempt_ms,success_ms,retry_ms,failures,snapshot,stamp FROM quota_cache WHERE config_id=?",
+        [id],|r|Ok(Cache{status:r.get(0)?,attempt:r.get(1)?,success:r.get(2)?,retry:r.get(3)?,fails:r.get(4)?,snapshot:r.get(5)?,stamp:r.get(6)?})).optional()?)
 }
 pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
     let busy = j.active.lock().unwrap().contains(&c.id);
-    let Some(cache) = cached(db, c)? else {
+    let Some(stamp) = inputs(c) else {
+        return Ok(json!({"status":"unavailable","loading":busy}));
+    };
+    let Some(cache) = cached(db, c.id)? else {
         return Ok(json!({"status":"not_checked","loading":busy}));
     };
+    if cache.stamp != stamp {
+        return Ok(json!({"status":"not_checked","loading":busy,"retry_ms":cache.retry}));
+    }
     let snapshot = cache
         .snapshot
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
@@ -69,17 +94,19 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
         };
         let mut jobs = Vec::new();
         for c in cs {
-            let cache = cached(&db, &c)?;
+            let Some(stamp) = inputs(&c) else { continue };
+            let cache = cached(&db, c.id)?;
             if cache.as_ref().is_some_and(|r| {
                 now() < r.retry
                     || (stale_only
+                        && r.stamp == stamp
                         && r.status == "fresh"
                         && r.success.is_some_and(|t| now() - t < 300000))
             }) {
                 continue;
             }
             if a.quotas.active.lock().unwrap().insert(c.id) {
-                jobs.push((auth_stamp(&c), c, cache));
+                jobs.push((stamp, c, cache));
             }
         }
         Ok(jobs)
@@ -93,25 +120,33 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
             let _slot = a.quotas.slots.acquire().await.unwrap();
             let run = || -> Result<bool> {
                 let current = config(&*a.store.db()?, id)?;
-                Ok(current.revision == c.revision
-                    && auth_stamp(&current) == stamp
-                    && current.present())
+                Ok(inputs(&current).as_ref() == Some(&stamp))
             };
             if run().unwrap_or(false) {
                 let result =
                     quota::fetch(&c, a.build(&c.tool), a.quotas.curl.as_deref(), &a.state_dir)
                         .await;
                 let a2 = a.clone();
-                let saved=blocking(move||a2.store.write(|db|{
-                    let actual=config(db,c.id)?;if actual.revision!=c.revision||auth_stamp(&actual)!=stamp{return Ok(())}
-                    let ms=now();let(status,failures,retry,success,snapshot)=match result{
-                        Ok(v)=>("fresh",0,ms+30000,Some(ms),Some(v.to_string())),
-                        Err(e)=>{let fails=prior.as_ref().map(|q|q.fails+1).unwrap_or(1);
-                            let delay=(30000_i64 << (fails-1).min(6)).max(e.retry_after_ms.unwrap_or(0));
-                            (e.status,fails,ms.saturating_add(delay),prior.as_ref().and_then(|c|c.success),prior.and_then(|q|q.snapshot))}
+                let saved = blocking(move || a2.store.write(|db| {
+                    let ms = now();
+                    let (status, failures, retry, success, snapshot) = match result {
+                        Ok(v) => ("fresh", 0, ms + 30000, Some(ms), Some(v.to_string())),
+                        Err(e) => {
+                            let fails = prior.as_ref().map_or(1, |q| q.fails + 1);
+                            let delay = (30000_i64 << (fails-1).min(6)).max(e.retry_after_ms.unwrap_or(0));
+                            let last = prior.filter(|q| q.stamp == stamp);
+                            (e.status, fails, ms.saturating_add(delay), last.as_ref().and_then(|q| q.success), last.and_then(|q| q.snapshot))
+                        }
+                    };
+                    // Discard data if the credentials changed in flight, but honor the cooldown.
+                    let (status, success, snapshot) = if inputs(&config(db, id)?).as_ref() == Some(&stamp) {
+                        (status, success, snapshot)
+                    } else {
+                        ("unavailable", None, None)
                     };
                     db.execute("INSERT INTO quota_cache(config_id,revision,attempt_ms,success_ms,retry_ms,failures,status,stamp,snapshot) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(config_id) DO UPDATE SET revision=excluded.revision,attempt_ms=excluded.attempt_ms,success_ms=excluded.success_ms,retry_ms=excluded.retry_ms,failures=excluded.failures,status=excluded.status,stamp=excluded.stamp,snapshot=excluded.snapshot",
-                       params![id,c.revision,ms,success,retry,failures,status,stamp,snapshot])?;Ok(())
+                       params![id,c.revision,ms,success,retry,failures,status,stamp,snapshot])?;
+                    Ok(())
                 })).await;
                 if saved.is_err() {
                     eprintln!("ccpd: could not persist quota observation for config {id}");

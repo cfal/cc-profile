@@ -217,9 +217,28 @@ else:
             self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
             self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
             self.assertEqual(self.cli("claude","-p","independent").returncode,0)
+            self.assertEqual(self.api("PUT","current/claude",{"config_id":c["id"]})[0],200)
         finally:
             hold.unlink()
         q=wait_status("rate_limited")
         self.assertTrue(q["stale"])
         self.assertEqual(q["snapshot"]["windows"][0]["used_pct"],25)
         self.assertGreaterEqual(q["retry_ms"]-q["attempt_ms"],600000)
+        self.assertEqual(self.api("PUT","current/claude",{"config_id":None})[0],200)
+        def edit(**fields):
+            account=self.api("GET","accounts?tool=claude")[1]["items"][0]
+            self.assertEqual(self.api("PATCH","accounts/%d" % c["id"],
+                                      dict(fields,revision=account["revision"]))[0],200)
+        edit(label="renamed",enabled=False)
+        self.assertEqual(wait_status("rate_limited"),q)
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
+        edit(proxy_mode="direct")
+        hidden=wait_status("not_checked")
+        self.assertFalse(hidden.get("snapshot"))
+        self.assertEqual(hidden["retry_ms"],q["retry_ms"])
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
+        edit(proxy_mode="inherit")
+        (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"different"}}')
+        self.assertFalse(wait_status("not_checked").get("snapshot"))
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
+        self.assertEqual((home/"quota-count").read_text(),"fetch\n"*2)

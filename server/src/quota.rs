@@ -32,6 +32,11 @@ fn percent(v: &Value) -> Option<f64> {
     v.as_f64()
         .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))
 }
+fn used_percent(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.)
+        .map(|n| n.min(100.))
+}
 fn seconds(v: &Value) -> Option<i64> {
     v.as_i64()?.checked_mul(1000)
 }
@@ -62,7 +67,7 @@ pub fn claude_snapshot(v: &Value) -> Result<Value> {
             }
             _ => continue,
         };
-        let Some(p) = percent(&w["utilization"]) else {
+        let Some(p) = used_percent(&w["utilization"]) else {
             continue;
         };
         let reset = w["resets_at"]
@@ -106,7 +111,7 @@ pub fn codex_snapshot(v: &Value) -> Result<Value> {
         }
         for key in ["primary", "secondary"] {
             let w = &bucket[key];
-            let Some(p) = percent(&w["usedPercent"]) else {
+            let Some(p) = used_percent(&w["usedPercent"]) else {
                 continue;
             };
             let duration = length(w["windowDurationMins"].as_i64());
@@ -282,5 +287,16 @@ mod tests {
         assert_eq!(s["windows"][0]["reset_at_ms"], 10000);
         assert_eq!(s["spend_control"]["remaining_pct"], 0.0);
         assert_eq!(s["credits"]["unlimited"], true);
+    }
+    #[test]
+    fn over_limit_usage_shows_an_exhausted_window() {
+        let c = claude_snapshot(
+            &json!({"five_hour":{"utilization":112},"seven_day":{"utilization":-1}}),
+        )
+        .unwrap();
+        assert_eq!(c["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(c["windows"][0]["used_pct"], 100.);
+        let c = codex_snapshot(&json!({"rateLimits":{"primary":{"usedPercent":104}}})).unwrap();
+        assert_eq!(c["windows"][0]["used_pct"], 100.);
     }
 }
