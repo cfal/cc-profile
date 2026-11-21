@@ -28,6 +28,23 @@ if sys.argv[1:2] == ["app-server"]:
         r = json.loads(line)
         if "id" not in r: continue
         result = {}
+        if r["method"] == "account/login/start":
+            assert r["params"] == {"type":"chatgptDeviceCode"}
+            import threading, time
+            (home / "login-env").write_text(json.dumps([str(home),os.getenv("HTTPS_PROXY")]))
+            if (home / "login-fails").exists():
+                print(json.dumps({"id":r["id"],"error":{"message":"fixture-private-detail"}}), flush=True)
+                continue
+            login_id = str(uuid.uuid4())
+            result = {"type":"chatgptDeviceCode","loginId":login_id,"verificationUrl":"https://auth.openai.com/codex/device","userCode":"TEST-ONLY"}
+            def complete():
+                while not (home / "finish-login").exists(): time.sleep(.02)
+                print(json.dumps({"method":"account/login/completed","params":{"loginId":login_id,"success":True}}), flush=True)
+            threading.Thread(target=complete,daemon=True).start()
+            print(json.dumps({"method":"account/login/completed","params":{"loginId":"unrelated","success":True}}), flush=True)
+        if r["method"] == "account/login/cancel":
+            assert r["params"]["loginId"] == login_id
+            (home/"login-cancelled").touch()
         if r["method"] == "hooks/list":
             if (home / "offline").exists(): sys.exit(1)
             entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
@@ -140,6 +157,72 @@ else:
         return subprocess.run([str(LAUNCHER), *args], env=self.env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, cwd=self.root,
                               timeout=30 if getattr(self,"native",False) else 8)
+
+    def test_creating_and_signing_in_a_second_claude_profile(self):
+        work = self.account("claude", "work")
+        self.assertEqual(self.api("PUT", "current/claude", {"config_id": work["id"]})[0], 200)
+        create = {"tool":"claude","label":"Personal","create": True,
+                  "proxy_mode":"custom","https_proxy":"http://fixture.invalid:3128"}
+        status, personal, _ = self.api("POST", "accounts", create)
+        self.assertEqual(status, 201, personal)
+        home = Path(personal["home"])
+        self.assertTrue(home.is_relative_to(self.root/".local/share/cc-profile/profiles/claude"))
+        self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(home.iterdir()), [])
+        self.assertFalse(personal["enabled"] or personal["current"])
+        self.assertEqual(self.api("POST", "accounts", create)[0], 409)
+        self.assertEqual(list(home.parent.iterdir()), [home])
+        other = self.api("POST", "accounts", dict(create, label="Another"))[1]
+        self.assertNotEqual(other["home"], personal["home"])
+        self.assertEqual(self.api("POST", "accounts", dict(create, home=work["home"]))[0], 400)
+        for options, op in [([], "login"), (["--status"], "status")]:
+            p = self.cli("login", str(personal["id"]), *options)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            result = json.loads(p.stdout)
+            self.assertEqual((result["home"],result["argv"],result["proxy"]),
+                             (str(home),["auth",op],"http://fixture.invalid:3128/"))
+        self.assertEqual(self.cli("login", str(personal["id"]), "chat").returncode, 2)
+        self.assertEqual(json.loads(self.cli("claude","auth","status").stdout)["home"],work["home"])
+        self.assertEqual(self.api("GET","sessions")[1]["items"], [])
+
+    def test_profile_device_sign_in_lifecycle(self):
+        def create(label):
+            status, c, _ = self.api("POST", "accounts", {"tool":"codex","label":label,"create":True,
+                                      "proxy_mode":"custom","https_proxy":"http://fixture.invalid:3128"})
+            self.assertEqual(status, 201)
+            return c, "accounts/%s/device-login" % c["id"]
+        def wait(path, state):
+            for _ in range(100):
+                response = self.api("GET",path)[1]
+                if response["state"] == state: return response
+                time.sleep(.03)
+            self.fail(response)
+        personal, path = create("Personal")
+        other, other_path = create("Work")
+        body = {"revision":personal["revision"]}
+        start = self.api("POST",path,body)[1]
+        waiting = wait(path, "waiting")
+        self.assertEqual(waiting["code"], "TEST-ONLY")
+        self.assertEqual(start["attempt"], self.api("POST", path, body)[1]["attempt"])
+        self.assertEqual(self.api("GET", other_path)[1], {"state":"idle"})
+        self.assertEqual(self.api("POST", other_path, {"revision":other["revision"]})[0], 409)
+        self.assertEqual(self.api("POST", path+"/cancel", {"attempt":"stale"})[0], 409)
+        home = Path(personal["home"])
+        self.assertEqual(json.loads((home / "login-env").read_text()),[str(home),"http://fixture.invalid:3128/"])
+        self.api("POST", path+"/cancel", {"attempt":start["attempt"]})
+        self.assertNotIn("code", wait(path, "cancelled"))
+        self.assertTrue((home/"login-cancelled").exists())
+        self.api("POST",path,body)
+        wait(path, "waiting")
+        (home/"finish-login").touch()
+        self.assertNotIn("code", wait(path, "completed"))
+        (home/"login-fails").touch()
+        self.api("POST",path,body)
+        self.assertNotIn("fixture-private-detail", str(wait(path, "failed")))
+        accounts = self.api("GET","accounts?tool=codex")[1]["items"]
+        self.assertFalse(any(c["enabled"] or c["current"] for c in accounts))
+        self.assertEqual(self.api("GET","startups")[1]["items"], [])
+        self.assertEqual(self.api("GET","sessions")[1]["items"], [])
 
     def test_claude_exec_stickiness_and_fail_closed_controls(self):
         c = self.account("claude", "one")

@@ -18,6 +18,7 @@ fn build() -> Build {
 }
 fn req(f: &Fixture, t: &str, args: &[&str], b: &Build) -> Request {
     Request {
+        login_profile: None,
         request_id: Uuid::new_v4().to_string(),
         ticket: "c1".repeat(32),
         tool: t.into(),
@@ -36,6 +37,39 @@ fn approve(f: &Fixture, build: &Build, c: &Config) {
             rusqlite::params![build.observer_stamp(c), c.id],
         )
         .unwrap();
+}
+#[test]
+fn login_plan_targets_only_the_named_claude_profile_even_on_retry() {
+    let f = Fixture::new();
+    let exe = build();
+    let work = f.add("claude", "work");
+    f.store.current("claude", Some(work.id)).unwrap();
+    let other = f.add("codex", "other");
+    let personal = f.add("claude", "personal");
+    f.store
+        .edit(
+            personal.id,
+            &json!({"revision":personal.revision, "enabled":false}),
+        )
+        .unwrap();
+    let mut r = req(&f, "claude", &["auth", "login"], &exe);
+    r.login_profile = Some(personal.id);
+    let p = launch(&f.store, &exe, &r).unwrap();
+    assert_eq!(p.config_id, personal.id);
+    assert_eq!(p.argv, ["auth", "login"]);
+    assert_eq!(launch(&f.store, &exe, &r).unwrap(), p);
+    r.request_id = Uuid::new_v4().to_string();
+    r.login_profile = Some(other.id);
+    assert_eq!(launch(&f.store, &exe, &r).unwrap_err().1, "login_profile");
+    r.argv = vec!["chat".into()];
+    assert_eq!(launch(&f.store, &exe, &r).unwrap_err().1, "bad_request");
+    let db = f.store.db().unwrap();
+    assert!(config(&db, work.id).unwrap().current);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 #[test]
 fn retries_disabled_resumes_and_redacted_log() {

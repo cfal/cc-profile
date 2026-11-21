@@ -1,5 +1,6 @@
 mod auth;
 mod callback;
+mod device_login;
 mod password;
 mod quotas;
 mod service;
@@ -97,6 +98,7 @@ async fn run() -> Result<()> {
         port,
         auth: auth::Auth::new(),
         quotas: quotas::Jobs::new(),
+        logins: device_login::Logins::default(),
         workspace: workspace::Checks::new(),
     });
     let a = app.clone();

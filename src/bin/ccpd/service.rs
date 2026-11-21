@@ -32,6 +32,7 @@ pub struct App {
     pub port: u16,
     pub auth: Auth,
     pub quotas: super::quotas::Jobs,
+    pub logins: super::device_login::Logins,
     pub workspace: super::workspace::Checks,
 }
 impl App {
@@ -124,9 +125,12 @@ pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Resul
 }
 async fn add(State(s): State<Shared>, Json(v): Json<Value>) -> Result<(StatusCode, Json<Value>)> {
     blocking(move || {
-        s.store
-            .register(&v)
-            .map(|c| (StatusCode::CREATED, Json(c.public())))
+        (if v.get("create") == Some(&Value::Bool(true)) {
+            s.store.create_profile(v)
+        } else {
+            s.store.register(&v)
+        })
+        .map(|c| (StatusCode::CREATED, Json(c.public())))
     })
     .await
 }
@@ -242,6 +246,14 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
+        .route(
+            "/api/v1/accounts/{id}/device-login",
+            get(super::device_login::status).post(super::device_login::start),
+        )
+        .route(
+            "/api/v1/accounts/{id}/device-login/cancel",
+            post(super::device_login::cancel),
+        )
         .route("/api/v1/accounts/{id}/observer/{op}", post(hooks))
         .route(
             "/api/v1/accounts/{id}/quota/refresh",

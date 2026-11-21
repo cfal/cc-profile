@@ -431,7 +431,16 @@ async function logs(view, params, ver) {
 }
 function accountForm(t, c) {
   const label = el("input", { required: true, maxlength: 100, value: c?.label || "" }),
-    home = el("input", { required: true, placeholder: "/home/user/profiles/work/config" });
+    home = el("input", { placeholder: "/home/user/profiles/work/config" });
+  const source = select([["new", "Create new profile"], ["existing", "Use existing directory"]],
+    "new", {"aria-label": "Profile directory"});
+  const homeField = field("Existing config directory", home);
+  const updateSource = () => {
+    home.required = source.value === "existing";
+    homeField.hidden = !home.required;
+  };
+  source.onchange = updateSource;
+  updateSource();
   const mode = select(
     [
       ["inherit", "Inherit environment"],
@@ -470,14 +479,14 @@ function accountForm(t, c) {
   mode.onchange = toggle;
   toggle();
   modal(
-    c ? "Edit config" : "Add " + names[t] + " config",
+    c ? "Edit config" : "Add " + names[t] + " profile",
     [
       field("Label", label),
-      c ? field("Config directory", code(c.home)) : field("Existing config directory", home),
+      ...(c ? [field("Config directory", code(c.home))] : [field("Profile directory", source), homeField]),
       field("Proxy mode", mode),
       fields,
     ],
-    c ? "Save changes" : "Add config",
+    c ? "Save changes" : "Add profile",
     async () => {
       const v = { label: label.value.trim(), proxy_mode: mode.value };
       if (mode.value === "custom")
@@ -490,9 +499,9 @@ function accountForm(t, c) {
         }
       const saved = c
         ? await api("accounts/" + c.id, "PATCH", { revision: c.revision, ...v })
-        : await api("accounts", "POST", { tool: t, home: home.value.trim(), ...v });
+        : await api("accounts", "POST", { tool: t, ...(source.value === "new" ? {create: true} : {home: home.value.trim()}), ...v });
       go("accounts", { tool: t, id: saved.id });
-      notice(c ? "Config updated." : "Config registered, initially disabled.");
+      notice(c ? "Config updated." : "Profile added. Not enabled for chats.");
     },
   );
 }
@@ -634,11 +643,81 @@ function capacity(c) {
   }
   return section;
 }
+function signInPanel(c, initial, supported) {
+  const section = el("section", {}, el("h3", {}, "Profile sign-in"));
+  if (c.tool === "claude") {
+    const cmd = "ccp login " + c.id;
+    section.append(el("p", {}, "Sign in to " + c.label + " with Claude Code in your terminal."),
+      el("div", {class: "row"}, code(cmd), ib("Copy Claude sign-in command", "copy", () => copy(cmd))));
+    return section;
+  }
+  const endpoint = "accounts/" + c.id + "/device-login";
+  const body = el("div");
+  section.append(body);
+  let last, poll;
+  const update = (v) => {
+    clearTimeout(poll);
+    const busy = ["starting", "waiting", "cancelling"].includes(v.state);
+    const refresh = async () => {
+      if (!section.isConnected) return;
+      try {
+        const fresh = await api(endpoint);
+        if (section.isConnected) update(fresh);
+      } catch (err) {
+        if (section.isConnected) {
+          last = null;
+          body.replaceChildren(text(err.message), btn("Refresh sign-in", refresh, "refresh-cw"));
+        }
+      }
+    };
+    if (busy) poll = setTimeout(refresh, 1200);
+    const key = JSON.stringify(v);
+    if (key === last) return;
+    last = key;
+    const action = (label, path, payload, glyph) => btn(label, async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      clearTimeout(poll);
+      try {
+        const next = await api(path, "POST", payload);
+        if (section.isConnected) update(next);
+      } catch (err) {
+        button.disabled = false;
+        if (busy) await refresh();
+        throw err;
+      }
+    }, glyph);
+    if (busy) {
+      const cancel = action("Cancel sign-in", endpoint + "/cancel", {attempt: v.attempt}, "x");
+      cancel.disabled = v.state === "cancelling";
+      body.replaceChildren(v.state === "waiting"
+        ? el("div", {}, el("p", {}, "Choose the ChatGPT account for " + c.label + " at OpenAI and enter this code."),
+            el("div", {class: "row"}, code(v.code), ib("Copy device code", "copy", () => copy(v.code)),
+              el("a", {href: v.url, target: "_blank", rel: "noopener noreferrer"}, "Open OpenAI verification")))
+        : el("p", {}, v.state === "starting" ? "Requesting a device code…" : "Cancelling sign-in…"),
+        cancel);
+    } else {
+      const start = action("Sign in with ChatGPT", endpoint, {revision: c.revision}, "key-round");
+      start.disabled = !c.present || !supported;
+      const messages = {
+        completed: "Device sign-in completed for " + c.label + ".",
+        expired: "Device code expired. Start again for a new code.",
+        failed: "Device sign-in did not complete. Check that device login is allowed for your ChatGPT account or workspace, then try again.",
+        cancelled: "Sign-in cancelled.",
+      };
+      body.replaceChildren(...(messages[v.state] ? [el("p", {}, messages[v.state])] : []), start);
+    }
+  };
+  update(initial);
+  return section;
+}
 async function accounts(params, ver, enter) {
   const t = params.get("tool") === "codex" ? "codex" : "claude",
     data = await api("accounts?tool=" + t);
   if (ver !== version) return;
   const c = data.items.find((c) => String(c.id) === params.get("id")) || data.items[0];
+  const login = c && t === "codex" ? await api("accounts/" + c.id + "/device-login") : null;
+  if (ver !== version) return;
   const tabs = el(
     "div",
     { class: "segments", "aria-label": "Provider" },
@@ -741,24 +820,7 @@ async function accounts(params, ver, enter) {
           ib("Edit config", "pencil", () => accountForm(t, c)),
         ),
       ),
-      el(
-        "dl",
-        { class: "facts" },
-        datum("Directory", code(c.home)),
-        datum("Eligible", el("label", { class: "switch" }, enabled, "Enabled")),
-        datum("Current", current),
-        datum(
-          "Readiness",
-          text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn"),
-        ),
-        datum(
-          "Proxy",
-          c.proxy_mode === "custom"
-            ? [c.http_proxy?.url, c.https_proxy?.url].filter(Boolean).join(" · ")
-            : simple(c.proxy_mode),
-        ),
-      ),
-      capacity(c),
+      signInPanel(c, login, data.supported),
     );
     if (t === "codex") {
       const cmd = "CODEX_HOME=" + shell(c.home) + " codex --no-daemon";
@@ -810,6 +872,15 @@ async function accounts(params, ver, enter) {
         ),
       );
     }
+    detail.append(el("section", {}, el("h3", {}, "Chat routing"),
+      el("label", {class: "switch"}, enabled, "Enable for new chats"),
+      el("dl", {class: "facts"},
+        datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
+        datum("Current", current),
+        datum("Directory", code(c.home)),
+        datum("Proxy", c.proxy_mode === "custom"
+          ? [c.http_proxy?.url, c.https_proxy?.url].filter(Boolean).join(" · ")
+          : simple(c.proxy_mode)))), capacity(c));
   }
   const compat = data.compatibility;
   main.replaceChildren(
@@ -819,7 +890,7 @@ async function accounts(params, ver, enter) {
         await api("quota/refresh", "POST", {});
         await render();
       }),
-      btn("Add config", () => accountForm(t, null), "plus", "primary"),
+      btn("Add profile", () => accountForm(t, null), "plus", "primary"),
     ),
     el(
       "div",
@@ -831,9 +902,9 @@ async function accounts(params, ver, enter) {
       ? el("div", { class: "account-grid" }, list, detail)
       : empty(
           "users",
-          "No " + names[t] + " configs",
-          "Register an existing config directory.",
-          btn("Add config", () => accountForm(t, null), "plus"),
+          "No " + names[t] + " profiles",
+          "Create a profile or use an existing directory.",
+          btn("Add profile", () => accountForm(t, null), "plus"),
         ),
     el(
       "div",

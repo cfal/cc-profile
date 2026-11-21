@@ -5,8 +5,86 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines, Take},
+    process::{Child, ChildStdin, ChildStdout},
+};
 
+fn failed() -> Error {
+    Error::unavailable("native_rpc", "Native Codex service unavailable.")
+}
+
+pub struct Codex {
+    child: Child,
+    input: ChildStdin,
+    lines: Lines<BufReader<Take<ChildStdout>>>,
+}
+impl Codex {
+    pub async fn open(build: &Build, home: &Config, cwd: &Path) -> Result<Self> {
+        if !build.unchanged() || !home.present() {
+            return Err(failed());
+        }
+        let mut child = clean_command(&build.bin, cwd, Some(home))
+            .args(["app-server", "--listen", "stdio://"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|_| failed())?;
+        let mut rpc = Self {
+            input: child.stdin.take().unwrap(),
+            lines: BufReader::new(child.stdout.take().unwrap().take(1 << 20)).lines(),
+            child,
+        };
+        rpc.call(1, "initialize", json!({"clientInfo":{"name":"cc-profile","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+        rpc.send(json!({"method":"initialized"})).await?;
+        Ok(rpc)
+    }
+    async fn send(&mut self, msg: Value) -> Result<()> {
+        self.input.write_all(format!("{msg}\n").as_bytes()).await?;
+        self.input.flush().await?;
+        Ok(())
+    }
+    pub async fn next(&mut self) -> Result<Value> {
+        let line = self.lines.next_line().await?.ok_or_else(failed)?;
+        serde_json::from_str(&line).map_err(|_| failed())
+    }
+    pub async fn call(&mut self, id: u64, method: &str, params: Value) -> Result<Value> {
+        self.send(json!({"id":id,"method":method,"params":params}))
+            .await?;
+        loop {
+            let v = self.next().await?;
+            if v["id"] != id {
+                continue;
+            }
+            if !v["error"].is_null() {
+                let msg = v["error"]["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                return Err(
+                    if msg.contains("authentication required")
+                        || msg.contains("unauthorized")
+                        || msg.contains("401")
+                    {
+                        Error::bad(
+                            "sign_in_required",
+                            "Sign in with a supported ChatGPT account.",
+                        )
+                    } else if msg.contains("429") || msg.contains("too many requests") {
+                        Error::unavailable("rate_limited", "Rate limited.")
+                    } else {
+                        failed()
+                    },
+                );
+            }
+            return v.get("result").cloned().ok_or_else(failed);
+        }
+    }
+    pub async fn close(mut self) {
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
+    }
+}
 pub async fn codex(
     build: &Build,
     home: &Config,
@@ -14,42 +92,12 @@ pub async fn codex(
     method: &str,
     params: Value,
 ) -> Result<Value> {
-    let failed = || Error::unavailable("native_rpc", "Native Codex metadata service unavailable.");
-    if !build.unchanged() || !home.present() {
-        return Err(failed());
-    }
-    let mut child = clean_command(&build.bin, cwd, Some(home))
-        .args(["app-server", "--listen", "stdio://"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|_| failed())?;
-    let mut input = child.stdin.take().unwrap();
-    let mut lines = BufReader::new(child.stdout.take().unwrap().take(1 << 20)).lines();
-    let result=tokio::time::timeout(Duration::from_secs(12),async {
-        for(id,msg) in [(1,json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"cc-profile","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}})),
-            (2,json!({"id":2,"method":method,"params":params}))]{
-            if id==2{input.write_all(b"{\"method\":\"initialized\"}\n").await?;}
-            input.write_all(format!("{msg}\n").as_bytes()).await?;input.flush().await?;
-            loop{
-                let line=lines.next_line().await?.ok_or_else(failed)?;
-                let v:Value=serde_json::from_str(&line).map_err(|_|failed())?;
-                if v["id"]!=id{continue}
-                if !v["error"].is_null(){
-                    let message=v["error"]["message"].as_str().unwrap_or("").to_ascii_lowercase();
-                    return Err(if message.contains("authentication required")||message.contains("unauthorized")||message.contains("401"){
-                        Error::bad("sign_in_required","Sign in with a supported ChatGPT account.")
-                    }else if message.contains("429")||message.contains("too many requests"){Error::unavailable("rate_limited","Rate limited.")}
-                    else{failed()})
-                }
-                let result=v.get("result").ok_or_else(failed)?;
-                if id==2{return Ok(result.clone())}break
-            }
-        }
-        Err(failed())
-    }).await.unwrap_or_else(|_|Err(failed()));
-    drop(input);
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-    result
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let mut rpc = Codex::open(build, home, cwd).await?;
+        let result = rpc.call(2, method, params).await;
+        rpc.close().await;
+        result
+    })
+    .await
+    .unwrap_or_else(|_| Err(failed()))
 }

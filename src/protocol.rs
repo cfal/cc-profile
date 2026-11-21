@@ -8,6 +8,8 @@ pub struct Request {
     pub request_id: String,
     pub ticket: String,
     pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_profile: Option<i64>,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub binary: Option<PathBuf>,

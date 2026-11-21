@@ -331,6 +331,27 @@ impl Store {
         tx.commit()?;
         Ok(out)
     }
+    pub fn create_profile(&self, mut v: Value) -> Result<Config> {
+        use std::os::unix::fs::DirBuilderExt;
+        if v.get("home").is_some() {
+            return Err(Error::bad(
+                "bad_home",
+                "Choose either a new profile or an existing directory.",
+            ));
+        }
+        let root = crate::paths::profile_root(v["tool"].as_str().unwrap_or(""))?;
+        label(v["label"].as_str().unwrap_or(""))?;
+        proxy_settings(&v, None)?;
+        crate::paths::private_dir(&root)?;
+        let home = root.join(uuid::Uuid::new_v4().to_string());
+        std::fs::DirBuilder::new().mode(0o700).create(&home)?;
+        v["home"] = json!(home);
+        let result = self.register(&v);
+        if result.is_err() {
+            let _ = std::fs::remove_dir(&home);
+        }
+        result
+    }
     pub fn register(&self, v: &Value) -> Result<Config> {
         let t = tool(v["tool"].as_str().unwrap_or(""))?;
         let name = label(v["label"].as_str().unwrap_or(""))?;

@@ -24,6 +24,7 @@ const HELP: &str = "Usage: ccp <claude|codex> [native arguments...]
   ccp codex exec --json 'review these changes'
   ccp claude --resume <session-uuid>
   ccp codex resume <session-uuid>
+  ccp login <claude-profile-id> [--status]
 
 New chats rotate; exact resumes use their original config. No transfers,
 pickers or --last. Manage accounts and Current in the ccpd web panel
@@ -67,6 +68,9 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
     if plan.v != VERSION
         || plan.request_id != req.request_id
         || plan.tool != req.tool
+        || req.login_profile.is_some_and(|id| {
+            id != plan.config_id || plan.argv != req.argv || plan.decision != "profile_login"
+        })
         || !Path::new(path).is_absolute()
         || path.chars().any(char::is_control)
         || plan.label.chars().any(char::is_control)
@@ -174,6 +178,7 @@ fn exec_native(binary: &Path, r: &Request, p: &Plan) -> io::Error {
 async fn run() -> Result<ExitCode> {
     let mut args = env::args_os().skip(1);
     let first = args.next();
+    let mut login_profile = None;
     let tool = match first
         .as_deref()
         .map(|s| s.to_str().ok_or_else(utf8))
@@ -188,15 +193,37 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Some(t @ ("claude" | "codex")) => t,
+        Some("login") => {
+            login_profile = args
+                .next()
+                .and_then(|s| s.to_str()?.parse::<i64>().ok())
+                .filter(|id| *id > 0);
+            if login_profile.is_none() {
+                eprintln!("Usage: ccp login <claude-profile-id> [--status]");
+                return Ok(ExitCode::from(2));
+            }
+            "claude"
+        }
         _ => {
             eprintln!("{HELP}");
             return Ok(ExitCode::from(2));
         }
     };
-    let argv = args
+    let mut argv: Vec<String> = args
         .map(OsString::into_string)
         .collect::<std::result::Result<_, _>>()
         .map_err(|_| utf8())?;
+    if login_profile.is_some() {
+        let op = match argv.as_slice() {
+            [] => "login",
+            [arg] if arg == "--status" => "status",
+            _ => {
+                eprintln!("Usage: ccp login <claude-profile-id> [--status]");
+                return Ok(ExitCode::from(2));
+            }
+        };
+        argv = vec!["auth".into(), op.into()];
+    }
     let binary = executable(tool);
     if let Some(path) = &binary {
         if let (Ok(own), Ok(native)) = (fs::metadata("/proc/self/exe"), fs::metadata(path))
@@ -224,6 +251,7 @@ async fn run() -> Result<ExitCode> {
         request_id: Uuid::new_v4().to_string(),
         ticket: paths::secret()?,
         tool: tool.into(),
+        login_profile,
         argv,
         cwd,
         binary,

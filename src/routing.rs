@@ -16,6 +16,16 @@ fn digest(v: impl AsRef<[u8]>) -> Vec<u8> {
 }
 fn check_req(r: &Request) -> Result<()> {
     tool(&r.tool)?;
+    if let Some(id) = r.login_profile
+        && (id <= 0
+            || r.tool != "claude"
+            || !matches!(r.argv.as_slice(), [cmd, op] if cmd == "auth" && matches!(op.as_str(), "login" | "status")))
+    {
+        return Err(Error::bad(
+            "bad_request",
+            "A profile sign-in only accepts Claude login or status.",
+        ));
+    }
     if Uuid::parse_str(&r.request_id).is_err()
         || r.ticket.len() != 64
         || !r.ticket.bytes().all(|b| b.is_ascii_hexdigit())
@@ -64,6 +74,10 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             }
         }
         "no_current" => Error::conflict("no_current", "Set current for this tool in Accounts."),
+        "login_profile" => Error::conflict(
+            "login_profile",
+            "This Claude profile is missing, replaced, or belongs to another provider.",
+        ),
         "current_missing" => Error::conflict(
             "current_missing",
             "The Current config directory is missing or replaced. Restore it or set another Current in Accounts.",
@@ -154,6 +168,17 @@ fn choose(
     }
     if !build.supported && i.intent != Intent::Misc {
         return Ok(reject("unsupported_build"));
+    }
+    if let Some(id) = req.login_profile {
+        return Ok(
+            match configs(db, &req.tool)?
+                .into_iter()
+                .find(|c| c.id == id && c.present())
+            {
+                Some(c) if i.intent == Intent::Misc => Selection::Allow(c, "profile_login"),
+                _ => reject("login_profile"),
+            },
+        );
     }
     match &i.intent {
         Intent::New => {
@@ -283,7 +308,7 @@ impl Prior {
         let i = parsed?;
         let valid = c.as_ref().is_some_and(|c| {
             c.present()
-                && c.enabled
+                && (c.enabled || req.login_profile == Some(c.id))
                 && Some(c.revision) == self.revision
                 && (i.intent != Intent::New
                     || (build.ready(c) == "ready" && workspace_ready(c, &i.workspace)))

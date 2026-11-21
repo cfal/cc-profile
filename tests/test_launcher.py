@@ -126,6 +126,17 @@ sys.exit(17)
         self.assertEqual(json.loads(raw)["override_names"],["ANTHROPIC_API_KEY"])
         self.assertNotIn(b"private-override",raw)
 
+    def test_profile_login_never_falls_back_to_current_or_an_unrelated_command(self):
+        for changes in [{"config_id": 8}, {"decision": "current"}, {"argv": ["chat"]}]:
+            def respond(path, req):
+                self.assertEqual(req["login_profile"], 7)
+                plan = dict(self.plan(req), config_id=7, decision="profile_login")
+                return 200, plan | changes
+            self.respond = respond
+            p = self.run_ccp("login", "7")
+            self.assertEqual((p.returncode, p.stdout), (1, ""))
+            self.assertIn("Invalid launch plan", p.stderr)
+
     def test_transport_retry_is_byte_identical(self):
         self.respond=lambda path,r: None if len(self.calls)==1 else (200,self.plan(r))
         self.assertEqual(self.run_ccp("claude").returncode,17)
