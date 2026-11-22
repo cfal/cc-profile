@@ -1,6 +1,7 @@
 use super::child::{Signals, status, stop};
 use ccpd::{
     agy,
+    invocation::Invocation,
     protocol::{Plan, Request},
     socket,
     types::{Error, Result},
@@ -243,9 +244,10 @@ pub(super) async fn run(
     home: &Path,
     req: &Request,
     plan: &Plan,
+    managed: Option<&Invocation>,
 ) -> Result<ExitCode> {
     let saved = agy::has_login(home)?;
-    if let Some(id) = agy::conversation_arg(&req.argv)
+    if let Some(id) = managed.and_then(Invocation::agy_conversation)
         && !uuid::Uuid::parse_str(id)
             .ok()
             .is_some_and(|id| agy::has_conversation(home, id).unwrap_or(false))
@@ -276,9 +278,8 @@ pub(super) async fn run(
             "Sign in to this profile before checking quota.",
         ));
     }
-    let bridge = req.login_profile.is_none()
-        && req.argv.first().is_some_and(|a| a == "acp")
-        && req.argv != ["acp", "--help"];
+    let tui = managed.is_some_and(|i| i.agy_tui);
+    let bridge = managed.is_some() && !tui;
     let mut args = req.argv.clone();
     if bridge && let Some(i) = args.iter().position(|s| s == "--for-session") {
         args.drain(i..i + 2);
@@ -312,7 +313,6 @@ pub(super) async fn run(
         }
         Ok(status(child.wait().await?))
     };
-    let tui = req.argv.is_empty() || agy::conversation_arg(&req.argv).is_some();
     let shutdown = async {
         loop {
             let sig = signals.recv().await;

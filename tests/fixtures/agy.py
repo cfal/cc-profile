@@ -19,7 +19,7 @@ assert home.is_absolute()
 obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],
        "runtime": str(rt), "home": str(home), "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
-if not args:
+if not args or (args[0].startswith("-") and args != ["-p", "/usage"]):
     if (home/"interactive-test").exists():
         import signal
         def interrupted(*_):
@@ -29,16 +29,13 @@ if not args:
         (home/"tui-ready").touch()
         print(input(), flush=True)
         sys.exit()
-    print("fixture Antigravity TUI")
+    print(json.dumps({"home": str(home), "args": args}) if args else "fixture Antigravity TUI")
     sys.exit()
 if args == ["models"]:
     print("Fetching available models...", file=sys.stderr)
     if not (home/".gemini/antigravity-cli/antigravity-oauth-token").exists():
         sys.exit("Error: Please sign in to view available models.")
     print("fixture-model\tFixture Model")
-    sys.exit()
-if args[0].split("=")[0] == "--conversation":
-    print(json.dumps({"home": str(home), "args": args}))
     sys.exit()
 if args == ["-p", "/usage"]:
     assert Path.cwd() == home

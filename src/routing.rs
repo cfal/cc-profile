@@ -243,7 +243,7 @@ fn choose(
                     |r| r.get(0),
                 )
                 .optional()?;
-            let owner = if req.tool == "agy" && crate::agy::conversation_arg(&req.argv).is_some() {
+            let owner = if i.agy_tui {
                 let uuid =
                     Uuid::parse_str(uid).map_err(|_| denial("exact_id_required", None, None))?;
                 let mut found = None;
@@ -372,8 +372,7 @@ impl Prior {
             || validate_binary(build, req.binary.as_deref()).is_err()
             || (!build.supported && (i.intent != Intent::Misc || req.tool == "agy"))
             || self.workspace != i.workspace
-            || (req.tool == "agy"
-                && crate::agy::conversation_arg(&req.argv).is_some()
+            || (i.agy_conversation().is_some()
                 && !matches!(choose(db, build, req, i, RoutingMode::RoundRobin)?,
                     Selection::Allow(owner, _) if Some(owner.id) == self.config))
         {
@@ -406,6 +405,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
     let parsed = if req.login_profile.is_some() {
         Ok(Invocation {
             intent: Intent::Misc,
+            agy_tui: false,
             workspace: req.cwd.clone(),
             codex: Default::default(),
         })
@@ -421,11 +421,11 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
         }
         let invocation = parsed.as_ref().ok();
         let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
-        let intent = invocation.map(|i| match (req.tool.as_str(), req.argv.first().map(String::as_str), &i.intent) {
-            ("agy", None, Intent::New) => "tui",
-            ("agy", Some("acp"), Intent::New | Intent::Resume(_)) => "acp",
-            ("agy", _, Intent::Resume(_)) => "tui_resume",
-            ("codex", Some("app-server"), Intent::New | Intent::Resume(_)) => "app_server",
+        let intent = invocation.map(|i| match (req.tool.as_str(), &i.intent) {
+            ("agy", Intent::New) if i.agy_tui => "tui",
+            ("agy", Intent::Resume(_)) if i.agy_tui => "tui_resume",
+            ("agy", Intent::New | Intent::Resume(_)) => "acp",
+            ("codex", Intent::New | Intent::Resume(_)) if req.argv.first().is_some_and(|s| s == "app-server") => "app_server",
             _ => i.intent.name(),
         }).unwrap_or("unsupported");
         let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);

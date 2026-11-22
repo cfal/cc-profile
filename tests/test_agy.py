@@ -56,9 +56,14 @@ class Antigravity(unittest.TestCase):
     def test_native_tui_selects_a_profile_without_claiming_a_session(self):
         a = self.profile("first")
         b = self.profile("second")
-        for owner in (a, b):
-            result = self.s.cli("agy")
-            self.assertEqual((result.returncode, result.stdout.strip()), (0, "fixture Antigravity TUI"), result.stderr)
+        for owner, args in [(a, []), (b, ["--add-dir", "one", "--model=acp", "--sandbox=true",
+                                          "--add-dir=two", "-i", "private initial prompt"])]:
+            result = self.s.cli("agy", *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if args:
+                self.assertEqual(json.loads(result.stdout), {"args":args, "home":owner["home"]})
+            else:
+                self.assertEqual(result.stdout.strip(), "fixture Antigravity TUI")
             obs = json.loads((Path(owner["home"]) / "last-run").read_text())
             self.assertEqual((obs["home"], obs["cwd"]), (owner["home"], str(self.s.root)))
             self.assertEqual(obs["proxy"], ["https://proxy.invalid:8443/"] * 4)
@@ -66,8 +71,13 @@ class Antigravity(unittest.TestCase):
             row = self.s.api("GET","startups?tool=agy")[1]["items"][0]
             self.assertEqual((row["config_id"],row["intent"],row["state"],row["native_id"]),
                              (owner["id"],"tui","routed",None))
-        for args in [("--continue",), ("--conversation","unknown"), ("--settings","{}")]:
-            self.assertNotEqual(self.s.cli("agy",*args).returncode,0)
+            self.assertNotIn("private initial prompt", str(row))
+        for args in [("--continue",), ("--conversation","unknown"), ("--settings","{}"),
+                     ("--sandbox","models"), ("--agent","--conversation=hidden"), ("--sandbox","-p","secret"),
+                     ("acp","--dangerously-skip-permissions"), ("--remote-control",), ("--new-project",)]:
+            denied = self.s.cli("agy", *args)
+            self.assertNotEqual(denied.returncode, 0, args)
+            self.assertEqual(denied.stdout, "")
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
 
     def test_nonfatal_tui_interrupt_is_delivered_once(self):
@@ -76,7 +86,7 @@ class Antigravity(unittest.TestCase):
         pid, fd = pty.fork()
         if not pid:
             os.chdir(self.s.root)
-            os.execve(svc.LAUNCHER,[str(svc.LAUNCHER),"agy"],self.s.env)
+            os.execve(svc.LAUNCHER,[str(svc.LAUNCHER),"agy","--sandbox"],self.s.env)
         try:
             deadline = time.monotonic() + 5
             while not (home/"tui-ready").exists():
@@ -142,23 +152,36 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], a["id"])
 
     def test_tui_resume_uses_the_unique_saved_file_not_rotation(self):
-        a, b = self.profile("first"), self.profile("owner")
+        a, b, c = self.profile("first"), self.profile("owner"), self.profile("third")
         uid = str(uuid.uuid4())
         p, q = (Path(c["home"])/".gemini/antigravity-cli/conversations" for c in (a, b))
         for d in (p, q):
             for parent in [d.parents[1], d.parent, d]:
                 parent.mkdir(mode=0o700, exist_ok=True)
-        run = lambda *args: self.s.cli("agy", *(args or ("--conversation", uid)))
+        (self.s.root / "agy").symlink_to(svc.LAUNCHER)
+        self.s.env["PATH"] = str(self.s.root) + ":" + self.s.env["PATH"]
+        def run(*args):
+            return subprocess.run(["agy", *(args or ("--conversation="+uid, "--dangerously-skip-permissions"))],
+                                  env=self.s.env, cwd=self.s.root, stdin=subprocess.DEVNULL,
+                                  text=True, capture_output=True, timeout=8)
         self.assertNotEqual(run().returncode, 0)
         for ext in ("db", "pb"):
             saved = q / f"{uid}.{ext}"
             saved.touch()
             self.assertNotEqual(run().returncode, 0)
             saved.write_bytes(b"fixture: native saved conversation")
-            for args in (["--conversation", uid], ["--conversation=" + uid]):
+            for args in (["--conversation", uid], ["--conversation=" + uid, "--dangerously-skip-permissions"],
+                         ["--dangerously-skip-permissions", "--conversation", uid],
+                         ["--mode=plan","--effort","high","--conversation",uid,"--agent=acp",
+                          "--dangerously-skip-permissions=false"]):
                 result = run(*args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"args":args, "home":b["home"]})
+                row = self.s.api("GET","startups?tool=agy")[1]["items"][0]
+                self.assertEqual((row["config_id"],row["intent"],row["reason"],row["native_id"]),
+                                 (b["id"],"tui_resume","sticky",uid))
+            self.assertNotEqual(run("--conversation",uid,"--sandbox","--conversation="+uid).returncode,0)
+            self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
             duplicate = p / saved.name
             duplicate.symlink_to(saved)
             self.assertNotEqual(run().returncode, 0)
@@ -177,7 +200,7 @@ class Antigravity(unittest.TestCase):
         self.assertIn("disabled", run().stderr)
         self.assertEqual(len(self.s.api("GET","sessions?tool=agy")[1]["items"]),1)
         self.assertEqual(self.s.cli("agy").returncode, 0)
-        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], a["id"])
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], c["id"])
 
     def test_panel_report_needs_login_and_withholds_unexpected_output(self):
         c = self.profile("report", enable=False)

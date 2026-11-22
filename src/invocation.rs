@@ -28,7 +28,13 @@ impl Intent {
 pub struct Invocation {
     pub intent: Intent,
     pub codex: CodexArgs,
+    pub agy_tui: bool,
     pub workspace: PathBuf,
+}
+impl Invocation {
+    pub fn agy_conversation(&self) -> Option<&str> {
+        self.intent.id().filter(|_| self.agy_tui)
+    }
 }
 #[derive(Default)]
 pub struct CodexArgs {
@@ -53,6 +59,7 @@ fn app_server(args: &[String], cwd: &Path) -> Result<Invocation> {
     Ok(Invocation {
         intent,
         codex: CodexArgs::default(),
+        agy_tui: false,
         workspace: cwd.into(),
     })
 }
@@ -118,23 +125,59 @@ fn claude_command(word: &str) -> bool {
             | "upgrade"
     )
 }
+fn agy_tui_intent(args: &[String]) -> Result<Intent> {
+    let invalid = || {
+        Error::bad(
+            "unsupported_invocation",
+            "Unsupported or ambiguous AgY terminal arguments. Use -i <prompt> for interactive input and one --conversation=<uuid> to resume.",
+        )
+    };
+    let mut resume = None;
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        let (flag, inline) = arg
+            .split_once('=')
+            .map_or((arg, None), |(f, v)| (f, Some(v)));
+        let mut value = || {
+            inline
+                .or_else(|| it.next().filter(|v| !v.starts_with('-')))
+                .filter(|v| !v.is_empty())
+                .ok_or_else(invalid)
+        };
+        match flag {
+            "--dangerously-skip-permissions" | "--sandbox"
+                if matches!(inline, None | Some("true" | "false")) => {}
+            "--conversation" if resume.is_none() => {
+                let id = value()?;
+                resume = Some(native_id(id).ok().filter(|v| v == id).ok_or_else(|| {
+                    Error::bad(
+                        "exact_id_required",
+                        "Use the exact lowercase UUID printed by AgY with --conversation.",
+                    )
+                })?);
+            }
+            "--model"
+            | "--effort"
+            | "--mode"
+            | "--agent"
+            | "--add-dir"
+            | "-i"
+            | "--prompt-interactive" => {
+                value()?;
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(resume.map(Intent::Resume).unwrap_or(Intent::New))
+}
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     if tool == "agy" {
-        let mut intent = Intent::New;
-        if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
+        let (intent, agy_tui) = if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
             || matches!(args, [a,b] if a=="acp" && b=="--help")
         {
-            intent = Intent::Misc;
-        } else if let Some(id) = crate::agy::conversation_arg(args) {
-            let parsed = native_id(id)?;
-            if parsed != id {
-                return Err(unsupported());
-            }
-            intent = Intent::Resume(parsed);
-        } else if !args.is_empty() {
-            if args.first().is_none_or(|a| a != "acp") {
-                return Err(unsupported());
-            }
+            (Intent::Misc, false)
+        } else if args.first().is_some_and(|a| a == "acp") {
+            let mut intent = Intent::New;
             let mut it = args[1..].iter();
             while let Some(arg) = it.next() {
                 match arg.as_str() {
@@ -148,9 +191,13 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     _ => return Err(unsupported()),
                 }
             }
-        }
+            (intent, false)
+        } else {
+            (agy_tui_intent(args)?, true)
+        };
         return Ok(Invocation {
             intent,
+            agy_tui,
             workspace: cwd.into(),
             codex: Default::default(),
         });
@@ -432,6 +479,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     Ok(Invocation {
         intent,
         codex,
+        agy_tui: false,
         workspace,
     })
 }
@@ -444,6 +492,91 @@ mod tests {
             &a.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             Path::new("/"),
         )
+    }
+    #[test]
+    fn agy_tui_values_do_not_select_a_command_or_session() {
+        let id = "a0000000-0000-4000-8000-000000000012";
+        for flag in ["--sandbox", "--dangerously-skip-permissions"] {
+            for value in ["true", "false"] {
+                let opt = format!("{flag}={value}");
+                let i = parse("agy", &[&opt, "--conversation", id]).unwrap();
+                assert_eq!(i.agy_conversation(), Some(id));
+            }
+        }
+        for (flag, value) in [
+            ("--model", "acp"),
+            ("--effort", "high"),
+            ("--mode", "auto"),
+            ("--agent", "models"),
+            ("--add-dir", "acp"),
+            ("-i", "acp"),
+            ("--prompt-interactive", "models"),
+        ] {
+            let inline = format!("{flag}={value}");
+            for args in [vec![flag, value, "--sandbox"], vec![inline.as_str()]] {
+                let i = parse("agy", &args).unwrap();
+                assert!(i.agy_tui);
+                assert_eq!(i.intent, Intent::New);
+            }
+        }
+        let prompt = format!("-i=--conversation={id}");
+        assert_eq!(parse("agy", &[&prompt]).unwrap().intent, Intent::New);
+        for verb in ["models", "--version", "--help"] {
+            let i = parse("agy", &[verb]).unwrap();
+            assert!(!i.agy_tui);
+            assert_eq!(i.intent, Intent::Misc);
+        }
+        let acp = parse("agy", &["acp", "--for-session", id]).unwrap();
+        assert_eq!(acp.intent.id(), Some(id));
+        assert!(!acp.agy_tui);
+        let resume = parse("agy", &["--sandbox", "--conversation", id, "--agent=acp"]).unwrap();
+        assert_eq!(resume.agy_conversation(), Some(id));
+    }
+    #[test]
+    fn agy_tui_refuses_ambiguous_arguments() {
+        let id = "a0000000-0000-4000-8000-000000000012";
+        for args in [
+            vec![
+                "--conversation",
+                id,
+                "--model",
+                "local",
+                "--conversation",
+                id,
+            ],
+            vec!["--conversation"],
+            vec!["--conversation="],
+            vec!["--conversation", "last"],
+            vec!["--conversation", &id.to_uppercase()],
+            vec!["--model"],
+            vec!["--mode="],
+            vec!["--agent", ""],
+            vec!["--effort", "--sandbox"],
+            vec!["--add-dir", "one", "two"],
+            vec!["-i"],
+            vec!["--sandbox=oops"],
+            vec!["--dangerously-skip-permissions=maybe"],
+            vec!["--sandbox", "false"],
+            vec!["--continue"],
+            vec!["--for-session", id],
+            vec!["acp", "--conversation", id],
+            vec!["--sandbox", "acp"],
+            vec!["models", "--sandbox"],
+            vec!["--model=x", "models"],
+            vec!["--new-project"],
+            vec!["--settings=x"],
+            vec!["--remote-agent=x"],
+            vec!["--gemini-dir", "elsewhere"],
+            vec!["--app-data-dir", "elsewhere"],
+            vec!["--log-file=x"],
+            vec!["--login"],
+            vec!["--print"],
+            vec!["--stdio"],
+            vec!["--", "chat"],
+            vec!["unknown"],
+        ] {
+            assert!(parse("agy", &args).is_err(), "{args:?}");
+        }
     }
     #[test]
     fn codex_injects_remote_after_the_exec_verb_not_an_option_value() {

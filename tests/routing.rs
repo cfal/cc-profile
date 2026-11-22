@@ -47,6 +47,40 @@ fn window(used: f64) -> Value {
 }
 
 #[test]
+fn agy_tui_resume_replay_rechecks_the_saved_conversation_with_native_options() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let f = Fixture::new();
+    let b = build();
+    let home = f.root.join("agy-owner");
+    let dir = home.join(".gemini/antigravity-cli/conversations");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .unwrap();
+    let c = f
+        .store
+        .register(&json!({"tool":"agy","label":"owner","home":home}))
+        .unwrap();
+    f.store
+        .edit(c.id, &json!({"enabled":true,"revision":c.revision}))
+        .unwrap();
+    let id = Uuid::new_v4();
+    let saved = dir.join(format!("{id}.db"));
+    std::fs::write(&saved, "fixture").unwrap();
+    let r = req(
+        &f,
+        "agy",
+        &["--conversation", &id.to_string(), "--sandbox"],
+        &b,
+    );
+    assert_eq!(launch(&f.store, &b, &r).unwrap().config_id, c.id);
+    std::fs::remove_file(saved).unwrap();
+    assert_eq!(launch(&f.store, &b, &r).unwrap_err().1, "stale_plan");
+}
+
+#[test]
 fn an_empty_nested_git_directory_does_not_hide_outer_codex_settings() {
     use ccpd::quota::no_codex_project_config;
     use std::fs;

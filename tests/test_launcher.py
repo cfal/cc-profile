@@ -178,6 +178,17 @@ sys.exit(17)
         self.assertEqual(len(self.calls),2)
         self.assertEqual(self.calls[0],self.calls[1])
 
+    def test_agy_resume_with_options_rechecks_file_before_spawning(self):
+        (self.root/"agy").symlink_to(self.native)
+        def respond(path, req):
+            if path == "/v2/exec-failure":
+                return 200, {}
+            return 200, dict(self.plan(req), decision="sticky", env_set={"HOME":str(self.root)})
+        self.respond = respond
+        p = self.run_ccp("agy","--sandbox","--conversation=60000000-0000-4000-8000-000000000002")
+        self.assertEqual((p.returncode, p.stdout), (1, ""))
+        self.assertIn("Saved conversation is no longer available", p.stderr)
+
     def test_codex_cannot_downgrade_or_accept_substituted_argv_or_hook_markers(self):
         (self.root/"codex").symlink_to(self.native)
         for changes in [{"v":1},{"argv":["--no-daemon"]},{"decision":"current"},
