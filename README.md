@@ -1,10 +1,10 @@
 # cc-profile
 
-`ccp` starts Claude Code or Codex with a config chosen by a local router. New chats rotate among enabled, ready configs. Resuming an exact session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
+`ccp` starts Claude Code, Codex, or Antigravity ACP with a config chosen by a local router. New chats rotate among enabled, ready configs. Resuming an exact session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
 
 ## Install
 
-The launcher and daemon are Rust executables for Linux. A native build requires stable Rust, `pkg-config`, and SQLite development headers, and the resulting daemon uses system SQLite. The static build below needs only Docker on the build machine and includes SQLite. Neither build needs Python or uv at runtime. The daemon uses the `curl` executable for Claude quota. The verified launch grammar is for **Claude Code 2.1.329** and **Codex CLI 0.171.0**. Other builds can be used for maintenance, not trusted chat routing.
+The launcher and daemon are Rust executables for Linux. A native build requires stable Rust, `pkg-config`, and SQLite development headers, and the resulting daemon uses system SQLite. The static build below needs only Docker on the build machine and includes SQLite. Neither build needs Python or uv at runtime. The daemon uses the `curl` executable for Claude quota. The verified launch grammar is for **Claude Code 2.1.329**, **Codex CLI 0.171.0**, and **Antigravity CLI 1.5.14**. Other Claude or Codex builds can be used for maintenance, not trusted chat routing. Antigravity's filesystem login behavior is version-specific; even setup requires the verified version.
 
 ```sh
 CARGO_BUILD_JOBS=1 cargo install --locked --path . --root "$HOME/.local"
@@ -22,7 +22,7 @@ For distribution, build stripped, static Linux executables from the repository r
 
 On x86-64 the outputs are `target/x86_64-unknown-linux-musl/release/{ccp,ccpd,cc-profile}`. Ship `ccp` and `ccpd` to a Linux machine of the same architecture; the alias is optional. The panel assets are embedded in `ccpd`.
 
-Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
+Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path --agy-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
 
 Open **http://127.0.0.1:8743**. On the first visit, set a panel password; subsequent visits use **Sign in**. No pairing token is needed. The first visitor can claim an unconfigured panel, so on a shared machine run **`ccpd set-password` before starting the service**. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and the daemon startup log show the database path: use the same `XDG_STATE_HOME` in your shell and service so they address the same panel. Use `--port PORT` to change the panel port. For a VM, forward the same loopback port using SSH. Do not expose the panel publicly.
 
@@ -45,13 +45,17 @@ Stop any foreground instance first. The user unit does not source shell startup 
 Environment=PATH=/absolute/node/installation/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-Restart with `systemctl --user restart ccpd` after changing PATH or updating either native executable. A verified build is required for new chats and resumes; a provider auto-update can require a cc-profile adapter update.
+Restart with `systemctl --user restart ccpd` after changing PATH or updating a native executable. A verified build is required for new chats and resumes; a provider auto-update can require a cc-profile adapter update.
 
 ## Accounts
 
-1. In **Accounts**, choose Claude or Codex, click **Add profile**, and give it a label such as Work or Personal. **Create new profile** makes a private, empty directory under `$XDG_DATA_HOME/cc-profile/profiles/` (default `~/.local/share/cc-profile/profiles/`). Alternatively, **Use existing directory** registers an existing physical config directory in place. Nothing is copied. Renaming the label never moves the directory.
-2. Sign in while the profile is still disabled. For **Codex**, click **Sign in with ChatGPT**, open the OpenAI verification link, and enter the displayed code. Choose the intended ChatGPT account, especially when adding a second profile in the same browser. Device login must be allowed by the account or workspace. The native Codex app-server saves the login; the panel displays the result. One device sign-in can run at a time. Reopening the profile resumes the display; cancel or retry there. A daemon restart ends a pending attempt. For **Claude**, copy the displayed `ccp login <id>` command and run it in your terminal. It opens the native Claude subscription login for that profile with its proxy settings. For either provider, `ccp login <id>` runs native sign-in in the selected profile with its proxy settings, and `ccp login <id> --status` checks the result.
+1. In **Accounts**, choose Claude, Codex, or Antigravity, click **Add profile**, and give it a label such as Work or Personal. **Create new profile** makes a private, empty directory under `$XDG_DATA_HOME/cc-profile/profiles/` (default `~/.local/share/cc-profile/profiles/`). Alternatively, **Use existing directory** registers an existing physical config directory in place. Nothing is copied. Renaming the label never moves the directory.
+2. Sign in while the profile is still disabled. For **Codex**, click **Sign in with ChatGPT**, open the OpenAI verification link, and enter the displayed code. Choose the intended ChatGPT account, especially when adding a second profile in the same browser. Device login must be allowed by the account or workspace. The native Codex app-server saves the login; the panel displays the result. One device sign-in can run at a time. Reopening the profile resumes the display; cancel or retry there. A daemon restart ends a pending attempt. For **Claude**, copy the displayed `ccp login <id>` command and run it in your terminal. It opens the native Claude subscription login for that profile with its proxy settings. For Claude and Codex, `ccp login <id>` runs native sign-in in the selected profile with its proxy settings, and `ccp login <id> --status` checks the result.
 3. Select **Enable profile** when ready. Repeat for the second profile. New chats rotate among enabled, ready profiles; resumes stay with the original one. Disabling a profile blocks both new chats and resumes without stopping running chats. Setup does not change **Current**, allocate a chat, or advance rotation. **Set current** is only needed for unscoped maintenance commands (e.g. `ccp claude auth status`). Disabling Current clears it without selecting a replacement.
+
+### Antigravity ACP
+
+Use `ccp login <profile-id>` for native Google sign-in, then configure the harness to launch `ccp agy acp`. Use `ccp agy acp --for-session <id>` before sending a load request to reopen a session. The native processes use a private profile home and select filesystem credential storage instead of the desktop keyring. See [Antigravity setup, storage findings and verification limits](docs/antigravity.md) for the harness contract and upgrade caveats.
 
 ### Codex launches
 
@@ -89,8 +93,8 @@ ccp codex login status
 
 `ccp` sends argv and cwd over a private Unix socket, applies an allowlisted environment patch, and runs the selected native tool in the same terminal. Its routing message goes to stderr, not the provider's stdout. If the server is unavailable, nothing launches. Remove conflicting inherited API-key, provider, or storage overrides rather than inadvertently charging another identity.
 
-- **New:** deterministic round-robin per provider. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook.
-- **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native UUIDs are supported. A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.
+- **New:** deterministic round-robin per provider. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook. Antigravity selects a profile per ACP connection and binds each successful `session/new` to it.
+- **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native IDs are supported (opaque strings for ACP, UUIDs for Claude and Codex). A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.
 - **Miscellaneous:** help/version flags, supported auth, doctor, features and MCP management commands use Current. No Current means no launch. In Claude, `--help` shows help; the word `help` alone is a chat prompt.
 - **Unsupported:** `--last`, `claude -c`, pickers, forks, ephemeral/remote/background modes, hook or home overrides, and unrecognized routing-sensitive argument forms. The startup log is not the provider's activity history. In-app session navigation and raw native commands bypass the launcher.
 
@@ -109,8 +113,9 @@ Quota is **informational**. Accounts shows percentage left, absolute/local reset
 Custom uses one proxy URL for both HTTP and HTTPS. Upgrading preserves the old HTTPS proxy if one was set, otherwise the old HTTP proxy. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it.
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
+- Antigravity: explicit native text report via the card or `ccp usage <id>`; not included in background polling.
 - Claude: Linux file-backed OAuth token in the selected `CLAUDE_CONFIG_DIR`, read-only GET to the vendor usage endpoint. Expired credentials require native renewal; the dashboard does not rotate a refresh token behind an active session.
-- Opening Dashboard or Accounts refreshes stale enabled profiles; a profile's own refresh button can also check it while disabled. Both views share the same five-minute cache, with at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Neither quota nor provider connectivity participates in routing. Inherit uses the service environment for quota, the caller's environment for launches.
+- Opening Dashboard or Accounts refreshes stale enabled Claude and Codex profiles; a profile's own refresh button can also check it while disabled. Both views share the same five-minute cache, with at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Neither quota nor provider connectivity participates in routing. Inherit uses the service environment for quota, the caller's environment for launches.
 
 ## Storage and recovery
 
@@ -129,6 +134,7 @@ CARGO_BUILD_JOBS=1 cargo test --locked
 CARGO_BUILD_JOBS=1 cargo build --locked --bins
 python3 -m unittest discover -s tests -v
 python3 tests/native/test_native.py -v  # optional: requires the verified native versions
+CCP_TEST_AGY=/path/to/agy python3 tests/native/test_agy.py -v  # optional: requires Linux bwrap
 uv run --no-project --with playwright python -m playwright install chromium --only-shell
 uv run --no-project --with playwright python tests/panel/test_panel.py
 ```

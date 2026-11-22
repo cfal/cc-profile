@@ -1,0 +1,49 @@
+# Antigravity ACP on Linux
+
+This adapter targets the unmodified `agy` **1.5.14** CLI. The router launches it on the execution machine; it does not run a replacement inference service, copy tokens, or implement Google's OAuth exchange.
+
+## Set up a profile
+
+1. In Accounts, choose Antigravity and add a profile. Its directory is a dedicated **HOME**, not the `.gemini` directory itself. An existing home must be a private, physical directory owned by the same Linux user. Project files stay in the workspace supplied by the harness.
+2. Run `ccp login <id>`. This uses native `agy acp --login`; the browser and pasted-code step belong to Google. The child receives the saved proxy. Your browser uses its own network settings. `ccp login <id> --status` checks for a nonempty, private token file **without reading it**. It does not verify the account email, entitlement, expiry or refresh.
+3. Enable the profile. Configure the harness executable as `ccp` and its argument array as `["agy","acp"]`. An ACP process uses one profile for its lifetime. Each new process rotates; additional sessions on the same process do not.
+
+For an existing session, launch `ccp agy acp --for-session <id>` and then send native `initialize` and `session/load` with that exact ID, its workspace and the harness's MCP servers. The selector is interpreted by **ccp**, not passed to agy. Use `session/resume` instead when advertised and the harness already has the history. There is no transparent cross-account multiplexing on one connection. If the harness always spawns with static args, it must keep a suitable process alive or add the selector on reopen.
+
+The bridge correlates successful `session/new` responses by request ID and records the returned **opaque** session ID and the requested cwd before exposing the reply. An unknown session, disabled/missing owner, wrong-profile load, or unavailable router is a refusal, never permission to start a replacement session. Native errors, permission requests and client replies stay on the original stdio protocol; launcher diagnostics go to stderr. Frames must be newline-delimited UTF-8 JSON-RPC 2.0, at most 8 MiB, with at most 1024 outstanding requests. Sign in before connecting: the bridge advertises no in-band authentication methods and rejects `authenticate`. This keeps the harness from running a raw terminal login against the desktop identity. Forks, storage overrides and API-key/ADC authentication are not managed launch modes. Disabling a profile refuses subsequent new/load/resume requests without terminating an active session.
+
+## Credentials and keyrings
+
+Tested 2026-11-22 with Google's [Linux x86-64 1.5.14 archive](https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.14-5302690847260672/linux-x64/cli_linux_x64.tar.gz); archive SHA-512: `83311d3f354567612dc16c1ae2ea9b503d6f6833aa4e138d39aa229da3f3bb99b0e4d7cca0bce4796b0060d6a51d8113eb7449ed5dc0e7900bf217107ea5bff9`.
+
+Both login and ACP use `--gemini-dir <profile>/.gemini --app-data-dir antigravity-cli`. The first argument is an absolute root; the second is a **relative name** (an absolute app-data path initialized but failed when starting a session). Child HOME is also the profile root. On the pinned build the file-store lookup is:
+
+    <profile>/.gemini/antigravity-cli/antigravity-oauth-token
+
+Separate data roots alone do **not** isolate Google accounts when a Linux Secret Service is visible. In an offline 1.5.14 experiment with a real, unlocked disposable GNOME Keyring:
+
+| Child configuration | Observed result |
+| --- | --- |
+| Normal D-Bus environment | Looked up the shared Secret Service item with service `gemini`, username `antigravity`. |
+| `AGY_ACP_FORCE_FILE_STORAGE=1` | Still read the keyring. The literal switch was not found in the tested binary. cc-profile sets it to `1` on login, ACP and quota subprocesses as an explicit storage preference, not as the isolation mechanism. |
+| `ANTIGRAVITY_CREDENTIAL_SCOPE` or a `credential-user-scope` file | Neither tested value stopped the shared lookup. |
+| Unset only `DBUS_SESSION_BUS_ADDRESS` | Rediscovered the bus under the existing runtime directory. |
+| Change only `XDG_RUNTIME_DIR` | Still connected through the explicit bus address. |
+| Set the bus address to a dead socket | Attempted the keyring first, then fell back. Not used by cc-profile. |
+| Unset the bus address **and** use a fresh private runtime with no bus socket | Selected file storage immediately. Two profiles each opened only their own dummy token file, with no Secret Service calls. Login startup logged the same backend selection. |
+
+The launcher sets the flag and uses the last combination on **the native child only**; it overrides any inherited flag value without changing the harness or daemon environment. Do not change the router's runtime directory: it locates its own Unix socket there. The child's private runtime is removed on normal exit. The shipped adapter neither installs nor impersonates a Secret Service. A compatibility symlink or a raw `agy` invocation does not select this credential backend. This controls native storage discovery, not OS security against another process with your UID. Protect the directory and its backups like a password. ACP workers and tools inherit this private HOME and environment, not the desktop keyring. `--process-per-session` separates ACP workers; it does not select an account.
+
+In separate offline tests, setting `ANTIGRAVITY_GEMINI_DIR` and `ANTIGRAVITY_APP_DATA_DIR` did not move the ACP session database or logs. Changing HOME did move the default tree; explicit ACP flags moved it predictably. The product is distributed as a binary: Google's [public CLI repository](https://github.com/google-antigravity/antigravity-cli/tree/b9f5bf40b9e9e66f417f7bc6e8c0b22a079bc51a) has release notes, examples and issue reports, not the CLI implementation. See also the [Linux keyring report](https://github.com/google-antigravity/antigravity-cli/issues/1610).
+
+## Usage and network
+
+On the Dashboard or in Accounts select **View native quota report**, or run `ccp usage <id>` locally. Both invoke the separate native print-mode command `agy -p /usage`, not a prompt on the ACP stream. Print mode doesn't accept ACP's directory flags; it uses the same private HOME and file-store environment instead. The dashboard requests the native text report on demand, with bounded time and output. It does not invent structured percentages or store the free-form report in SQLite. In an offline signed-out run, `agy -p /usage` offered interactive OAuth rather than quota. The dashboard skips profiles without a private token file and refuses login prompts or unsuccessful output; use the terminal command if no usable report is available. Bulk quota refresh does not run this command. Context-window usage, credit balances and subscription quota are different quantities.
+
+The custom profile proxy is supplied in both cases of HTTP_PROXY and HTTPS_PROXY for login, ACP, and native usage. This is not network isolation: we have not established that every Google subprocess or transport honors these settings. Use a network policy outside cc-profile where no direct egress is mandatory. Antigravity's `sandboxProxy` is for sandboxed terminal commands, not proof of upstream proxy use.
+
+Antigravity also supports a Gemini Developer API key and enterprise ADC. These use different identity/billing mechanisms, not the personal subscription allowance. Google's ACP guide documents Gemini for arbitrary clients; third-party models are restricted to specified editors. The user's harness should identify itself honestly. CLIProxyAPI takes a different approach: its [authenticator](https://github.com/router-for-me/CLIProxyAPI/blob/6eb8554f0ede597b2aa3e508ffb3f111d3c2b9e6/sdk/auth/antigravity.go#L35) manages per-account tokens and its [executor](https://github.com/router-for-me/CLIProxyAPI/blob/6eb8554f0ede597b2aa3e508ffb3f111d3c2b9e6/internal/runtime/executor/antigravity_executor_execute.go#L27) makes upstream requests. That is not how native ACP files work and is not used here.
+
+Primary references: [native sign-in and SSH OAuth](https://antigravity.google/docs/install), [ACP](https://antigravity.google/docs/ide/extensions/acp), [native quota](https://antigravity.google/docs/cli/commands/usage), [headless slash commands](https://antigravity.google/docs/cli/headless), [TUI status-line JSON](https://antigravity.google/docs/cli/statusline), and [Google's terms](https://antigravity.google/terms). Status-line JSON is not an on-demand ACP quota API. A supported native client integration is not permission to replay subscription tokens or bypass provider limits.
+
+**Verification boundary:** the real binary tests used disposable homes, no real Google credentials or paid model turns. File selection is verified; successful two-account OAuth writes, renewal, actual account identity after restart, a live quota payload, and upstream proxy egress still require an operator acceptance test. Sign in to two accounts separately, restart the launcher and daemon, and load a saved session from each using its original owner. Recheck these behaviors when changing the native version.
