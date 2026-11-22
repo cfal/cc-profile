@@ -98,6 +98,21 @@ class PanelPassword(unittest.TestCase):
         self.assertEqual(s.api("POST", "login", {"password": s.password})[0], 401)
         self.assertEqual(s.api("POST", "login", {"password": "1234"})[0], 200)
 
+    def test_concurrent_password_changes_have_one_winner(self):
+        s = self.s
+        s.session = s.api("POST", "setup", {"password": s.password})[1]["session"]
+        replacements = ["first replacement", "second replacement"]
+        def change(new):
+            return s.api("POST", "password", {"current_password": s.password, "new_password": new})[0]
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            statuses = list(pool.map(change, replacements))
+        self.assertEqual(statuses.count(200), 1, statuses)
+        winner = statuses.index(200)
+        self.assertIn(statuses[1 - winner], (403, 409))
+        self.assertFalse(s.api("GET", "session")[1]["signed_in"])
+        self.assertEqual(s.api("POST", "login", {"password": replacements[1 - winner]})[0], 401)
+        self.assertEqual(s.api("POST", "login", {"password": replacements[winner]})[0], 200)
+
     def test_upgrading_an_existing_router_keeps_mappings_and_rejects_old_tokens(self):
         s=self.s
         s.stop()
