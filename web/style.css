@@ -572,6 +572,30 @@ dialog {
 dialog::backdrop {
   background: #12282155;
 }
+.grant-dialog {
+  overflow-wrap: anywhere;
+}
+.grant-dialog .fields > p:first-child {
+  margin-top: 0;
+  font-weight: bold;
+}
+.grant-list {
+  margin: 0;
+  padding-inline-start: 22px;
+}
+.grant-list li {
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.grant-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.grant-row p {
+  margin: 2px 0 0;
+}
 .dialog-head,
 dialog footer {
   display: flex;

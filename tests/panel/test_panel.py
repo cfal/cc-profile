@@ -476,6 +476,217 @@ class Panel(unittest.TestCase):
             Path(path).mkdir(exist_ok=True)
             page.screenshot(path=str(Path(path)/(name+".png")),full_page=True)
 
+    def open_grant_page(self, page, service, fragment):
+        page.goto(f"http://127.0.0.1:{service.port}/#{fragment}")
+        page.get_by_label("Password", exact=True).fill(service.password)
+        page.get_by_role("button", name="Sign in").click()
+
+    def test_reset_grants_require_a_fresh_list_selection_and_confirmation(self):
+        service = self.start_service()
+        _, c, _ = service.api("POST", "accounts", {"tool":"codex","label":"Work","create":True})
+        service.api("POST", "accounts", {"tool":"claude","label":"Personal","create":True})
+        base = f"/api/v1/accounts/{c['id']}"
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width":1240,"height":850})
+            lists, redeems, refreshes = [], [], []
+            checking = False
+            def accounts(route):
+                nonlocal checking
+                data = route.fetch().json()
+                data["items"][0]["quota"] = {"loading":checking, "status":"fresh", "success_ms":1,
+                    "snapshot":{"windows":[], "earned_resets":7 - len(redeems) + int(checking)}}
+                checking = False
+                route.fulfill(json=data)
+            page.route("**/accounts?tool=codex", accounts)
+            def grants(route):
+                self.assertEqual(route.request.method, "POST")
+                self.assertTrue(route.request.headers["x-ccp-session"])
+                if route.request.url.endswith(base+"/resets/list"):
+                    self.assertEqual(route.request.post_data_json, {})
+                    lists.append(route.request.url)
+                    route.fulfill(json={"available_count":7, "details_available":True, "grants":[
+                        {"handle":"expired", "title":"Earlier grant", "expires_at_ms":1},
+                        {"handle":"not-selected", "title":"Other grant", "expires_at_ms":None},
+                        {"handle":f"chosen-{len(lists)}", "title":"Bonus <reset>", "expires_at_ms":None}]})
+                else:
+                    self.assertTrue(route.request.url.endswith(base+"/resets/redeem"))
+                    redeems.append(route)
+            page.route("**/api/v1/accounts/*/resets/*", grants)
+            page.on("request", lambda r: refreshes.append(r.url) if r.url.endswith(base+"/quota/refresh") else None)
+            self.open_grant_page(page, service, "dashboard")
+            action = page.get_by_role("button", name="List reset grants")
+            expect(action).to_have_count(1)
+            self.assertFalse(lists or redeems)
+            dlg = page.get_by_role("dialog")
+            action.press("Enter")
+            expect(dlg).to_contain_text("Only some grants are listed")
+            expect(dlg.get_by_role("button", name="Review grant 1: Earlier grant")).to_be_disabled()
+            self.check_layout(page, "codex-grants-desktop")
+            page.set_viewport_size({"width":320,"height":720})
+            review = dlg.get_by_role("button", name="Review grant 3: Bonus <reset>")
+            review.press("Enter")
+            expect(dlg).to_have_accessible_name("Confirm redemption")
+            expect(dlg).to_have_accessible_description(f"Codex / Work (#{c['id']})")
+            expect(dlg).to_contain_text("Grant 3: Bonus <reset>")
+            expect(dlg).to_contain_text("No expiration")
+            self.check_layout(page, "codex-grant-mobile")
+            self.assertLessEqual(dlg.evaluate("d => d.scrollWidth"), dlg.evaluate("d => d.clientWidth"))
+            dlg.get_by_role("button", name="Close").click()
+            self.assertFalse(redeems)
+            for i, (outcome, message) in enumerate([
+                ("reset","Grant redeemed."), ("alreadyRedeemed","already redeemed"),
+                ("nothingToReset","no usage limit to reset"), ("noCredit","No earned reset was available")]):
+                action.click()
+                review.click()
+                confirm = dlg.get_by_role("button", name="Redeem this grant")
+                with page.expect_request("**"+base+"/resets/redeem"):
+                    confirm.evaluate("button => { button.click(); button.click(); }")
+                expect(dlg).to_contain_text("Waiting for Codex")
+                self.assertEqual(len(redeems), i+1)
+                self.assertEqual(redeems[-1].request.post_data_json, {"handle":f"chosen-{i+2}"})
+                checking = True
+                redeems[-1].fulfill(json={"outcome":outcome})
+                expect(dlg).to_contain_text(message)
+                card = page.locator(".quota-card").filter(has=action)
+                expect(card).to_contain_text("Checking quota")
+                expect(card).to_contain_text(f"Earned resets available: {6-i}")
+                self.assertEqual(refreshes, [])  # The daemon already queued quota reconciliation.
+                expect(dlg.get_by_role("button", name="Redeem this grant")).to_have_count(0)
+                dlg.get_by_role("button", name="Close").click()
+
+    def test_reset_grant_errors_and_expiry_cannot_spend(self):
+        service = self.start_service()
+        c = service.account("codex", "Work")
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.clock.set_fixed_time("2030-01-01T00:00:00Z")
+            endpoint = f"**/accounts/{c['id']}/resets/"
+            redeems = []
+            def stale(route):
+                redeems.append(route.request.post_data_json)
+                route.fulfill(status=409, json={"error":"stale_grant","message":"/private/provider/path"})
+            page.route(endpoint+"redeem", stale)
+            self.open_grant_page(page, service, f"accounts?tool=codex&id={c['id']}")
+            action = page.get_by_role("button", name="List reset grants")
+            dlg = page.get_by_role("dialog")
+            def listed(body, status=200):
+                page.route(endpoint+"list", lambda r: r.fulfill(status=status, json=body), times=1)
+                action.click()
+            for body, status, message in [
+                ({"available_count":None,"details_available":False,"grants":[]}, 200, "No grant details available"),
+                ({"available_count":0,"details_available":True,"grants":[]}, 200, "No available grants"),
+                ({"error":"unavailable","message":"/private/provider/path"}, 503, "Grant details are unavailable"),
+                ({"error":"busy","message":"/private/provider/path"}, 409, "Another request is in progress")]:
+                listed(body, status)
+                expect(dlg).to_contain_text(message)
+                expect(dlg.get_by_role("button", name="Redeem this grant")).to_have_count(0)
+                expect(dlg).not_to_contain_text("/private")
+                dlg.get_by_role("button", name="Close").click()
+            def grant(expires):
+                return {"available_count":1,"details_available":True,"grants":[
+                    {"handle":"selected", "title":"One reset", "expires_at_ms":expires}]}
+            listed(grant(1893456060000))
+            dlg.get_by_role("button", name="Review grant 1: One reset").click()
+            page.clock.set_fixed_time("2030-01-01T00:02:00Z")
+            dlg.get_by_role("button", name="Redeem this grant").click()
+            expect(dlg).to_contain_text("expired or is no longer available")
+            self.assertEqual(redeems, [])
+            dlg.get_by_role("button", name="Close").click()
+            listed(grant(None))
+            dlg.get_by_role("button", name="Review grant 1: One reset").click()
+            dlg.get_by_role("button", name="Redeem this grant").click()
+            expect(dlg).to_contain_text("expired or is no longer available")
+            expect(dlg).not_to_contain_text("/private")
+            self.assertEqual(redeems, [{"handle":"selected"}])
+
+    def test_uncertain_reset_retries_only_the_same_profile_and_handle(self):
+        service = self.start_service()
+        a, b = (service.account("codex", label) for label in ("Work", "Other"))
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            lists, pending = [], []
+            def grants(route):
+                if route.request.url.endswith("/list"):
+                    lists.append(route.request.url)
+                    route.fulfill(json={"available_count":1,"details_available":True,"grants":[
+                        {"handle":f"original-{len(lists)}", "title":"One grant", "expires_at_ms":None}]})
+                else:
+                    pending.append(route)
+            page.route("**/api/v1/accounts/*/resets/*", grants)
+            self.open_grant_page(page, service, f"accounts?tool=codex&id={a['id']}")
+            action = page.get_by_role("button", name="List reset grants")
+            dlg = page.get_by_role("dialog")
+            action.click()
+            dlg.get_by_role("button", name="Review grant 1: One grant").click()
+            with page.expect_request("**/resets/redeem"):
+                dlg.get_by_role("button", name="Redeem this grant").click()
+            def navigate(c):
+                page.evaluate("id => {location.hash = 'accounts?tool=codex&id=' + id}", c["id"])
+                expect(page.locator(".detail h2")).to_have_text(c["label"])
+                expect(dlg).to_be_hidden()
+            navigate(b)
+            action.click()
+            expect(dlg).to_have_accessible_description(f"Codex / Other (#{b['id']})")
+            pending[0].fulfill(status=504, json={"error":"outcome_unknown","message":"/private/provider/path"})
+            expect(dlg.get_by_role("button", name="Review grant 1: One grant")).to_be_visible()
+            self.assertEqual(len(pending), 1)
+            navigate(a)
+            action.click()
+            expect(dlg).to_have_accessible_name("Unconfirmed redemption")
+            expect(dlg).not_to_contain_text("/private")
+            retry = dlg.get_by_role("button", name="Retry same grant")
+            for i in (1, 2):
+                with page.expect_request("**/resets/redeem"):
+                    retry.press("Enter")
+                self.assertEqual(len(pending), i+1)
+                self.assertTrue(pending[i].request.url.endswith(f"/accounts/{a['id']}/resets/redeem"))
+                self.assertEqual(pending[i].request.post_data_json, {"handle":"original-1"})
+                if i == 1:
+                    pending[i].abort("timedout")
+                    expect(retry).to_be_visible()
+                else:
+                    pending[i].fulfill(json={"outcome":"alreadyRedeemed"})
+                    expect(dlg).to_contain_text("already redeemed")
+            self.assertEqual(len(lists), 2)
+
+    def test_late_grant_list_cannot_confirm_after_profile_switch(self):
+        service = self.start_service()
+        a, b = (service.account("codex", label) for label in ("First", "Second"))
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            held, redeems = [], []
+            page.route("**/resets/list", lambda r: held.append(r))
+            page.on("request", lambda r: redeems.append(r) if r.url.endswith("/resets/redeem") else None)
+            self.open_grant_page(page, service, f"accounts?tool=codex&id={a['id']}")
+            action = page.get_by_role("button", name="List reset grants")
+            with page.expect_request("**/resets/list"):
+                action.click()
+            dlg = page.get_by_role("dialog")
+            expect(dlg).to_contain_text("Loading grants")
+            page.evaluate("id => {location.hash = 'accounts?tool=codex&id=' + id}", b["id"])
+            expect(page.locator(".detail h2")).to_have_text("Second")
+            with page.expect_request("**/resets/list"):
+                action.click()
+            held[1].fulfill(json={"available_count":0,"details_available":True,"grants":[]})
+            expect(dlg).to_contain_text("No available grants")
+            with page.expect_response("**/resets/list"):
+                held[0].fulfill(json={"available_count":1,"details_available":True,"grants":[
+                    {"handle":"wrong-profile", "title":"First only", "expires_at_ms":None}]})
+            expect(dlg).to_have_accessible_description(f"Codex / Second (#{b['id']})")
+            expect(dlg).not_to_contain_text("First only")
+            dlg.get_by_role("button", name="Close").click()
+            with page.expect_request("**/resets/list"):
+                action.click()
+            # The card was rendered before a different tab edited this profile.
+            status, _, _ = service.api("PATCH", f"accounts/{b['id']}", {"revision":b["revision"],"label":"Updated"})
+            self.assertEqual(status, 200)
+            held[2].fulfill(json={"available_count":1,"details_available":True,"grants":[
+                {"handle":"new-revision", "title":"Updated only", "expires_at_ms":None}]})
+            expect(dlg).to_be_hidden()
+            expect(page.locator("#notice")).to_contain_text("This profile or its sign-in changed")
+            expect(page.locator(".detail h2")).to_have_text("Updated")
+            self.assertEqual(redeems, [])
+
     def check_border_contrast(self, control):
         border, surface = control.evaluate("""e => [
             getComputedStyle(e).borderTopColor, getComputedStyle(document.documentElement).backgroundColor
