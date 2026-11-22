@@ -1,10 +1,8 @@
 mod auth;
-mod callback;
 mod device_login;
 mod password;
 mod quotas;
 mod service;
-mod workspace;
 use ccpd::{
     native::Build,
     paths,
@@ -45,7 +43,6 @@ async fn run() -> Result<()> {
                 println!("ccpd {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            "observe" => return callback::run().await,
             "-h" | "--help" => {
                 println!("{}", bad());
                 return Ok(());
@@ -57,7 +54,6 @@ async fn run() -> Result<()> {
         }
     }
     let state = paths::state_dir()?;
-    ccpd::observer::binary()?;
     let runtime = paths::runtime_dir()?;
     paths::private_dir(&state)?;
     paths::private_dir(&runtime)?;
@@ -99,7 +95,6 @@ async fn run() -> Result<()> {
         auth: auth::Auth::new(),
         quotas: quotas::Jobs::new(),
         logins: device_login::Logins::default(),
-        workspace: workspace::Checks::new(),
     });
     let a = app.clone();
     tokio::spawn(async move {

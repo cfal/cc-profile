@@ -1,4 +1,4 @@
-"""Exercise the release boundary: real HTTP, Unix socket, exec, hook, and SQLite."""
+"""Exercise the release boundary: real HTTP, Unix socket, exec, and SQLite."""
 from contextlib import closing
 import http.client
 import json
@@ -17,17 +17,23 @@ ROOT = Path(__file__).resolve().parents[1]
 DAEMON = Path(os.environ.get("CCPD_TEST_BIN", ROOT / "target/debug/ccpd"))
 LAUNCHER = Path(os.environ.get("CCP_TEST_BIN", DAEMON.with_name("ccp")))
 FAKE = r'''
-import json, os, pathlib, shlex, subprocess, sys, uuid
+import json, os, pathlib, sys, uuid
 t = pathlib.Path(sys.argv[0]).name
 if sys.argv[1:] == ["--version"]:
     print("codex-cli 0.171.0" if t == "codex" else "2.1.329 (Claude Code)")
     sys.exit()
 home = pathlib.Path(os.environ["CODEX_HOME" if t == "codex" else "CLAUDE_CONFIG_DIR"])
 if sys.argv[1:2] == ["app-server"]:
+    if (home/"track-child").exists(): (home/"child-pid").write_text(str(os.getpid()))
     for line in sys.stdin:
         r = json.loads(line)
         if "id" not in r: continue
         result = {}
+        if r["method"] in ("thread/start","thread/resume","unrelated"):
+            uid = r.get("params",{}).get("threadId",str(uuid.uuid4()))
+            result = {"thread":{"id":uid,"sessionId":uid,"ephemeral":r.get("params",{}).get("ephemeral",False),
+                                "cwd":os.getcwd()}, "home":str(home), "proxy":os.getenv("HTTPS_PROXY"),
+                      "markers":[os.getenv("CCP_LAUNCH_ID"),os.getenv("CCP_OBSERVE_TICKET")]}
         if r["method"] == "account/login/start":
             assert r["params"] == {"type":"chatgptDeviceCode"}
             import threading, time
@@ -49,31 +55,12 @@ if sys.argv[1:2] == ["app-server"]:
         if r["method"] == "account/login/cancel":
             assert r["params"]["loginId"] == login_id
             (home/"login-cancelled").touch()
-        if r["method"] == "hooks/list":
-            if (home / "offline").exists(): sys.exit(1)
-            entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
-            workspace = r["params"]["cwds"][0]
-            with (home / "hook-checks").open("a") as f: f.write(workspace+"\n")
-            if (home/"delay").exists():
-                import time
-                time.sleep(float((home/"delay").read_text()))
-            project = pathlib.Path(workspace) / ".codex/config.toml"
-            enabled = not project.exists() or project.read_text() != "hooks=false"
-            config = home / "config.toml"
-            enabled &= not config.exists() or config.read_text() != "trust revoked"
-            result = {"data": [{"errors": [], "hooks": [dict(eventName="sessionStart", handlerType="command", command=entry["command"], enabled=enabled, matcher="startup", source="user", sourcePath=str(home / "hooks.json"),trustStatus="trusted",currentHash="test")]}]}
-            if (home/"metadata-error").exists(): result["data"][0]["errors"]=["temporary fixture error"]
         if r["method"] == "account/rateLimits/read":
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":0,"resetsAt":2000000000}}}
         print(json.dumps({"id": r["id"], "result": result}), flush=True)
     sys.exit()
-native = None
-if os.environ.get("CCP_LAUNCH_ID"):
-    native = str(uuid.uuid4())
-    entry = json.loads((home / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]
-    subprocess.run(shlex.split(entry["command"]), input=json.dumps({"hook_event_name":"SessionStart","source":"startup","session_id":native}), text=True, check=True)
-print(json.dumps({"argv":sys.argv[1:],"home":str(home),"id":native,"proxy":os.getenv("HTTPS_PROXY")}))
+print(json.dumps({"argv":sys.argv[1:],"home":str(home),"id":None,"proxy":os.getenv("HTTPS_PROXY")}))
 '''
 
 @unittest.skipUnless(DAEMON.is_file(), "build ccpd first")
@@ -189,6 +176,55 @@ else:
         self.assertEqual(json.loads(self.cli("claude","auth","status").stdout)["home"],work["home"])
         self.assertEqual(self.api("GET","sessions")[1]["items"], [])
 
+    def test_hook_free_stdio_rotates_per_server_and_resumes_by_owner(self):
+        a,b = [self.account("codex",label) for label in ("first","second")]
+        self.api("PATCH", "accounts/"+str(a["id"]), {"revision":a["revision"],
+                 "proxy_mode":"custom", "https_proxy":"http://proxy.invalid:8888"})
+        self.env["CCP_LAUNCH_ID"] = self.env["CCP_OBSERVE_TICKET"] = "inherited"
+        def server(args, calls):
+            wire = "".join(json.dumps({"id":i,"method":method,"params":params})+"\n"
+                           for i,(method,params) in enumerate(calls))
+            p=subprocess.run([LAUNCHER,"codex","app-server",*args],input=wire,
+                             env=self.env,cwd=self.root,capture_output=True,text=True,timeout=8)
+            self.assertEqual(p.returncode,0,p.stderr)
+            return [json.loads(line)["result"] for line in p.stdout.splitlines()]
+        one,two,ephemeral,noise = server([], [("thread/start",{}),("thread/start",{}),
+                                               ("thread/start",{"ephemeral":True}),("unrelated",{})])
+        self.assertEqual((one["home"],two["home"],two["proxy"],one["markers"]),
+                         (a["home"],a["home"],"http://proxy.invalid:8888/",[None,None]))
+        ids={r["thread"]["id"] for r in (one,two)}
+        self.assertEqual({r["native_id"] for r in self.api("GET","sessions")[1]["items"]},ids)
+        self.assertEqual(server([], [("thread/start",{})])[0]["home"], b["home"])
+        uid=one["thread"]["id"]
+        resumed,=server(["--for-session",uid],[("thread/resume",{"threadId":uid})])
+        self.assertEqual(resumed["home"],a["home"])
+        self.assertFalse((Path(a["home"])/"hooks.json").exists())
+        self.assertNotEqual(self.cli("codex","app-server","--for-session",str(uuid.uuid4())).returncode,0)
+        self.assertNotEqual(self.cli("codex","app-server","--listen","ws://0.0.0.0:3456").returncode,0)
+        self.assertNotEqual(self.cli("codex","--hook-free").returncode,0)
+
+    def test_hook_free_child_cleanup_and_startup_failure(self):
+        home=Path(self.account("codex","fixture")["home"])
+        (home/"track-child").touch()
+        with subprocess.Popen([LAUNCHER,"codex","app-server"],cwd=self.root,env=self.env,
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as p:
+            try:
+                for _ in range(100):
+                    if (home/"child-pid").exists():break
+                    time.sleep(.03)
+                pid=int((home/"child-pid").read_text())
+            finally:
+                p.terminate()
+            self.assertEqual(p.wait(timeout=5),143)
+            with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+        # This stdio-only fixture exits instead of opening the requested socket.
+        tui=self.cli("codex")
+        self.assertNotEqual(tui.returncode,0)
+        self.assertIn("app-server exited",tui.stderr)
+        self.assertFalse(list((self.root/"run/cc-profile").glob("c-*")))
+        self.assertEqual(self.api("GET","sessions")[1]["items"],[])
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["state"],"exec_failed")
+
     def test_managed_profile_under_relocated_data_home(self):
         data = self.root / "relocated-share"
         data.mkdir()
@@ -260,7 +296,7 @@ else:
             status, c, _ = self.api("POST", "accounts", data)
             self.assertEqual(status, 201, c)
             self.assertFalse(c["enabled"] or c["current"])
-            for options, argv in [([], ["--no-daemon"]), (["--status"], ["login", "status"])]:
+            for options, argv in [([], ["login"]), (["--status"], ["login", "status"])]:
                 p = self.cli("login", str(c["id"]), *options)
                 self.assertEqual(p.returncode, 0, p.stderr)
                 native = json.loads(p.stdout)
@@ -309,29 +345,27 @@ else:
         self.start()
         self.assertNotEqual(self.cli("claude","--resume",uid).returncode,0)
 
-    def test_observer_enters_via_private_socket_and_can_resume(self):
-        c = self.account("codex", "cx")
-        self.assertNotEqual(self.cli("codex", "exec", "first").returncode, 0)
-        for op in ["install", "check"]:
-            status, data, _ = self.api("POST", "accounts/%s/observer/%s" % (c["id"],op), {"revision":c["revision"]})
-            self.assertEqual(status, 200, data)
-        p = self.cli("codex", "exec", "--json", "first")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        uid = json.loads(p.stdout)["id"]
-        _, data, _ = self.api("GET", "sessions?native_id=" + uid)
-        self.assertEqual(data["items"][0]["evidence"], "observed")
-        self.assertEqual(data["items"][0]["config_id"], c["id"])
-        out = json.loads(self.cli("codex", "resume", uid).stdout)
-        self.assertEqual(out["argv"], ["--no-daemon", "resume", uid])
-        self.assertNotEqual(self.cli("codex", "resume", "--last").returncode, 0)
-        self.assertNotEqual(self.cli("codex", "resume", str(uuid.uuid4())).returncode, 0)
-        project=self.root/"workspace"
-        layer=project/".codex/config.toml"
-        layer.parent.mkdir(parents=True)
-        layer.write_text("hooks=false")
-        self.assertNotEqual(self.cli("codex","-C",str(project),"exec","first").returncode,0)
-        layer.write_text("hooks=true")
-        self.assertEqual(self.cli("codex","-C",str(project),"exec","first").returncode,0)
+    def test_codex_readiness_does_not_require_or_change_hooks(self):
+        c=self.account("codex","work")
+        path=Path(c["home"])/"hooks.json"
+        path.write_text('{"hooks":{"Stop":[]}}')
+        status,data,_=self.api("GET","accounts?tool=codex")
+        self.assertEqual(status,200)
+        self.assertEqual(data["items"][0]["readiness"],"ready")
+        self.assertNotIn("observer",data)
+        for op in ("install","check"):
+            self.assertEqual(self.api("POST",f"accounts/{c['id']}/observer/{op}",{})[0],404)
+        self.assertEqual(path.read_text(),'{"hooks":{"Stop":[]}}')
+        callback=subprocess.run([DAEMON,"observe"],env=self.env,cwd=self.root,
+                                stdin=subprocess.DEVNULL,capture_output=True,timeout=3)
+        self.assertNotEqual(callback.returncode,0)
+        import socket
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+            client.settimeout(2)
+            client.connect(str(self.root/"run/cc-profile/launch.sock"))
+            client.sendall(b"POST /v1/launch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+            self.assertIn(b"404",client.recv(100))
+        self.assertEqual(self.api("GET","startups")[1]["items"],[])
 
     def test_claude_bridge_aliases_do_not_allocate_session_ids(self):
         c=self.account("claude","work")
@@ -354,55 +388,6 @@ else:
             with self.subTest(extra=extra):
                 status, _, _ = self.api("POST", "accounts", {}, extra)
                 self.assertEqual(status, 403)
-
-    def test_codex_revalidates_existing_approval_after_native_config_changes(self):
-        c = self.account("codex", "approval")
-        route = "accounts/%d/observer/" % c["id"]
-        body = {"revision": c["revision"]}
-        home = Path(c["home"])
-        self.assertEqual(self.api("POST", route+"install", body)[0], 200)
-        self.assertNotEqual(self.cli("codex", "exec", "waiting").returncode, 0)
-        self.assertFalse((home/"hook-checks").exists())
-        self.assertEqual(self.api("POST", route+"check", body)[0], 200)
-        (home/"offline").touch()
-        self.assertEqual(self.api("POST", route+"check", body)[0], 503)
-        (home/"offline").unlink()
-        self.assertEqual(self.api("GET","accounts?tool=codex")[1]["items"][0]["readiness"],"ready")
-        (home/"metadata-error").touch()
-        self.assertEqual(self.api("POST", route+"check", body)[0], 503)
-        (home/"metadata-error").unlink()
-        self.assertEqual(self.cli("codex","exec","after recovery").returncode,0)
-        (home/"config.toml").write_text("ordinary native update")
-        p = self.cli("codex", "exec", "new chat")
-        self.assertEqual(p.returncode, 0, p.stderr)
-        probes = (home/"hook-checks").read_text().splitlines()
-        neutral = "/"
-        self.assertEqual(probes.count(neutral), 3)
-        self.assertEqual(self.cli("codex", "exec", "another").returncode, 0)
-        self.assertEqual((home/"hook-checks").read_text().splitlines(), probes)
-        (home/"config.toml").write_text("trust revoked")
-        self.assertNotEqual(self.cli("codex", "exec", "no grant").returncode, 0)
-        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"], "no_ready_config")
-        self.assertEqual((home/"hook-checks").read_text().splitlines(), probes+[neutral])
-
-    def test_slow_shared_workspace_check_finishes_after_its_callers_leave(self):
-        from concurrent.futures import ThreadPoolExecutor
-        c=self.account("codex","slow")
-        home=Path(c["home"])
-        route="accounts/%d/observer/"%c["id"]
-        for op in ["install","check"]:
-            self.assertEqual(self.api("POST",route+op,{"revision":c["revision"]})[0],200)
-        project=self.root/".codex"
-        project.mkdir()
-        (project/"config.toml").write_text("# workspace layer")
-        (home/"delay").write_text("3.5")
-        with ThreadPoolExecutor(3) as pool:
-            results=list(pool.map(lambda _:self.cli("codex","exec","hello"),range(3)))
-        self.assertTrue(all(p.returncode!=0 for p in results))
-        self.assertIn("retry",results[0].stderr)
-        # The next caller can reuse the same unfinished check or its completed result.
-        self.assertEqual(self.cli("codex","exec","hello").returncode,0)
-        self.assertEqual((home/"hook-checks").read_text().splitlines(),["/",str(self.root)])
 
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")
@@ -502,13 +487,10 @@ class DaemonUpgrade(unittest.TestCase):
             service.binary = Path(shutil.copy2(DAEMON, Path(d)/"ccpd"))
             self.addCleanup(service.doCleanups)
             service.setUp()
-            c = service.account("codex", "work")
-            for op in ("install", "check"):
-                status, _, _ = service.api("POST", "accounts/%d/observer/%s" % (c["id"],op), {"revision":c["revision"]})
-                self.assertEqual(status, 200)
+            service.account("codex", "work")
             service.binary.unlink()
             for tool in ("claude","codex"):
                 status, data, _ = service.api("GET","accounts?tool="+tool)
                 self.assertEqual(status, 200)
-                self.assertIn(str(service.binary), data["observer"]["hooks"][0]["command"])
-            self.assertNotEqual(service.cli("codex","exec","missing observer").returncode, 0)
+                self.assertNotIn("observer",data)
+            self.assertEqual(service.api("GET","accounts?tool=codex")[1]["items"][0]["readiness"],"ready")

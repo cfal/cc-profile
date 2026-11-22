@@ -2,7 +2,7 @@ mod common;
 use ccpd::{
     native::{Build, stamp},
     routing::{Observation, Request, launch, observe},
-    store::{Config, Page, config},
+    store::{Page, config},
 };
 use common::Fixture;
 use serde_json::json;
@@ -28,16 +28,112 @@ fn req(f: &Fixture, t: &str, args: &[&str], b: &Build) -> Request {
         override_names: vec![],
     }
 }
-fn approve(f: &Fixture, build: &Build, c: &Config) {
+#[test]
+fn codex_admission_and_tickets_are_scoped_to_the_launch_mode() {
+    let f = Fixture::new();
+    let exe = build();
+    let a = f.add("codex", "a");
+    let b = f.add("codex", "b");
+    let r = req(&f, "codex", &[], &exe);
+    let start = |r: &Request| launch(&f.store, &exe, r);
+    let p = start(&r).unwrap();
+    assert_eq!(p, start(&r).unwrap());
+    assert!(p.argv.is_empty() && p.config_id == a.id);
+    assert!(!p.env_set.contains_key("CCP_OBSERVE_TICKET"));
+    let mut o = Observation {
+        request_id: r.request_id.clone(),
+        ticket: r.ticket.clone(),
+        event: "SessionStart".into(),
+        source: "startup".into(),
+        native_id: Uuid::new_v4().to_string(),
+        workspace: None,
+    };
+    assert!(observe(&f.store, &o).is_err());
+    o.event = "thread/started".into();
+    o.source = "app-server".into();
+    observe(&f.store, &o).unwrap();
+    let server = req(&f, "codex", &["app-server", "--listen", "stdio://"], &exe);
+    assert_eq!(start(&server).unwrap().config_id, b.id);
+    o.request_id = server.request_id;
+    o.ticket = server.ticket;
+    assert!(observe(&f.store, &o).is_err());
+    o.event = "thread/start".into();
+    assert_eq!(observe(&f.store, &o).unwrap_err().1, "observation_conflict");
+    o.native_id = Uuid::new_v4().to_string();
+    observe(&f.store, &o).unwrap();
+    observe(&f.store, &o).unwrap();
+    let mut resume = req(
+        &f,
+        "codex",
+        &["app-server", "--for-session", &o.native_id],
+        &exe,
+    );
+    assert_eq!(start(&resume).unwrap().config_id, b.id);
     f.store
-        .db()
-        .unwrap()
-        .execute(
-            "UPDATE configs SET observer_stamp=? WHERE id=?",
-            rusqlite::params![build.observer_stamp(c), c.id],
+        .edit(b.id, &json!({"revision":b.revision,"enabled":false}))
+        .unwrap();
+    resume.request_id = Uuid::new_v4().to_string();
+    assert_eq!(start(&resume).unwrap_err().1, "owner_disabled");
+    resume.argv = vec!["--remote".into(), "unix:///wrong".into()];
+    resume.request_id = Uuid::new_v4().to_string();
+    assert!(start(&resume).is_err());
+}
+
+#[test]
+fn upgrading_v4_keeps_the_codex_owner_and_cursor_without_touching_native_hooks() {
+    let f = Fixture::new();
+    let exe = build();
+    let first = f.add("codex", "one");
+    let second = f.add("codex", "two");
+    let uid = Uuid::new_v4().to_string();
+    let pending = req(&f, "codex", &[], &exe);
+    launch(&f.store, &exe, &pending).unwrap();
+    let path = first.home.join("hooks.json");
+    let hooks = r#"{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"my-other-hook"}]}]}}"#;
+    std::fs::write(&path, hooks).unwrap();
+    {
+        let db = f.store.db().unwrap();
+        db.execute_batch(
+            "ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
+            CREATE TABLE installed_observers(config_id INTEGER PRIMARY KEY, command TEXT);
+            PRAGMA user_version=4;",
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO installed_observers VALUES(?,?)",
+            rusqlite::params![first.id, "'/old/bin/ccpd' observe"],
+        )
+        .unwrap();
+        db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) VALUES('codex',?,?,'observed','/work',1,1)",rusqlite::params![uid,first.id]).unwrap();
+    }
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), hooks);
+    assert_eq!(
+        launch(&upgraded, &exe, &req(&f, "codex", &["resume", &uid], &exe))
+            .unwrap()
+            .config_id,
+        first.id
+    );
+    assert_eq!(
+        launch(&upgraded, &exe, &req(&f, "codex", &[], &exe))
+            .unwrap()
+            .config_id,
+        second.id
+    );
+    assert_eq!(
+        upgraded
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM launches WHERE request_id=?",
+                [&pending.request_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "unobserved"
+    );
 }
+
 #[test]
 fn login_plan_targets_only_the_named_claude_profile_even_on_retry() {
     let f = Fixture::new();
@@ -79,17 +175,14 @@ fn codex_profile_setup_is_maintenance_only_for_exact_setup_argv() {
     f.store
         .edit(c.id, &json!({"revision":c.revision, "enabled":false}))
         .unwrap();
-    let mut r = req(&f, "codex", &["--no-daemon"], &exe);
-    assert_eq!(
-        launch(&f.store, &exe, &r).unwrap_err().1,
-        "no_enabled_config"
-    );
+    let mut r = req(&f, "codex", &["login"], &exe);
+    assert_eq!(launch(&f.store, &exe, &r).unwrap_err().1, "no_current");
     r.request_id = Uuid::new_v4().to_string();
     r.login_profile = Some(c.id);
     let p = launch(&f.store, &exe, &r).unwrap();
     assert_eq!(p, launch(&f.store, &exe, &r).unwrap());
     assert_eq!(p.decision, "profile_login");
-    assert_eq!(p.argv, ["--no-daemon"]);
+    assert_eq!(p.argv, ["login"]);
     assert!(!p.env_set.contains_key("CCP_LAUNCH_ID"));
     assert_eq!(
         f.store
@@ -181,10 +274,14 @@ fn replay_does_not_follow_a_redirected_workspace() {
     let f = Fixture::new();
     let b = build();
     let c = f.add("codex", "a");
-    approve(&f, &b, &c);
     let alias = f.root.join("work");
     std::os::unix::fs::symlink(&f.root, &alias).unwrap();
-    let request = req(&f, "codex", &["-C", "work", "exec"], &b);
+    let request = req(
+        &f,
+        "codex",
+        &["-C", "work", "exec", "--skip-git-repo-check"],
+        &b,
+    );
     launch(&f.store, &b, &request).unwrap();
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(&c.home, alias).unwrap();
@@ -251,8 +348,7 @@ fn a_retry_cannot_resurrect_a_disabled_plan_or_change_the_native_arguments() {
     let f = Fixture::new();
     let b = build();
     let c = f.add("codex", "x");
-    approve(&f, &b, &c);
-    let r = req(&f, "codex", &["--no-daemon", "--", "--no-daemon"], &b);
+    let r = req(&f, "codex", &["--", "--no-daemon"], &b);
     assert_eq!(launch(&f.store, &b, &r).unwrap().argv, r.argv);
     f.store
         .edit(c.id, &json!({"enabled":false,"revision":c.revision}))
@@ -273,23 +369,26 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
     let exe = build();
     let a = f.add("codex", "a");
     let b = f.add("codex", "b");
-    for c in [&a, &b] {
-        approve(&f, &exe, c);
-    }
     let x = req(&f, "codex", &[], &exe);
-    let y = req(&f, "codex", &["exec", "--json"], &exe);
-    assert_eq!(launch(&f.store, &exe, &x).unwrap().argv, ["--no-daemon"]);
-    assert_eq!(launch(&f.store, &exe, &y).unwrap().argv, ["exec", "--json"]);
+    let y = req(
+        &f,
+        "codex",
+        &["exec", "--json", "--skip-git-repo-check"],
+        &exe,
+    );
+    assert!(launch(&f.store, &exe, &x).unwrap().argv.is_empty());
+    assert_eq!(launch(&f.store, &exe, &y).unwrap().argv, y.argv);
     f.store
         .edit(a.id, &json!({"enabled":false,"revision":a.revision}))
         .unwrap();
     for (r, c) in [(&y, &b), (&x, &a)] {
         let mut o = Observation {
+            workspace: None,
             request_id: r.request_id.clone(),
             ticket: r.ticket.clone(),
             native_id: Uuid::new_v4().to_string(),
-            event: "SessionStart".into(),
-            source: "startup".into(),
+            event: "thread/started".into(),
+            source: "app-server".into(),
         };
         observe(&f.store, &o).unwrap();
         observe(&f.store, &o).unwrap();
@@ -316,19 +415,17 @@ fn a_second_config_observing_an_owned_uuid_is_always_a_conflict() {
     let exe = build();
     let first = f.add("codex", "first");
     let other = f.add("codex", "other");
-    for c in [&first, &other] {
-        approve(&f, &exe, c);
-    }
     let uid = Uuid::new_v4().to_string();
     for c in [&first, &other] {
-        let r = req(&f, "codex", &["exec"], &exe);
+        let r = req(&f, "codex", &["exec", "--skip-git-repo-check"], &exe);
         assert_eq!(launch(&f.store, &exe, &r).unwrap().config_id, c.id);
         let o = Observation {
+            workspace: None,
             request_id: r.request_id,
             ticket: r.ticket,
             native_id: uid.clone(),
-            event: "SessionStart".into(),
-            source: "startup".into(),
+            event: "thread/started".into(),
+            source: "app-server".into(),
         };
         if c.id == first.id {
             observe(&f.store, &o).unwrap();

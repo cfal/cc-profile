@@ -24,7 +24,6 @@ pub const PROXIES: [&str; 8] = [
     "NO_PROXY",
     "no_proxy",
 ];
-pub const MARKERS: [&str; 2] = ["CCP_LAUNCH_ID", "CCP_OBSERVE_TICKET"];
 pub fn env_patch(c: &Config) -> (BTreeMap<String, String>, Vec<String>) {
     let mut set = BTreeMap::from([(
         if c.tool == "codex" {
@@ -35,7 +34,7 @@ pub fn env_patch(c: &Config) -> (BTreeMap<String, String>, Vec<String>) {
         .to_owned(),
         c.home.to_string_lossy().into_owned(),
     )]);
-    let mut unset = MARKERS.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut unset = Vec::new();
     if c.mode != "inherit" {
         for key in PROXIES {
             let val = match key.to_ascii_uppercase().as_str() {
@@ -173,30 +172,11 @@ impl Build {
     pub fn unchanged(&self) -> bool {
         !self.fingerprint.is_empty() && stamp(&self.bin) == self.fingerprint
     }
-    pub fn observer_stamp(&self, c: &Config) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{}|{}",
-            self.fingerprint,
-            stamp(&c.home.join("hooks.json")),
-            stamp(&c.home.join("config.toml")),
-            stamp(Path::new("/etc/codex/config.toml")),
-            stamp(Path::new("/etc/codex/managed_config.toml")),
-            stamp(Path::new("/etc/codex/requirements.toml")),
-            crate::observer::binary()
-                .map(|b| b.signature())
-                .unwrap_or_default()
-        )
-    }
     pub fn ready(&self, c: &Config) -> &'static str {
         if !c.present() {
             "path_missing"
-        } else if !self.unchanged()
-            || !self.supported
-            || (c.tool == "codex" && !crate::observer::binary().is_ok_and(|b| b.unchanged()))
-        {
+        } else if !self.unchanged() || !self.supported {
             "unsupported_build"
-        } else if c.tool == "codex" && c.observer.as_ref() != Some(&self.observer_stamp(c)) {
-            "observer_required"
         } else {
             "ready"
         }

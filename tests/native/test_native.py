@@ -2,9 +2,12 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from queue import Queue
 import subprocess
+import shutil
 import sys
 import threading
+import time
 import unittest
 import uuid
 
@@ -44,14 +47,16 @@ class Native(unittest.TestCase):
         self.assertIn(uid,resumed.stdout,resumed.stderr)
         self.assertNotEqual(self.s.cli("claude","--resume",str(uuid.uuid4())).returncode,0)
 
-    def test_codex_reports_native_thread_with_a_local_rejecting_provider(self):
-        c = self.s.account("codex","cx-home")
-        home = Path(c["home"])
+    def offline_codex(self, home, models=None):
         cfg = home / "config.toml"
         # A closed port triggers Codex's offline reconnect loop. A terminal HTTP
         # rejection lets the real CLI finish without sending any model traffic upstream.
         class Reject(BaseHTTPRequestHandler):
             def do_POST(self):
+                if models is not None and self.command == "POST":
+                    request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    if "model" in request:
+                        models.append(request["model"])
                 body=b'{"error":{"message":"fixture rejection","type":"invalid_request_error"}}'
                 self.send_response(400)
                 self.send_header("Content-Type","application/json")
@@ -68,43 +73,135 @@ class Native(unittest.TestCase):
         cfg.write_text('model_provider="offline"\nmodel="offline"\n[model_providers.offline]\n'
                        f'name="Local fixture"\nbase_url="http://127.0.0.1:{endpoint.server_port}/v1"\nwire_api="responses"\n'
                        'request_max_retries=0\nstream_max_retries=0\n')
-        route = "accounts/%s/observer/" % c["id"]
-        data = {"revision":c["revision"]}
-        self.assertEqual(self.s.api("POST",route+"install",data)[0],200)
-        self.assertEqual(self.s.api("POST",route+"check",data)[0],409)
-        # Simulate the operator approving this exact generated hook in this disposable home.
-        env = dict(self.s.env, CODEX_HOME=str(home))
-        lines = [{"id":1,"method":"initialize","params":{"clientInfo":{"name":"ccp-test","version":"1"},"capabilities":{"experimentalApi":True}}},
-                 {"method":"initialized"},{"id":2,"method":"hooks/list","params":{"cwds":[str(self.s.root)]}}]
-        with subprocess.Popen(["codex","app-server","--listen","stdio://"],env=env,cwd=self.s.root,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True) as p:
+        return cfg
+
+    def test_default_codex_exec_and_stdio_agree_on_sticky_owner(self):
+        c = self.s.account("codex","no-hooks")
+        self.s.account("codex","other")
+        home = Path(c["home"])
+        models = []
+        self.offline_codex(home, models)
+        refused = self.s.cli("codex","exec","--json","--","--skip-git-repo-check")
+        self.assertIn("Not inside a Git repository", refused.stderr)
+        refused = self.s.cli("codex","exec","--skip-git-repo-check","--sandbox","read-only","Local fixture only")
+        self.assertIn("incompatible", refused.stderr)
+        self.assertFalse(self.s.api("GET","sessions")[1]["items"])
+        work = self.s.root / "project"
+        subprocess.run(["git","init","-q",str(work)],check=True)
+        p = self.s.cli("codex","-m","fixture-model","-C",str(work),"exec","--json","Local fixture only")
+        events = [json.loads(line) for line in p.stdout.splitlines()]
+        uid = next((e["thread_id"] for e in events if e.get("type")=="thread.started"),None)
+        self.assertIsNotNone(uid,p.stderr)
+        self.assertNotEqual(p.returncode,0,"native fixture rejection must reach the caller")
+        self.assertIn("fixture-model", models)
+        rows = self.s.api("GET","sessions?native_id="+uid)[1]["items"]
+        self.assertEqual([r["config_id"] for r in rows],[c["id"]],p.stderr)
+        self.assertEqual(rows[0]["workspace"],str(work))
+        resumed=self.s.cli("codex","exec","--skip-git-repo-check","--json","resume",uid,"Local fixture only")
+        self.assertIn(uid,resumed.stdout,resumed.stderr)
+        with subprocess.Popen([test_service.LAUNCHER,"codex","app-server","--for-session",uid],
+                              env=self.s.env,cwd=self.s.root,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,text=True) as child:
             try:
-                for msg in lines:
-                    p.stdin.write(json.dumps(msg)+"\n")
-                    p.stdin.flush()
-                    if msg.get("id"):
-                        for line in p.stdout:
-                            reply=json.loads(line)
-                            if reply.get("id")==msg["id"]: break
+                replies=Queue()
+                def read_replies():
+                    for line in child.stdout:
+                        replies.put(json.loads(line))
+                threading.Thread(target=read_replies,daemon=True).start()
+                def call(num,method,params):
+                    child.stdin.write(json.dumps({"id":num,"method":method,"params":params})+"\n")
+                    child.stdin.flush()
+                    while True:
+                        msg=replies.get(timeout=8)
+                        if msg.get("id")==num:
+                            self.assertNotIn("error",msg)
+                            return msg["result"]
+                call(1,"initialize",{"clientInfo":{"name":"ccp-test","version":"1"}})
+                child.stdin.write('{"method":"initialized"}\n')
+                self.assertEqual(call(2,"thread/resume",{"threadId":uid})["thread"]["id"],uid)
+                new=call(3,"thread/start",{})["thread"]["id"]
+                rows=self.s.api("GET","sessions?native_id="+new)[1]["items"]
+                self.assertEqual([r["config_id"] for r in rows],[c["id"]])
             finally:
-                p.terminate()
-        hooks=reply["result"]["data"][0]["hooks"]
-        hook,= [h for h in hooks if h.get("command","").endswith(" observe") and h["sourcePath"] == str(home/"hooks.json")]
-        with cfg.open("a") as f:
-            f.write("\n[hooks.state."+json.dumps(hook["key"])+"]\ntrusted_hash="+json.dumps(hook["currentHash"])+"\n")
-        status,reply,_=self.s.api("POST",route+"check",data)
-        self.assertEqual(status,200,reply)
-        with cfg.open("a") as f:
-            f.write("\n# A native settings edit must not require manual reapproval.\n")
-        p=self.s.cli("codex","exec","--skip-git-repo-check","--json","Reply OK")
-        events=[json.loads(line) for line in p.stdout.splitlines() if line.startswith("{")]
-        actual=next((e["thread_id"] for e in events if e.get("type")=="thread.started"),None)
-        self.assertIsNotNone(actual,p.stderr)
-        mapped=self.s.api("GET","sessions?native_id="+actual)[1]["items"]
-        self.assertEqual([m["config_id"] for m in mapped],[c["id"]],p.stderr)
-        row=self.s.api("GET","startups?tool=codex")[1]["items"][0]
-        self.assertEqual(row["state"],"observed")
-        p=self.s.cli("codex","exec","--skip-git-repo-check","--json","resume",actual,"Continue")
-        self.assertIn(actual,p.stdout,p.stderr)
+                child.terminate()
+                child.wait(timeout=8)
+        self.assertFalse((home/"hooks.json").exists())
+        self.assertFalse(list((self.s.root/"run/cc-profile").glob("c-*")))
+
+    def test_codex_exec_outside_git_with_explicit_opt_out(self):
+        c=self.s.account("codex","exec")
+        self.offline_codex(Path(c["home"]))
+        p=self.s.cli("codex","exec","--skip-git-repo-check","Local fixture only")
+        self.assertIn("fixture rejection",p.stderr)
+        self.assertNotEqual(p.returncode,0)
+        rows=self.s.api("GET","sessions?tool=codex")[1]["items"]
+        self.assertEqual([r["config_id"] for r in rows],[c["id"]])
+
+    @unittest.skipUnless(shutil.which("hty"),"hty required for native terminal checks")
+    def test_default_codex_tui_asks_for_trust_before_binding(self):
+        c=self.s.account("codex","pty")
+        cfg=self.offline_codex(Path(c["home"]))
+        cfg.write_text(cfg.read_text().replace('model="offline"', 'model="gpt-6-sol"'))
+        work=self.s.root/"project"
+        subprocess.run(["git","init","-q",str(work)],check=True)
+        def h(*args,check=True):
+            p=subprocess.run(["hty",*args],capture_output=True,text=True,timeout=18)
+            if check and p.returncode:
+                target=args[2] if args[0]=="run" else args[1]
+                screen=subprocess.run(["hty","snapshot",target],capture_output=True,text=True,timeout=4)
+                self.fail(f"{args}: {p.stderr}\n{screen.stdout}")
+            return p
+        def screen_contains(text):
+            until=time.monotonic()+12
+            while time.monotonic()<until:
+                screen=h("snapshot",name).stdout
+                if text in screen:return
+                time.sleep(.15)
+            self.fail(f"Missing {text!r}: {screen}")
+        def launch(*args):
+            name="ccp-pty-"+uuid.uuid4().hex[:12]
+            h("run","--name",name,"--cwd",str(work),"--cols","120","--rows","46","--",
+              "/usr/bin/env","-i","TERM=xterm-256color",*[f"{k}={v}" for k,v in self.s.env.items()],
+              str(test_service.LAUNCHER),"codex",*args)
+            self.addCleanup(h,"delete",name,check=False)
+            self.addCleanup(h,"kill",name,check=False)
+            return name
+        def submit(text):
+            h("send",name,"--text",text)
+            time.sleep(.4)
+            h("send",name,"--key","enter")
+        def close():
+            h("send",name,"--key","ctrl-c")
+            time.sleep(.2)
+            h("send",name,"--key","ctrl-c",check=False)
+            h("wait",name,"--exit","--timeout","6000")
+            self.assertFalse(list((self.s.root/"run/cc-profile").glob("c-*")))
+        name=launch()
+        screen_contains("Trust this folder?")
+        self.assertFalse(self.s.api("GET","sessions")[1]["items"])
+        time.sleep(.25)
+        h("send",name,"--key","enter")
+        for _ in range(70):
+            rows=self.s.api("GET","sessions")[1]["items"]
+            if rows:break
+            time.sleep(.15)
+        self.assertEqual([r["config_id"] for r in rows],[c["id"]],h("snapshot",name).stdout)
+        screen_contains("GPT-6-Sol")
+        uid=rows[0]["native_id"]
+        submit("/status")
+        screen_contains(uid)
+        submit("Local fixture only")
+        screen_contains("fixture rejection")
+        close()
+        self.s.account("codex","other")
+        name=launch("resume",uid)
+        screen_contains("Local fixture only")
+        submit("/status")
+        screen_contains(uid)
+        log=self.s.api("GET","startups?tool=codex")[1]["items"][0]
+        self.assertEqual((log["reason"],log["config_id"]),("sticky",c["id"]))
+        self.assertEqual(len(self.s.api("GET","sessions")[1]["items"]),1)
+        close()
 
 if __name__=="__main__":
     unittest.main()

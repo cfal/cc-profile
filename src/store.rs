@@ -33,9 +33,8 @@ pub struct Config {
     pub mode: String,
     pub http: Option<String>,
     pub https: Option<String>,
-    pub observer: Option<String>,
 }
-const FIELDS: &str = "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,http_proxy,https_proxy,observer_stamp,birth_ns";
+const FIELDS: &str = "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,http_proxy,https_proxy,birth_ns";
 fn row(r: &Row) -> rusqlite::Result<Config> {
     Ok(Config {
         id: r.get(0)?,
@@ -50,8 +49,7 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
         mode: r.get(9)?,
         http: r.get(10)?,
         https: r.get(11)?,
-        observer: r.get(12)?,
-        birth_ns: r.get(13)?,
+        birth_ns: r.get(12)?,
     })
 }
 impl Config {
@@ -278,7 +276,7 @@ impl Store {
             tx.execute_batch(
                 "ALTER TABLE configs ADD COLUMN birth_ns INTEGER; PRAGMA user_version=3;",
             )?;
-        } else if !matches!(v, 3 | 4) {
+        } else if !(3..=5).contains(&v) {
             return Err(Error::unavailable(
                 "schema",
                 "Unsupported router database version.",
@@ -293,7 +291,17 @@ impl Store {
                 ));
             }
         }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS installed_observers(config_id INTEGER PRIMARY KEY REFERENCES configs(id), command TEXT NOT NULL);")?;
+        if v < 5 {
+            // Old callbacks cannot complete pending launches on protocol v2.
+            // Completed bindings and every user's native profile stay intact.
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS installed_observers;
+                ALTER TABLE configs DROP COLUMN observer_stamp;
+                UPDATE launches SET state='unobserved',reason='router_upgraded'
+                WHERE tool='codex' AND state='pending';
+                PRAGMA user_version=5;",
+            )?;
+        }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
         let legacy = tx
@@ -404,7 +412,7 @@ impl Store {
     }
     pub fn prune(&self) -> Result<()> {
         self.write(|db|{
-            db.execute("UPDATE launches SET state='unobserved',reason='observer_timeout' WHERE state='pending' AND created_ms<?",[now()-86_400_000])?;
+            db.execute("UPDATE launches SET state='unobserved',reason='thread_id_timeout' WHERE state='pending' AND created_ms<?",[now()-86_400_000])?;
             db.execute("DELETE FROM launches WHERE created_ms<?",[now()-90*86_400_000])?; Ok(())
         })
     }

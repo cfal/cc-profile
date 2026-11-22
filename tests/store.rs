@@ -38,7 +38,7 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
     f.store
         .db()
         .unwrap()
-        .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; PRAGMA user_version=2;")
+        .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; ALTER TABLE configs ADD COLUMN observer_stamp TEXT; PRAGMA user_version=2;")
         .unwrap();
     let open = || ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     let upgraded = open();

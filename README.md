@@ -50,13 +50,26 @@ Restart with `systemctl --user restart ccpd` after changing PATH or updating eit
 ## Accounts
 
 1. In **Accounts**, choose Claude or Codex, click **Add profile**, and give it a label such as Work or Personal. **Create new profile** makes a private, empty directory under `$XDG_DATA_HOME/cc-profile/profiles/` (default `~/.local/share/cc-profile/profiles/`). Alternatively, **Use existing directory** registers an existing physical config directory in place. Nothing is copied. Renaming the label never moves the directory.
-2. Sign in while the profile is still disabled. For **Codex**, click **Sign in with ChatGPT**, open the OpenAI verification link, and enter the displayed code. Choose the intended ChatGPT account, especially when adding a second profile in the same browser. Device login must be allowed by the account or workspace. The native Codex app-server saves the login; the panel displays the result. One device sign-in can run at a time. Reopening the profile resumes the display; cancel or retry there. A daemon restart ends a pending attempt. For **Claude**, copy the displayed `ccp login <id>` command and run it in your terminal. It opens the native Claude subscription login for that profile with its proxy settings. `ccp login <id> --status` checks the result.
-3. **Codex only:** click **Install observer**, review the `hooks.json` entry, and run `ccp login <id>`. This opens the named Codex profile in its native setup UI with the profile's proxy applied, even when disabled. You can also sign in there instead of using the dashboard's device code. Approve the observer in `/hooks`, exit the UI, and click **Check observer**. Use `ccp login <id> --status` to check native login status for either provider. Start managed chats separately with `ccp codex`; the setup UI does not create a managed session.
-4. Select **Enable profile** when ready. Repeat for the second profile. New chats rotate among enabled, ready profiles; resumes stay with the original one. Disabling a profile blocks both new chats and resumes without stopping running chats. Setup does not change **Current**, allocate a chat, or advance rotation. **Set current** is only needed for unscoped maintenance commands (e.g. `ccp claude auth status`). Disabling Current clears it without selecting a replacement.
+2. Sign in while the profile is still disabled. For **Codex**, click **Sign in with ChatGPT**, open the OpenAI verification link, and enter the displayed code. Choose the intended ChatGPT account, especially when adding a second profile in the same browser. Device login must be allowed by the account or workspace. The native Codex app-server saves the login; the panel displays the result. One device sign-in can run at a time. Reopening the profile resumes the display; cancel or retry there. A daemon restart ends a pending attempt. For **Claude**, copy the displayed `ccp login <id>` command and run it in your terminal. It opens the native Claude subscription login for that profile with its proxy settings. For either provider, `ccp login <id>` runs native sign-in in the selected profile with its proxy settings, and `ccp login <id> --status` checks the result.
+3. Select **Enable profile** when ready. Repeat for the second profile. New chats rotate among enabled, ready profiles; resumes stay with the original one. Disabling a profile blocks both new chats and resumes without stopping running chats. Setup does not change **Current**, allocate a chat, or advance rotation. **Set current** is only needed for unscoped maintenance commands (e.g. `ccp claude auth status`). Disabling Current clears it without selecting a replacement.
 
-For a workspace with local Codex settings, the router also checks whether the approved observer is enabled **in that workspace**. It asks the native metadata service rather than interpreting project TOML. Changes to user or system config trigger a recheck of prior approval on the next new chat. A rejected or unverified hook never admits a new chat on that config.
+### Codex launches
 
-Simultaneous launches share a workspace check. A slow check may outlast the first launch; ordinary workspaces can reuse its result. Linked worktrees request a fresh check because their settings can live outside the working tree: they can join a running check, but a native check that consistently exceeds the time budget can prevent new launches there. A compatibility link at `~/.codex` can also supply settings to workspaces below your home, so those workspaces are checked rather than assumed ready.
+With matching `ccp` and `ccpd` binaries and Codex 0.171.0, enable a profile, then run:
+
+```sh
+ccp codex
+ccp codex exec --json 'Review these changes'
+ccp codex resume <uuid>
+ccp codex app-server                       # native JSONL protocol over stdin/stdout
+ccp codex app-server --for-session <uuid>   # select the owner; client still sends thread/resume
+```
+
+For a new chat, the TUI or exec client connects to a private app-server on this machine. Both inherit the selected profile and proxy; no credentials are copied. The launcher records the first persistent root thread that Codex announces, not later in-app navigation. An ID observed before the first turn is not proof that Codex saved the thread. Exact resumes go straight to the native client on the saved profile. User-configured hooks are not disabled.
+
+Use `-C` for the workspace and `-m` to override the model. Interactive launches keep the native folder trust prompt. New `exec` launches require a Git workspace unless you explicitly pass `--skip-git-repo-check`. Configure sandbox and approval policy in the profile: the router refuses per-launch policy overrides, `--add-dir`, `--no-daemon`, and `--output-schema` for new managed chats rather than silently ignoring them.
+
+A direct app-server selects a profile **once per process**, not per request. The client uses native stdio; diagnostics go to stderr. Successful persistent root `thread/start` replies are associated with that profile; a resume does not create an ownership claim. Unknown or disabled owners are refused before starting a `--for-session` server. Arbitrary listeners and cross-profile routing on one connection are not supported. Ownership inspection is bounded to 2 MiB per frame, 256 bytes per string request ID, and 1024 outstanding starts. Beyond those limits, frames still pass unchanged but a mapping can be missed.
 
 Config identity includes the directory's device, inode and creation time. This detects reuse of a deleted directory's inode without writing markers into provider homes. Use a filesystem that exposes creation time (such as ext4). When upgrading an older router, make sure the original directories are mounted: the first open pins the creation time of homes matching their previously recorded device and inode. Restore any offline original and restart the daemon to finish pinning it.
 
@@ -74,9 +87,9 @@ ccp claude auth status
 ccp codex login status
 ```
 
-`ccp` sends argv and cwd over a private Unix socket, applies an allowlisted environment patch, and execs the selected native binary in the same terminal. Its routing message goes to stderr, not the provider's stdout. If the server is unavailable, nothing launches. Remove conflicting inherited API-key, provider, or storage overrides rather than inadvertently charging another identity.
+`ccp` sends argv and cwd over a private Unix socket, applies an allowlisted environment patch, and runs the selected native tool in the same terminal. Its routing message goes to stderr, not the provider's stdout. If the server is unavailable, nothing launches. Remove conflicting inherited API-key, provider, or storage overrides rather than inadvertently charging another identity.
 
-- **New:** deterministic round-robin per provider. Claude receives an unused UUID before exec. Codex chooses its own UUID; its trusted startup hook reports it, sometimes only on the first turn. A TUI closed at the idle prompt can leave a startup without a mapping.
+- **New:** deterministic round-robin per provider. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook.
 - **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native UUIDs are supported. A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.
 - **Miscellaneous:** help/version flags, supported auth, doctor, features and MCP management commands use Current. No Current means no launch. In Claude, `--help` shows help; the word `help` alone is a chat prompt.
 - **Unsupported:** `--last`, `claude -c`, pickers, forks, ephemeral/remote/background modes, hook or home overrides, and unrecognized routing-sensitive argument forms. The startup log is not the provider's activity history. In-app session navigation and raw native commands bypass the launcher.
@@ -87,7 +100,7 @@ The **Dashboard** shows account quotas first, then **Startup logs** with routing
 
 ## Proxies and quota
 
-Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per directory), and **Direct**. These settings apply to native chat, sign-in, and observer setup/check processes. Inherit uses the caller's shell for CLI launches and the daemon environment for dashboard requests. A verification page opened in your browser uses the browser's own network settings. Custom writes matching upper/lowercase variables, removes ambient catch-all proxies and bypasses loopback. The CLI passes the settings to the child; ccpd is not an inference proxy. Refresh failures do not trigger a direct-egress fallback.
+Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per directory), and **Direct**. These settings apply to native chats, sign-in, and quota checks. Inherit uses the caller's shell for CLI launches and the daemon environment for dashboard requests. A verification page opened in your browser uses the browser's own network settings. Custom writes matching upper/lowercase variables, removes ambient catch-all proxies and bypasses loopback. The CLI passes the settings to the child; ccpd is not an inference proxy. Refresh failures do not trigger a direct-egress fallback.
 
 Proxy URLs are visible as you type. The panel API and copied commands omit saved credentials. The native process receives the full proxy URL, including credentials, in its environment. Tools that inherit that environment can read it too.
 
@@ -105,7 +118,7 @@ When Custom has only an HTTP proxy, that address is used for HTTPS requests too.
 
 This is a clean replacement: no old commands, profile migration, transcript scan, or adoption of historical session IDs. Existing config directories can be registered in place. Set up new mappings by launching through `ccp`. Startups expire after 90 days, unobserved Codex tickets after 24 hours; mappings do not expire. Back up the DB with SQLite's backup API, or stop the service before making a complete filesystem backup. Restore rather than inventing ownership from startup history.
 
-After moving `ccpd`, reinstall and approve the observer. The router replaces its previously recorded hook, not custom hooks. For hooks installed before command tracking, review the old entry in `hooks.json` and remove it manually. An interrupted file or link replacement may also leave a temporary `.ccp-<uuid>` file or `.ccp-link-<uuid>` symlink. With the daemon stopped, inspect and remove only the individual leftover. The router does not sweep user-owned directories by filename pattern.
+**Upgrading from the observer:** update `ccp` and `ccpd` together and restart the daemon. Protocol v2 rejects mixed binaries rather than launching without tracking. Existing session owners, profiles, and rotation survive; a pending launch without a UUID cannot be recovered. Remove only cc-profile's old `SessionStart` command (`'/path/to/ccpd' observe`, matcher `startup`) from each profile's `hooks.json`. The callback no longer exists; the upgrade does not edit native files or disable other hooks.
 
 ## Verification
 

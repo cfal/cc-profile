@@ -56,9 +56,9 @@ sys.exit(17)
                   "EDITOR":"test-editor","CCP_OBSERVE_TICKET":"old-ticket","HTTPS_PROXY":"http://127.0.0.1:9"}
 
     def plan(self,r):
-        return {"v":1,"request_id":r["request_id"],"tool":r["tool"],"label":"work","decision":"current","config_id":1,
+        return {"v":2,"request_id":r["request_id"],"tool":r["tool"],"label":"work","decision":"current","config_id":1,
                 "argv":r["argv"],"env_set":{"CLAUDE_CONFIG_DIR":"/physical/home"},
-                "env_unset":["CCP_LAUNCH_ID","CCP_OBSERVE_TICKET"]}
+                "env_unset":[]}
 
     def run_ccp(self,*args):
         return subprocess.run([str(LAUNCHER),*args],env=self.env,cwd=self.root,input="stdin with spaces\n",
@@ -110,7 +110,7 @@ sys.exit(17)
                     {"env_set":{"CLAUDE_CONFIG_DIR":"/profile","UNEXPECTED_KEY":"bad"}},
                     {"env_set":{"CLAUDE_CONFIG_DIR":"/profile","CCP_OBSERVE_TICKET":"unissued"},"env_unset":[]},
                     {"env_unset":["CCP_LAUNCH_ID"]},{"argv":["a\0b"]},{"tool":"codex"},{"request_id":"other"},
-                    {"argv":"not-an-array"},{"v":2}]:
+                    {"argv":"not-an-array"},{"v":1}]:
             self.respond=lambda path,r: (200,dict(self.plan(r),**bad))
             with self.subTest(bad=bad):
                 p=self.run_ccp("claude")
@@ -122,14 +122,14 @@ sys.exit(17)
         p=self.run_ccp("claude","--resume","id")
         self.assertEqual((p.returncode,p.stdout,p.stderr),(1,"","ccp: owner disabled\n"))
         (path,raw),=self.calls
-        self.assertEqual(path,"/v1/launch")
+        self.assertEqual(path,"/v2/launch")
         self.assertEqual(json.loads(raw)["override_names"],["ANTHROPIC_API_KEY"])
         self.assertNotIn(b"private-override",raw)
 
     def test_profile_login_never_falls_back_to_current_or_an_unrelated_command(self):
         for changes in [{"config_id": 8}, {"decision": "current"}, {"argv": ["chat"]}]:
             def respond(path, req):
-                if path == "/v1/profile-tool":
+                if path == "/v2/profile-tool":
                     self.assertEqual(req, 7)
                     return 200, "claude"
                 self.assertEqual(req["login_profile"], 7)
@@ -145,6 +145,18 @@ sys.exit(17)
         self.assertEqual(self.run_ccp("claude").returncode,17)
         self.assertEqual(len(self.calls),2)
         self.assertEqual(self.calls[0],self.calls[1])
+
+    def test_codex_cannot_downgrade_or_accept_substituted_argv_or_hook_markers(self):
+        (self.root/"codex").symlink_to(self.native)
+        for changes in [{"v":1},{"argv":["--no-daemon"]},{"decision":"current"},
+                        {"env_set":{"CODEX_HOME":"/profile","CCP_LAUNCH_ID":"unissued"}}]:
+            def respond(path,req):
+                plan=dict(self.plan(req),decision="round_robin",env_set={"CODEX_HOME":"/profile"})
+                return 200,plan|changes
+            self.respond=respond
+            p=self.run_ccp("codex")
+            self.assertEqual((p.returncode,p.stdout),(1,""))
+            self.assertIn("Invalid launch plan",p.stderr)
 
     def test_slow_router_does_not_trigger_a_second_launch(self):
         def slow(path,r):
@@ -162,13 +174,13 @@ sys.exit(17)
             if code==126:
                 self.native.write_text("echo implicit-shell\n")
             def respond(path,r):
-                if path=="/v1/exec-failure": return 200,{}
+                if path=="/v2/exec-failure": return 200,{}
                 if code==127: self.native.unlink()
                 return 200,self.plan(r)
             self.respond=respond
             p=self.run_ccp("claude")
             self.assertEqual((p.returncode,p.stdout),(code,""))
-            self.assertEqual([path for path,_ in self.calls],["/v1/launch","/v1/exec-failure"])
+            self.assertEqual([path for path,_ in self.calls],["/v2/launch","/v2/exec-failure"])
             req,failure=[json.loads(raw) for _,raw in self.calls]
             for key in ["request_id","ticket"]: self.assertEqual(req[key],failure[key])
 

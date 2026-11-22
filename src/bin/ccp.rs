@@ -1,5 +1,6 @@
 use ccpd::{
-    native::{MARKERS, PROXIES, executable},
+    invocation::{Intent, Invocation, classify},
+    native::{PROXIES, executable},
     paths,
     protocol::{Failure, Plan, Request, VERSION, profile_login_args},
     socket,
@@ -18,12 +19,16 @@ use std::{
 use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
+#[path = "ccp/codex.rs"]
+mod codex;
+
 const HELP: &str = "Usage: ccp <claude|codex> [native arguments...]
 
   ccp claude --model opus
   ccp codex exec --json 'review these changes'
   ccp claude --resume <session-uuid>
   ccp codex resume <session-uuid>
+  ccp codex app-server [--for-session <uuid>]
   ccp login <profile-id> [--status]
 
 New chats rotate; exact resumes use their original config. No transfers,
@@ -57,13 +62,13 @@ fn invalid() -> Error {
 fn utf8() -> Error {
     Error::bad("encoding", "Arguments and working directory must be UTF-8.")
 }
-fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
+fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invocation>)> {
     let home = if req.tool == "codex" {
         "CODEX_HOME"
     } else {
         "CLAUDE_CONFIG_DIR"
     };
-    let allowed = |k: &str| k == home || PROXIES.contains(&k) || MARKERS.contains(&k);
+    let allowed = |k: &str| k == home || PROXIES.contains(&k);
     let path = plan.env_set.get(home).ok_or_else(invalid)?;
     if plan.v != VERSION
         || plan.request_id != req.request_id
@@ -86,21 +91,22 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
     {
         return Err(invalid());
     }
-    if MARKERS.iter().any(|k| plan.env_set.contains_key(*k)) {
-        if req.login_profile.is_some()
-            || req.tool != "codex"
-            || plan.env_set.get(MARKERS[0]) != Some(&req.request_id)
-            || plan.env_set.get(MARKERS[1]) != Some(&req.ticket)
-        {
+    let mut managed = None;
+    if req.tool == "codex" && req.login_profile.is_none() {
+        let i = classify("codex", &req.argv, &req.cwd)?;
+        let reason = match i.intent {
+            Intent::New => "round_robin",
+            Intent::Resume(_) => "sticky",
+            Intent::Misc => "current",
+        };
+        if plan.argv != req.argv || plan.decision != reason || plan.config_id <= 0 {
             return Err(invalid());
         }
-    } else if !MARKERS
-        .iter()
-        .all(|k| plan.env_unset.iter().any(|v| v == k))
-    {
-        return Err(invalid());
+        if i.intent != Intent::Misc {
+            managed = Some(i);
+        }
     }
-    Ok(path)
+    Ok((path, managed))
 }
 
 #[derive(Deserialize)]
@@ -142,41 +148,74 @@ async fn request<T: DeserializeOwned>(
     Err(socket::unreachable())
 }
 
-fn exec_native(binary: &Path, r: &Request, p: &Plan) -> io::Error {
-    let mut env = env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
-    for k in &p.env_unset {
-        env.remove(std::ffi::OsStr::new(k));
-    }
-    for (k, v) in &p.env_set {
-        env.insert(k.into(), v.into());
-    }
-    let vars: Vec<_> = env
-        .into_iter()
-        .map(|(mut k, v)| {
-            k.push("=");
-            k.push(v);
-            CString::new(k.as_bytes()).unwrap()
-        })
-        .collect();
-    let args: Vec<_> = std::iter::once(&r.tool)
-        .chain(&p.argv)
-        .map(|s| CString::new(s.as_bytes()).unwrap())
-        .collect();
-    let pointers = |s: &[CString]| {
-        s.iter()
-            .map(|s| s.as_ptr())
+struct Strings {
+    _values: Vec<CString>,
+    pointers: Vec<*const libc::c_char>,
+}
+// Pointers refer only to immutable CString allocations owned by this list.
+unsafe impl Send for Strings {}
+unsafe impl Sync for Strings {}
+impl Strings {
+    fn new(values: Vec<CString>) -> Self {
+        let pointers = values
+            .iter()
+            .map(|v| v.as_ptr())
             .chain(std::iter::once(std::ptr::null()))
-            .collect::<Vec<_>>()
-    };
-    let args_ptr = pointers(&args);
-    let env_ptr = pointers(&vars);
-    let path = CString::new(binary.as_os_str().as_bytes()).unwrap();
-    // Use execve directly: no implicit shell fallback for ENOEXEC. All strings
-    // above remain alive and the pointer arrays are null-terminated.
-    unsafe {
-        libc::execve(path.as_ptr(), args_ptr.as_ptr(), env_ptr.as_ptr());
+            .collect();
+        Self {
+            _values: values,
+            pointers,
+        }
     }
-    io::Error::last_os_error()
+}
+struct NativeExec {
+    path: CString,
+    args: Strings,
+    vars: Strings,
+}
+impl NativeExec {
+    fn new(binary: &Path, tool: &str, argv: &[String], p: &Plan) -> Self {
+        let mut env = env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+        // A shell spawned by a pre-v2 chat can still carry the old hook ticket.
+        for k in ["CCP_LAUNCH_ID", "CCP_OBSERVE_TICKET"] {
+            env.remove(std::ffi::OsStr::new(k));
+        }
+        for k in &p.env_unset {
+            env.remove(std::ffi::OsStr::new(k));
+        }
+        for (k, v) in &p.env_set {
+            env.insert(k.into(), v.into());
+        }
+        let vars: Vec<_> = env
+            .into_iter()
+            .map(|(mut k, v)| {
+                k.push("=");
+                k.push(v);
+                CString::new(k.as_bytes()).unwrap()
+            })
+            .collect();
+        let args: Vec<_> = std::iter::once(tool)
+            .chain(argv.iter().map(String::as_str))
+            .map(|s| CString::new(s.as_bytes()).unwrap())
+            .collect();
+        let path = CString::new(binary.as_os_str().as_bytes()).unwrap();
+        Self {
+            path,
+            args: Strings::new(args),
+            vars: Strings::new(vars),
+        }
+    }
+    fn exec(&self) -> io::Error {
+        // Also used after fork: no allocation, PATH lookup, or shell fallback.
+        unsafe {
+            libc::execve(
+                self.path.as_ptr(),
+                self.args.pointers.as_ptr(),
+                self.vars.pointers.as_ptr(),
+            );
+        }
+        io::Error::last_os_error()
+    }
 }
 async fn run() -> Result<ExitCode> {
     let mut args = env::args_os().skip(1);
@@ -220,7 +259,7 @@ async fn run() -> Result<ExitCode> {
                     return Ok(ExitCode::from(2));
                 }
             };
-            login_tool = request("/v1/profile-tool", id.to_string().as_bytes(), deadline).await?;
+            login_tool = request("/v2/profile-tool", id.to_string().as_bytes(), deadline).await?;
             let native = profile_login_args(&login_tool, status).ok_or_else(invalid)?;
             (
                 login_tool.as_str(),
@@ -266,38 +305,45 @@ async fn run() -> Result<ExitCode> {
         override_names,
     };
     let body = serde_json::to_vec(&req).map_err(|_| utf8())?;
-    let plan = request("/v1/launch", &body, deadline).await?;
-    let home = validate(&plan, &req)?;
+    let plan = request("/v2/launch", &body, deadline).await?;
+    let (home, managed) = validate(&plan, &req)?;
     let binary = req
         .binary
         .as_deref()
         .ok_or_else(|| Error::bad("binary", "Native executable not found on PATH."))?;
     eprintln!("ccp: {tool}/{} -> {home}", plan.label);
-    if req.login_profile.is_some() && tool == "codex" && req.argv == ["--no-daemon"] {
-        eprintln!(
-            "ccp: Profile setup. Sign in or open /hooks, then exit. Start managed chats with ccp codex."
-        );
+    if let Some(i) = managed {
+        match codex::run(binary, &req, &plan, &i).await {
+            Ok(code) => return Ok(code),
+            Err(e) => {
+                record_failure(&req, libc::EIO).await;
+                return Err(e);
+            }
+        }
     }
-    let error = exec_native(binary, &req, &plan);
+    let error = NativeExec::new(binary, tool, &plan.argv, &plan).exec();
     let errno = error.raw_os_error().unwrap_or(libc::EIO);
-    let failure = Failure {
-        request_id: req.request_id,
-        ticket: req.ticket,
-        errno,
-    };
-    if let Ok(body) = serde_json::to_vec(&failure) {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
-            socket::post("/v1/exec-failure", &body),
-        )
-        .await;
-    }
+    record_failure(&req, errno).await;
     eprintln!("ccp: exec failed: {error}");
     Ok(ExitCode::from(if errno == libc::ENOENT {
         127
     } else {
         126
     }))
+}
+async fn record_failure(req: &Request, errno: i32) {
+    let failure = Failure {
+        request_id: req.request_id.clone(),
+        ticket: req.ticket.clone(),
+        errno,
+    };
+    if let Ok(body) = serde_json::to_vec(&failure) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            socket::post("/v2/exec-failure", &body),
+        )
+        .await;
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]

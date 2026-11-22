@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 pub fn profile_login_args(tool: &str, status: bool) -> Option<&'static [&'static str]> {
     match (tool, status) {
         ("claude", false) => Some(&["auth", "login"]),
         ("claude", true) => Some(&["auth", "status"]),
-        ("codex", false) => Some(&["--no-daemon"]),
+        ("codex", false) => Some(&["login"]),
         ("codex", true) => Some(&["login", "status"]),
         _ => None,
     }

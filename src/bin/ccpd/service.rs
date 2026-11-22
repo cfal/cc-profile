@@ -13,9 +13,9 @@ use axum::{
 use ccpd::{
     links,
     native::Build,
-    observer, paths,
+    paths,
     routing::{self, Failure, Observation},
-    store::{Page, Store, config, configs, revision},
+    store::{Page, Store, config, configs},
     types::{Error, Result, tool},
 };
 use serde::Deserialize;
@@ -33,7 +33,6 @@ pub struct App {
     pub auth: Auth,
     pub quotas: super::quotas::Jobs,
     pub logins: super::device_login::Logins,
-    pub workspace: super::workspace::Checks,
 }
 impl App {
     pub fn build(&self, t: &str) -> &Build {
@@ -72,29 +71,23 @@ async fn same_uid(req: Request, next: Next) -> Response {
 pub fn private(s: Shared) -> Router {
     Router::new()
         .route(
-            "/v1/profile-tool",
+            "/v2/profile-tool",
             post(|State(s): State<Shared>, Json(id): Json<i64>| async move {
                 blocking(move || Ok(Json(config(&*s.store.db()?, id)?.tool))).await
             }),
         )
         .route(
-            "/v1/launch",
+            "/v2/launch",
             post(
                 |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
-                    let checks = super::workspace::check(&s, &r).await?;
-                    blocking(move || {
-                        routing::launch_in(&s.store, s.build(&r.tool), &r, &|c, ws| {
-                            c.tool != "codex"
-                                || checks.as_ref().is_some_and(|v| v.ready(c, &s.codex, ws))
-                        })
-                    })
-                    .await
-                    .map(Json)
+                    blocking(move || routing::launch(&s.store, s.build(&r.tool), &r))
+                        .await
+                        .map(Json)
                 },
             ),
         )
         .route(
-            "/v1/observations",
+            "/v2/observations",
             post(
                 |State(s): State<Shared>, Json(o): Json<Observation>| async move {
                     blocking(move || routing::observe(&s.store, &o))
@@ -104,7 +97,7 @@ pub fn private(s: Shared) -> Router {
             ),
         )
         .route(
-            "/v1/exec-failure",
+            "/v2/exec-failure",
             post(
                 |State(s): State<Shared>, Json(f): Json<Failure>| async move {
                     blocking(move || routing::exec_failure(&s.store, &f))
@@ -126,7 +119,7 @@ pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Resul
         let db=s.store.db()?;let build=s.build(tool(&q.tool)?);
         let mut items=Vec::new();
         for c in configs(&db,&q.tool)?{let mut v=c.public();v["readiness"]=build.ready(&c).into();v["quota"]=super::quotas::view(&db,&c,&s.quotas)?;items.push(v);}
-        Ok(Json(json!({"items":items,"version":build.version,"supported":build.supported,"observer":observer::spec()?,"compatibility":links::status(&db,&q.tool)?})))
+        Ok(Json(json!({"items":items,"version":build.version,"supported":build.supported,"compatibility":links::status(&db,&q.tool)?})))
     }).await
 }
 async fn add(State(s): State<Shared>, Json(v): Json<Value>) -> Result<(StatusCode, Json<Value>)> {
@@ -195,20 +188,6 @@ async fn compatibility(
     })
     .await
 }
-async fn hooks(
-    State(s): State<Shared>,
-    Path((id, op)): Path<(i64, String)>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>> {
-    let c = config(&*s.store.db()?, id)?;
-    revision(&body, &c)?;
-    match op.as_str() {
-        "install" => blocking(move || observer::install(&s.store, &c)).await?,
-        "check" => observer::check(&s.store, &s.codex, &c, std::path::Path::new("/")).await?,
-        _ => return Err(Error::missing("route", "Unknown observer action.")),
-    }
-    Ok(Json(json!({})))
-}
 pub fn web(s: Shared) -> Router {
     Router::new()
         .route(
@@ -260,7 +239,6 @@ pub fn web(s: Shared) -> Router {
             "/api/v1/accounts/{id}/device-login/cancel",
             post(super::device_login::cancel),
         )
-        .route("/api/v1/accounts/{id}/observer/{op}", post(hooks))
         .route(
             "/api/v1/accounts/{id}/quota/refresh",
             post(super::quotas::one),

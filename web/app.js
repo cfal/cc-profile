@@ -14,7 +14,6 @@ const states = {
 };
 const ready = {
   ready: "Ready",
-  observer_required: "Observer approval needed",
   path_missing: "Directory missing or replaced",
   unsupported_build: "Native build unavailable or unsupported",
 };
@@ -725,15 +724,16 @@ async function readLogin(path) {
 }
 function signInPanel(c, initial, supported) {
   const section = el("section", {}, el("h3", {}, "Profile sign-in"));
+  const cmd = "ccp login " + c.id;
+  const terminal = el("div", {class: "row"}, code(cmd),
+    ib("Copy " + names[c.tool] + " sign-in command", "copy", () => copy(cmd)));
   if (c.tool === "claude") {
-    const cmd = "ccp login " + c.id;
-    section.append(el("p", {}, "Run in your terminal:"),
-      el("div", {class: "row"}, code(cmd), ib("Copy Claude sign-in command", "copy", () => copy(cmd))));
+    section.append(el("p", {}, "Run in your terminal:"), terminal);
     return section;
   }
   const endpoint = "accounts/" + c.id + "/device-login";
   const body = el("div");
-  section.append(body);
+  section.append(body, el("p", {}, "Or sign in from your terminal:"), terminal);
   let last, poll;
   const update = (v) => {
     clearTimeout(poll);
@@ -902,57 +902,6 @@ async function accounts(params, ver, enter) {
       ),
       signInPanel(c, login, data.supported),
     );
-    if (t === "codex") {
-      const cmd = "ccp login " + c.id;
-      detail.append(
-        el(
-          "section",
-          {},
-          el("h3", {}, "Startup observer"),
-          el(
-            "p",
-            { class: "caption" },
-            "After installation, run this command. Approve the observer in ", code("/hooks"),
-            ", exit Codex, then select Check observer.",
-          ),
-          el(
-            "div",
-            { class: "row" },
-            code(cmd),
-            ib("Copy approval command", "copy", () => copy(cmd)),
-          ),
-          el(
-            "div",
-            { class: "actions" },
-            btn("Install observer", () =>
-              modal(
-                "Install observer",
-                [
-                  el("p", { class: "wrap" }, code(c.home + "/hooks.json")),
-                  el("pre", { class: "wrap" }, JSON.stringify(data.observer, null, 2)),
-                ],
-                "Install",
-                async () => {
-                  await api("accounts/" + c.id + "/observer/install", "POST", {
-                    revision: c.revision,
-                  });
-                  notice("Observer installed. Approve it in /hooks.");
-                },
-              ),
-            ),
-            btn(
-              "Check observer",
-              async () => {
-                await api("accounts/" + c.id + "/observer/check", "POST", { revision: c.revision });
-                notice("Trusted startup observer verified.");
-                await render();
-              },
-              "check",
-            ),
-          ),
-        ),
-      );
-    }
     detail.append(el("section", {}, el("h3", {}, "Chat routing"),
       el("label", {class: "switch"}, enabled, "Enable profile"),
       el("p", {id: "routing-note", class: "caption"}, "Disabling this profile blocks new chats and resumes. Chats already running are not stopped."),

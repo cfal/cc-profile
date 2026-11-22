@@ -89,7 +89,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
         ),
         "no_ready_config" => Error::conflict(
             "no_ready_config",
-            "No enabled config is ready. If a workspace check is still running, retry in a few seconds. Otherwise check the directory and observer in Accounts.",
+            "No enabled config is ready. Check the profile directories in Accounts.",
         ),
         "unsupported_build" => crate::native::unsupported_build(),
         "identity_override" => Error::bad(
@@ -97,6 +97,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "Unset inherited authentication or storage overrides before launching.",
         ),
         "exact_id_required" => native_id("").unwrap_err(),
+        "git_required" => crate::invocation::git_required(),
         "bad_cwd" => Error::bad("bad_cwd", "Working directory is unavailable."),
         _ => Error::bad(
             "unsupported_invocation",
@@ -105,24 +106,10 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
     }
 }
 fn plan(r: &Request, c: &Config, i: &Invocation, session: Option<&str>, reason: &str) -> Plan {
-    let (mut set, mut unset) = env_patch(c);
+    let (set, unset) = env_patch(c);
     let mut args = r.argv.clone();
-    if i.intent == Intent::New {
-        if r.tool == "claude" {
-            args.splice(0..0, ["--session-id".into(), session.unwrap().into()]);
-        } else {
-            set.insert("CCP_LAUNCH_ID".into(), r.request_id.clone());
-            set.insert("CCP_OBSERVE_TICKET".into(), r.ticket.clone());
-            unset.retain(|k| !set.contains_key(k));
-        }
-    }
-    if i.interactive_codex
-        && !args
-            .iter()
-            .take_while(|s| s.as_str() != "--")
-            .any(|s| s == "--no-daemon")
-    {
-        args.insert(0, "--no-daemon".into());
+    if i.intent == Intent::New && r.tool == "claude" {
+        args.splice(0..0, ["--session-id".into(), session.unwrap().into()]);
     }
     Plan {
         v: VERSION,
@@ -153,13 +140,7 @@ enum Selection {
     Refuse(Option<Config>, Error),
 }
 
-fn choose(
-    db: &Connection,
-    build: &Build,
-    req: &Request,
-    i: &Invocation,
-    workspace_ready: &dyn Fn(&Config, &std::path::Path) -> bool,
-) -> Result<Selection> {
+fn choose(db: &Connection, build: &Build, req: &Request, i: &Invocation) -> Result<Selection> {
     let reject = |code| Selection::Refuse(None, denial(code, None, i.intent.id()));
     if !req.override_names.is_empty() {
         return Ok(Selection::Refuse(None, override_error(req)));
@@ -193,9 +174,7 @@ fn choose(
                 })?;
             let next = all
                 .into_iter()
-                .filter(|c| {
-                    c.enabled && build.ready(c) == "ready" && workspace_ready(c, &i.workspace)
-                })
+                .filter(|c| c.enabled && c.present())
                 .min_by_key(|c| (c.id <= cursor, c.id));
             Ok(next
                 .map(|c| Selection::Allow(c, "round_robin"))
@@ -291,7 +270,6 @@ impl Prior {
         req: &Request,
         fingerprint: &[u8],
         parsed: Result<&Invocation>,
-        workspace_ready: &dyn Fn(&Config, &std::path::Path) -> bool,
     ) -> Result<Plan> {
         if self.digest != fingerprint {
             return Err(Error::conflict(
@@ -311,8 +289,6 @@ impl Prior {
             c.present()
                 && (c.enabled || req.login_profile == Some(c.id))
                 && Some(c.revision) == self.revision
-                && (i.intent != Intent::New
-                    || (build.ready(c) == "ready" && workspace_ready(c, &i.workspace)))
         });
         if !valid
             || !matches!(self.state.as_str(), "routed" | "pending")
@@ -337,38 +313,30 @@ impl Prior {
 }
 
 pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
-    launch_in(store, build, req, &|_, _| true)
-}
-pub fn launch_in(
-    store: &Store,
-    build: &Build,
-    req: &Request,
-    workspace_ready: &dyn Fn(&Config, &std::path::Path) -> bool,
-) -> Result<Plan> {
     check_req(req)?;
     let fingerprint =
         digest(serde_json::to_vec(req).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
-    // The exact setup commands were checked above. The Codex /hooks TUI is
-    // maintenance here; the same argv without a named profile is a new chat.
     let parsed = if req.login_profile.is_some() {
         Ok(Invocation {
             intent: Intent::Misc,
             workspace: req.cwd.clone(),
-            interactive_codex: false,
+            codex: Default::default(),
         })
     } else {
         classify(&req.tool, &req.argv, &req.cwd)
     };
     store.write(|db| {
         if let Some(prior) = Prior::find(db, &req.request_id)? {
-            return Ok(prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone),workspace_ready));
+            return Ok(prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone)));
         }
         let invocation = parsed.as_ref().ok();
         let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
-        let intent = invocation.map(|i| i.intent.name()).unwrap_or("unsupported");
+        let server = req.tool == "codex" && req.argv.first().is_some_and(|s| s == "app-server")
+            && invocation.is_some_and(|i| i.intent != Intent::Misc);
+        let intent = invocation.map(|i| if server {"app_server"} else {i.intent.name()}).unwrap_or("unsupported");
         let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);
         let selection = match &parsed {
-            Ok(i) => choose(db, build, req, i,workspace_ready)?,
+            Ok(i) => choose(db, build, req, i)?,
             Err(e) => Selection::Refuse(None, e.clone()),
         };
         let ms = now();
@@ -381,7 +349,7 @@ pub fn launch_in(
                 match &i.intent {
                     Intent::New => {
                         if req.tool == "claude" { id = Some(assign_claude(db, &c, &workspace, ms)?); }
-                        else { state = "pending"; }
+                        else if !server { state = "pending"; }
                         db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                     }
                     Intent::Resume(uid) => {
@@ -407,21 +375,37 @@ pub struct Observation {
     pub event: String,
     pub source: String,
     pub native_id: String,
+    pub workspace: Option<String>,
 }
 pub fn observe(store: &Store, o: &Observation) -> Result<()> {
     let uid = native_id(&o.native_id)?;
-    if o.event != "SessionStart" || o.source != "startup" {
-        return Err(Error::bad("wrong_event", "Not a root startup event."));
+    let intent = match (o.event.as_str(), o.source.as_str()) {
+        ("thread/started", "app-server") => "new",
+        ("thread/start", "app-server") => "app_server",
+        _ => return Err(Error::bad("wrong_event", "Not a root startup event.")),
+    };
+    if o.workspace.as_ref().is_some_and(|s| {
+        !std::path::Path::new(s).is_absolute() || s.len() > 4096 || s.chars().any(char::is_control)
+    }) {
+        return Err(Error::bad("bad_cwd", "Invalid thread workspace."));
     }
     store.write(|db|{
-        let (state,old,owner,ws,created):(String,Option<String>,i64,String,i64)=db.query_row("SELECT state,native_id,config_id,workspace,created_ms FROM launches WHERE tool='codex' AND intent='new' AND request_id=? AND ticket_digest=?",params![o.request_id,digest(&o.ticket)],|s|Ok((s.get(0)?,s.get(1)?,s.get(2)?,s.get(3)?,s.get(4)?))).optional()?.ok_or_else(Error::denied)?;
+        let (state,old,owner,ws,created):(String,Option<String>,i64,String,i64)=db.query_row("SELECT state,native_id,config_id,workspace,created_ms FROM launches WHERE tool='codex' AND config_id IS NOT NULL AND intent=? AND request_id=? AND ticket_digest=?",params![intent,o.request_id,digest(&o.ticket)],|s|Ok((s.get(0)?,s.get(1)?,s.get(2)?,s.get(3)?,s.get(4)?))).optional()?.ok_or_else(Error::denied)?;
+        if intent == "app_server" {
+            if state != "routed" { return Ok(Err(Error::denied())); }
+            if let Some(existing) = db.query_row("SELECT owner FROM sessions WHERE tool='codex' AND native_id=?", [&uid], |r| r.get::<_,i64>(0)).optional()? {
+                return Ok(if existing == owner {Ok(())} else {Err(Error::conflict("observation_conflict", "Thread already belongs to a different profile."))});
+            }
+            insert_binding(db,"codex",&uid,owner,o.workspace.as_deref().unwrap_or(&ws),"observed",now())?;
+            return Ok(Ok(()));
+        }
         if state=="observed"&&old.as_deref()==Some(&uid){return Ok(Ok(()))}
         if state=="conflict" || state=="observed" || (state=="pending" && db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='codex' AND native_id=?)",[&uid],|r|r.get::<_,bool>(0))?){
             db.execute("UPDATE launches SET reason='observation_conflict',native_id=COALESCE(native_id,?),state=CASE WHEN state='pending' THEN 'conflict' ELSE state END WHERE request_id=?", params![uid,o.request_id])?;
             return Ok(Err(Error::conflict("observation_conflict","Conflicting session observation; existing owner preserved.")))
         }
         if state!="pending"||now()-created>86_400_000{return Ok(Err(Error::conflict("ticket_expired","Observation ticket has expired or is no longer pending.")))}
-        let ms=now();insert_binding(db,"codex",&uid,owner,&ws,"observed",ms)?;
+        let ms=now();insert_binding(db,"codex",&uid,owner,o.workspace.as_deref().unwrap_or(&ws),"observed",ms)?;
         db.execute("UPDATE launches SET native_id=?,state='observed',observed_ms=? WHERE request_id=?",params![uid,ms,o.request_id])?;Ok(Ok(()))
     })?
 }

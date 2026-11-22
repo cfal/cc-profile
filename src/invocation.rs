@@ -1,4 +1,5 @@
 use crate::types::{Error, Result};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -26,8 +27,34 @@ impl Intent {
 }
 pub struct Invocation {
     pub intent: Intent,
-    pub interactive_codex: bool,
+    pub codex: CodexArgs,
     pub workspace: PathBuf,
+}
+#[derive(Default)]
+pub struct CodexArgs {
+    pub exec: Option<usize>,
+    pub cd: Option<Range<usize>>,
+    pub model: Option<(Range<usize>, String)>,
+}
+fn app_server(args: &[String], cwd: &Path) -> Result<Invocation> {
+    let mut it = args[1..].iter().map(String::as_str);
+    let mut intent = Intent::New;
+    let mut stdio = false;
+    while let Some(flag) = it.next() {
+        match flag {
+            "--stdio" | "--listen=stdio://" if !stdio => stdio = true,
+            "--listen" if !stdio && it.next() == Some("stdio://") => stdio = true,
+            "--for-session" if intent == Intent::New => {
+                intent = Intent::Resume(native_id(it.next().unwrap_or(""))?)
+            }
+            _ => return Err(unsupported()),
+        }
+    }
+    Ok(Invocation {
+        intent,
+        codex: CodexArgs::default(),
+        workspace: cwd.into(),
+    })
 }
 pub fn native_id(raw: &str) -> Result<String> {
     let parsed = Uuid::parse_str(raw).ok().filter(|_| raw.len() == 36);
@@ -37,6 +64,12 @@ fn unsupported() -> Error {
     Error::bad(
         "unsupported_invocation",
         "Unsupported or ambiguous invocation. Use a new chat, an exact resume UUID from Sessions, or a supported maintenance command.",
+    )
+}
+pub(crate) fn git_required() -> Error {
+    Error::bad(
+        "git_required",
+        "Not inside a Git repository. Use --skip-git-repo-check to run exec here.",
     )
 }
 fn claude_internal(word: &str) -> bool {
@@ -87,16 +120,28 @@ fn claude_command(word: &str) -> bool {
 }
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let claude = tool == "claude";
+    if !claude
+        && args.first().is_some_and(|s| s == "app-server")
+        && !matches!(args.get(1).map(String::as_str), Some("--help" | "-h"))
+    {
+        return app_server(args, cwd);
+    }
     let mut workspace = cwd.to_owned();
     let mut words = Vec::new();
+    let mut first_word = None;
+    let mut local_only_option = false;
+    let mut codex = CodexArgs::default();
+    let mut skip_git_check = false;
     let mut tail = false;
     let mut resume = None;
     let mut help = false;
     let mut print_mode = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
+        let start = args.len() - it.len() - 1;
         let arg = arg.as_str();
         if tail || !arg.starts_with('-') || arg == "-" {
+            first_word.get_or_insert(start);
             words.push((arg, !tail));
             continue;
         }
@@ -107,6 +152,20 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         let (key, inline) = arg
             .split_once('=')
             .map_or((arg, None), |(k, v)| (k, Some(v)));
+        local_only_option |= matches!(
+            key,
+            "--no-daemon"
+                | "--add-dir"
+                | "--strict-config"
+                | "--search"
+                | "-s"
+                | "--sandbox"
+                | "-a"
+                | "--ask-for-approval"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--output-schema"
+        );
+        skip_git_check |= key == "--skip-git-repo-check";
         let mut value = || {
             inline
                 .or_else(|| it.next().map(String::as_str))
@@ -126,13 +185,25 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             }
             (false, "-C" | "--cd") => {
                 let s = value()?;
-                if s.is_empty() {
+                if s.is_empty() || codex.cd.is_some() {
                     return Err(unsupported());
                 }
+                codex.cd = Some(start..args.len() - it.len());
                 workspace = cwd
                     .join(s)
                     .canonicalize()
                     .map_err(|_| Error::bad("bad_cwd", "Working directory is unavailable."))?;
+                if !workspace.is_dir() {
+                    return Err(Error::bad("bad_cwd", "Working directory is unavailable."));
+                }
+            }
+            (false, "-m" | "--model") => {
+                let s = value()?;
+                if s.is_empty() || (s.starts_with('-') && inline.is_none()) || codex.model.is_some()
+                {
+                    return Err(unsupported());
+                }
+                codex.model = Some((start..args.len() - it.len(), s.to_owned()));
             }
             (false, "--device-auth" | "--with-api-key")
                 if inline.is_none() && words.first() == Some(&("login", true)) => {}
@@ -176,9 +247,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             )
             | (
                 false,
-                "-m"
-                | "--model"
-                | "-s"
+                "-s"
                 | "--sandbox"
                 | "-a"
                 | "--ask-for-approval"
@@ -251,7 +320,6 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     ) {
         return Err(unsupported());
     }
-    let mut interactive = false;
     let intent = if help {
         Intent::Misc
     } else if claude {
@@ -291,26 +359,43 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 return Err(unsupported());
             }
             Some("exec" | "e") if words.len() <= 2 => Intent::New,
-            Some("resume") => {
-                interactive = true;
-                exact(1)?
-            }
+            Some("resume") => exact(1)?,
             Some(
                 "agents" | "review" | "mcp" | "plugin" | "app-server" | "completion" | "update"
                 | "sandbox" | "debug" | "apply" | "a" | "queue" | "archive" | "delete"
                 | "migrate-rollouts" | "migrate-nfs-db" | "unarchive" | "fork" | "exec-server"
                 | "exec" | "e",
             ) => return Err(unsupported()),
-            _ if words.len() <= 1 => {
-                interactive = true;
-                Intent::New
-            }
+            _ if words.len() <= 1 => Intent::New,
             _ => return Err(unsupported()),
         }
     };
+    if !claude {
+        if matches!(command, Some("exec" | "e")) {
+            codex.exec = first_word;
+        }
+        if intent == Intent::New {
+            if local_only_option {
+                return Err(Error::bad(
+                    "unsupported_invocation",
+                    "This option is incompatible with a new managed Codex chat; configure the profile instead.",
+                ));
+            }
+            // Codex 0.171.0 checks this in local exec, but not in exec --remote.
+            if codex.exec.is_some()
+                && !skip_git_check
+                && !workspace.ancestors().any(|dir| {
+                    let git = dir.join(".git");
+                    git.is_file() || git.join("HEAD").is_file()
+                })
+            {
+                return Err(git_required());
+            }
+        }
+    }
     Ok(Invocation {
         intent,
-        interactive_codex: interactive,
+        codex,
         workspace,
     })
 }
@@ -324,6 +409,35 @@ mod tests {
             Path::new("/"),
         )
     }
+    #[test]
+    fn codex_injects_remote_after_the_exec_verb_not_an_option_value() {
+        assert_eq!(
+            parse(
+                "codex",
+                &[
+                    "-m",
+                    "exec",
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--json",
+                    "review this"
+                ]
+            )
+            .unwrap()
+            .codex
+            .exec,
+            Some(2)
+        );
+        assert_eq!(parse("codex", &["--", "exec"]).unwrap().codex.exec, None);
+        for flag in ["--hook-free", "--no-daemon", "--strict-config", "--search"] {
+            assert!(parse("codex", &[flag]).is_err());
+        }
+        assert_eq!(
+            parse("codex", &["login", "status"]).unwrap().intent,
+            Intent::Misc
+        );
+    }
+
     #[test]
     fn routes_the_grammar_not_substrings() {
         let id = "60000000-0000-4000-8000-000000000002";
@@ -339,7 +453,11 @@ mod tests {
                 Intent::Resume(id.into()),
             ),
             ("codex", vec!["--", "resume"], Intent::New),
-            ("codex", vec!["exec", "--json", "--", "resume"], Intent::New),
+            (
+                "codex",
+                vec!["exec", "--skip-git-repo-check", "--json", "--", "resume"],
+                Intent::New,
+            ),
             (
                 "codex",
                 vec!["-m", "resume", "exec", "resume", id, "prompt"],
