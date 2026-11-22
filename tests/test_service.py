@@ -495,6 +495,17 @@ else:
         logs=self.api("GET","startups")[1]["items"]
         self.assertEqual([row["reason"] for row in logs],["unsupported_invocation"]*14)
 
+    def test_invalid_claude_permission_prompts_do_not_allocate_or_rotate(self):
+        work = self.account("claude", "work")
+        self.account("claude", "other")
+        for args in [["--permission-prompts=off"], ["--permission-prompts", ""], ["--permission-prompts="]]:
+            p = self.cli("claude", "-p", *args, "hello")
+            self.assertNotEqual(p.returncode, 0, args)
+            self.assertEqual(p.stdout, "")
+        self.assertEqual(self.api("GET","sessions")[1]["items"], [])
+        self.assertEqual(self.cli("claude","-p","--permission-prompts","host","hello").returncode, 0)
+        self.assertEqual(self.api("GET","sessions")[1]["items"][0]["config_id"], work["id"])
+
     def test_native_identity_is_profile_scoped_and_only_exposes_display_fields(self):
         for tool in ("claude","codex"):
             c = self.account(tool,tool+"-account")

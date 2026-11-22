@@ -330,6 +330,11 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     return Err(unsupported());
                 }
             }
+            (true, "--permission-prompts") => {
+                if !matches!(value()?, "host" | "none") {
+                    return Err(unsupported());
+                }
+            }
             (
                 true,
                 "--model"
@@ -341,7 +346,6 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 | "--max-turns"
                 | "--max-budget-usd"
                 | "--permission-mode"
-                | "--permission-prompts"
                 | "--system-prompt"
                 | "--append-system-prompt"
                 | "--agent"
