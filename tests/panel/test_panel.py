@@ -2,6 +2,7 @@
 from contextlib import closing
 import os
 from pathlib import Path
+import shlex
 import sqlite3
 import sys
 import unittest
@@ -204,6 +205,37 @@ class Panel(unittest.TestCase):
             self.assertEqual(errors,[])
             browser.close()
 
+    def test_antigravity_profile_login_and_native_report(self):
+        service=self.start_service()
+        _, c, _=service.api("POST","accounts",{"tool":"agy","label":"ACP work","create":True})
+        self.assertEqual(service.cli("login",str(c["id"])).returncode,0)
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page=browser.new_page(viewport={"width":390,"height":844},permissions=["clipboard-read","clipboard-write"])
+            page.goto(f"http://127.0.0.1:{service.port}/#accounts?tool=agy")
+            page.get_by_label("Password",exact=True).fill(service.password)
+            page.get_by_role("button",name="Sign in").click()
+            expect(page.get_by_role("heading",name="ACP work",exact=True)).to_be_visible()
+            expect(page.get_by_role("button",name="Antigravity",exact=True)).to_have_attribute("aria-pressed","true")
+            page.get_by_role("button",name="Copy Antigravity sign-in command").click()
+            self.assertEqual(page.evaluate("navigator.clipboard.readText()"),"ccp login "+str(c["id"]))
+            expect(page.get_by_role("checkbox",name="Enable profile")).not_to_be_checked()
+            expect(page.get_by_role("button",name="Sign in with ChatGPT")).to_have_count(0)
+            page.get_by_role("navigation").get_by_text("Dashboard").click()
+            expect(page.get_by_role("link",name="Antigravity / ACP work")).to_be_visible()
+            page.get_by_role("button",name="View native quota report").click()
+            expect(page.get_by_role("dialog")).to_contain_text("weekly remaining 76%")
+            self.check_layout(page,"agy-quota-mobile")
+            page.get_by_role("dialog").locator("button[type=submit]").click()
+            sid = "acp:it's here"
+            with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
+                           "VALUES('agy',?,?,'observed','/my workspace',1,1)",(sid,c["id"]))
+            page.get_by_role("navigation").get_by_text("Sessions").click()
+            expect(page.get_by_role("button",name=sid,exact=True)).to_be_visible()
+            page.get_by_role("button",name="Copy resume command").click()
+            self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
+                             ["cd","/my workspace","&&","ccp","agy","acp","--for-session",sid])
+
     def test_dashboard_quotas_above_independent_startup_filters(self):
         service = self.start_service()
         claude = service.account("claude", "Work")
@@ -322,7 +354,7 @@ class Panel(unittest.TestCase):
             self.check_layout(page, "startups-mobile")
             page.locator("tbody .uuid").click()
             expect(page.get_by_role("heading", name="Sessions", exact=True)).to_be_visible()
-            search = page.get_by_role("searchbox", name="Session UUID")
+            search = page.get_by_role("searchbox", name="Session ID")
             expect(search).to_have_value(record["native_id"])
             expect(page.get_by_role("button", name="Copy resume command")).to_be_enabled()
             expect(page.get_by_role("button", name="Next page")).to_have_count(0)

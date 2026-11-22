@@ -46,6 +46,22 @@ class Antigravity(unittest.TestCase):
         self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
         self.assertEqual(self.s.cli("agy","acp").returncode,1)
 
+    def test_panel_report_needs_login_and_withholds_unexpected_output(self):
+        c = self.profile("report", enable=False)
+        cid, home = str(c["id"]), Path(c["home"])
+        self.assertEqual(self.s.api("POST","accounts/"+cid+"/quota/report",{})[0],400)
+        self.assertEqual(self.s.cli("login",cid).returncode,0)
+        self.assertEqual(self.s.api("POST","accounts/"+cid+"/quota/report",{})[:2],
+                         (200,{"report":"Model quotas: weekly remaining 76%\n"}))
+        obs = json.loads((home/"last-run").read_text())
+        self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
+        self.assertFalse(Path(obs["runtime"]).exists())
+        (home/"bad-report").touch()
+        status, response, _=self.s.api("POST","accounts/"+cid+"/quota/report",{})
+        self.assertNotEqual(status,200)
+        self.assertNotIn("sensitive",str(response))
+        self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
+
     def test_acp_correlates_opaque_ids_and_checks_owner_before_forwarding(self):
         a,b=self.profile("a"),self.profile("b")
         first="s:opaque 'first'"

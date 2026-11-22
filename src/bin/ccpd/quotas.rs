@@ -196,3 +196,96 @@ pub async fn one(
     }
     Ok((StatusCode::ACCEPTED, queue(s, Some(id), false).await?))
 }
+
+// The pinned CLI handles /usage as a native text report, not an ACP method.
+// Only run on explicit demand; never store the free-form report in the quota cache.
+pub async fn report(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json<Value>> {
+    use ccpd::{
+        agy,
+        native::{clean_command, unsupported_build},
+    };
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::AsyncReadExt;
+    let c = config(&*s.store.db()?, id)?;
+    if c.tool != "agy" {
+        return Err(Error::bad(
+            "wrong_tool",
+            "Use this provider's quota meters.",
+        ));
+    }
+    if !c.present() || !s.agy.supported || !s.agy.unchanged() {
+        return Err(unsupported_build());
+    }
+    if !agy::has_login(&c.home)? {
+        return Err(Error::bad(
+            "sign_in_required",
+            "Sign in to this profile first.",
+        ));
+    }
+    let _slot = s.quotas.slots.try_acquire().map_err(|_| {
+        Error::conflict("busy", "Another quota check is running. Try again shortly.")
+    })?;
+    let unavailable = || {
+        Error::unavailable(
+            "report_unavailable",
+            "Native quota report unavailable. Run ccp usage for this profile in your terminal.",
+        )
+    };
+    let rt = agy::Runtime::new()?;
+    let mut cmd = clean_command(&s.agy.bin, &c.home, Some(&c));
+    rt.configure(
+        &mut cmd,
+        &c.home,
+        &agy::USAGE.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+    );
+    cmd.env("NO_COLOR", "1")
+        .env("BROWSER", "/bin/false")
+        .stdout(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|_| unavailable())?;
+    let output = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut text = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .take(16385)
+            .read_to_string(&mut text)
+            .await?;
+        if text.len() > 16384 || !child.wait().await?.success() {
+            return Err(unavailable());
+        }
+        let lower = text.to_ascii_lowercase();
+        if text.trim().is_empty()
+            || text
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+            || !lower.contains("quota")
+            || [
+                "https://",
+                "http://",
+                "authentication required",
+                "authorization code",
+                "bearer ",
+                "ya29.",
+                "1//",
+                "refresh_token",
+                "access_token",
+            ]
+            .iter()
+            .any(|k| lower.contains(k))
+        {
+            return Err(unavailable());
+        }
+        Ok(text)
+    })
+    .await
+    .map_err(|_| unavailable())??;
+    let current = config(&*s.store.db()?, id)?;
+    if current.revision != c.revision || !current.present() {
+        return Err(Error::conflict(
+            "stale_config",
+            "Profile changed during quota lookup.",
+        ));
+    }
+    Ok(Json(json!({"report":output})))
+}

@@ -2,7 +2,7 @@ const $ = (s, root = document) => root.querySelector(s);
 const main = $("#main"),
   dialog = $("#dialog"),
   form = $("#form");
-const names = { claude: "Claude", codex: "Codex" };
+const names = { claude: "Claude", codex: "Codex", agy: "Antigravity" };
 const states = {
   routed: "Routed",
   pending: "Awaiting ID",
@@ -18,6 +18,7 @@ const ready = {
   unsupported_build: "Native build unavailable or unsupported",
 };
 const quotaStates = {
+  native_report: "Native quota report",
   not_checked: "Not checked",
   sign_in_required: "Sign-in required",
   rate_limited: "Rate limited",
@@ -148,11 +149,13 @@ function modal(heading, fields, submit, fn) {
   $(".fields", form).replaceChildren(...fields);
   const save = $("button[type=submit]", form),
     err = $(".error", form);
+  $(".cancel", form).hidden = !fn;
   save.textContent = submit;
   save.disabled = false;
   err.hidden = true;
   form.onsubmit = async (e) => {
     e.preventDefault();
+    if (!fn) return dialog.close();
     save.disabled = true;
     err.hidden = true;
     try {
@@ -272,8 +275,8 @@ async function logs(view, params, ver, enter) {
   const search = el("input", {
     type: "search",
     value: params.get("native_id") || "",
-    placeholder: "Exact session UUID",
-    "aria-label": "Session UUID",
+    placeholder: "Exact session ID",
+    "aria-label": "Session ID",
     onchange: (e) => filter("native_id", e.target.value.trim()),
   });
   const filters = el(
@@ -289,11 +292,11 @@ async function logs(view, params, ver, enter) {
     head = el("tr"),
     body = el("tbody");
   for (const h of sessions
-    ? ["Session UUID", "Tool", "Bound config", "Workspace", "Evidence", "Last routed", "Resume"]
-    : ["Time", "Tool", "Intent", "Config", "Decision", "Session UUID", "Details"])
+    ? ["Session ID", "Tool", "Bound config", "Workspace", "Evidence", "Last routed", "Resume"]
+    : ["Time", "Tool", "Intent", "Config", "Decision", "Session ID", "Details"])
     head.append(el("th", { scope: "col" }, h));
   table.append(el("thead", {}, head), body);
-  const short = (s) => s.slice(0, 8) + "…" + s.slice(-5);
+  const short = (s) => s.length <= 14 ? s : s.slice(0, 8) + "…" + s.slice(-5);
   for (const row of page.items) {
     const cfg =
       row.config_id == null
@@ -339,7 +342,7 @@ async function logs(view, params, ver, enter) {
     const commands = sessions
       ? ib("Copy resume command", "copy", () =>
           copy("cd " + shell(row.workspace) + " && ccp " + row.tool +
-            (row.tool === "claude" ? " --resume " : " resume ") + uid),
+            (row.tool === "agy" ? " acp --for-session " + shell(uid) : (row.tool === "claude" ? " --resume " : " resume ") + uid)),
         )
       : null;
     const det = ib("Startup details", "chevron-right", async () => {
@@ -372,7 +375,7 @@ async function logs(view, params, ver, enter) {
               { class: "facts" },
               datum("Request ID", code(row.request_id)),
               datum("Workspace", code(row.workspace || "Unavailable")),
-              datum("Session UUID", uid ? code(uid) : "Not recorded"),
+              datum("Session ID", uid ? code(uid) : "Not recorded"),
               row.observed_ms && datum("ID observed", fmt(row.observed_ms)),
             ),
           ),
@@ -600,11 +603,18 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   let submitting = false, loading = false;
   // Keep keyboard focus while either the request or the daemon's quota check is pending.
   const syncButton = () => button.setAttribute("aria-disabled", String(submitting || loading));
-  const button = ib("Refresh quota", "refresh-cw", async () => {
+  const native = c.tool === "agy";
+  const button = ib(native ? "View native quota report" : "Refresh quota", native ? "activity" : "refresh-cw", async () => {
     if (submitting || loading) return;
     submitting = true;
     syncButton();
     try {
+      if (native) {
+        const result = await api("accounts/" + c.id + "/quota/report", "POST", {});
+        if (section.isConnected && !dialog.open)
+          modal("Quota: " + c.label, [el("pre", {class: "wrap"}, result.report)], "Close");
+        return;
+      }
       await api("accounts/" + c.id + "/quota/refresh", "POST", {});
       await refreshed();
     } finally {
@@ -613,9 +623,14 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
     }
   });
   const body = el("div");
+  if (native) {
+    const cmd = "ccp usage " + c.id;
+    body.append(el("div", {class: "row"}, code(cmd), ib("Copy quota command", "copy", () => copy(cmd))));
+  }
   const section = el("section", {}, el("div", {class: "sectionhead"},
     el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body);
   function update(profile) {
+    c = profile;
     if (link) {
       const label = names[profile.tool] + " / " + profile.label;
       if (link.textContent !== label) link.textContent = label;
@@ -623,7 +638,7 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
     }
     loading = !!profile.quota.loading;
     syncButton();
-    body.replaceChildren(quotaDetails(profile.quota));
+    if (!native) body.replaceChildren(quotaDetails(profile.quota));
   }
   update(c);
   return {section, update};
@@ -652,7 +667,7 @@ function openDashboard(profiles) {
     if (current === seq && overview.isConnected) draw(rows);
   }
   function draw(rows) {
-    all.disabled = !rows.some((c) => c.enabled);
+    all.disabled = !rows.some((c) => c.enabled && c.tool !== "agy");
     empty.hidden = rows.length > 0;
     const ids = new Set(rows.map((c) => c.id));
     for (const [id, card] of cards) {
@@ -673,7 +688,7 @@ function openDashboard(profiles) {
     if (rows.some((c) => c.quota.loading)) poll = setTimeout(guard(read), 1000);
   }
   draw(profiles);
-  if (profiles.some((c) => c.enabled)) guard(() => refresh(true))();
+  if (profiles.some((c) => c.enabled && c.tool !== "agy")) guard(() => refresh(true))();
   return log;
 }
 // A poll or full Accounts refresh may overlap a cancel/retry. Only use a
@@ -702,7 +717,7 @@ function signInPanel(c, initial, supported) {
   const cmd = "ccp login " + c.id;
   const terminal = el("div", {class: "row"}, code(cmd),
     ib("Copy " + names[c.tool] + " sign-in command", "copy", () => copy(cmd)));
-  if (c.tool === "claude") {
+  if (c.tool !== "codex") {
     section.append(el("p", {}, "Run in your terminal:"), terminal);
     return section;
   }
@@ -767,7 +782,7 @@ function signInPanel(c, initial, supported) {
   return section;
 }
 async function accounts(params, ver, enter) {
-  const t = params.get("tool") === "codex" ? "codex" : "claude",
+  const t = Object.hasOwn(names, params.get("tool")) ? params.get("tool") : "claude",
     data = await api("accounts?tool=" + t);
   if (ver !== version) return;
   const c = data.items.find((c) => String(c.id) === params.get("id")) || data.items[0];
@@ -925,7 +940,7 @@ async function accounts(params, ver, enter) {
         }),
     ),
   );
-  if (enter) {
+  if (enter && t !== "agy") {
     await api("quota/refresh", "POST", { stale_only: true });
     if (ver === version) timer = setTimeout(() => render().catch((e) => notice(e.message)), 400);
   } else if (data.items.some((a) => a.quota.loading))
