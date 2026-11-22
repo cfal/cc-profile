@@ -1,6 +1,6 @@
 # cc-profile
 
-`ccp` starts Claude Code, Codex, or Antigravity ACP with a config chosen by a local router. New chats rotate among enabled, ready configs. Resuming an exact session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
+`ccp` starts Claude Code, Codex, or Antigravity ACP with a config chosen by a local router. By default, new chats rotate among enabled, ready profiles. Settings can instead select by remaining quota or account priority. Resuming an exact session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
 
 ## Install
 
@@ -26,9 +26,9 @@ Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its
 
 Open **http://127.0.0.1:8743**. On the first visit, set a panel password; subsequent visits use **Sign in**. No pairing token is needed. The first visitor can claim an unconfigured panel, so on a shared machine run **`ccpd set-password` before starting the service**. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and the daemon startup log show the database path: use the same `XDG_STATE_HOME` in your shell and service so they address the same panel. Use `--port PORT` to change the panel port. For a VM, forward the same loopback port using SSH. Do not expose the panel publicly.
 
-Sign-in survives reloads in the same tab. A separately opened tab signs in independently.
+Sign-in survives reloads in the same tab. A separately opened tab signs in independently. In **Settings**, choose a light, dark, or system theme for this browser, or change the panel password using the current one. Changing it signs out all tabs; it does not stop running agents.
 
-For a persistent service after installing the binary:
+`ccp` does not start a missing daemon or select a different one. To keep the configured daemon running without a separate terminal on Linux, install the user service:
 
 ```sh
 mkdir -p ~/.config/systemd/user
@@ -51,7 +51,13 @@ Restart with `systemctl --user restart ccpd` after changing PATH or updating a n
 
 1. In **Accounts**, choose Claude, Codex, or Antigravity, click **Add profile**, and give it a label such as Work or Personal. **Create new profile** makes a private, empty directory under `$XDG_DATA_HOME/cc-profile/profiles/` (default `~/.local/share/cc-profile/profiles/`). Alternatively, **Use existing directory** registers an existing physical config directory in place. Nothing is copied. Renaming the label never moves the directory.
 2. Sign in while the profile is still disabled. For **Codex**, click **Sign in with ChatGPT**, open the OpenAI verification link, and enter the displayed code. Choose the intended ChatGPT account, especially when adding a second profile in the same browser. Device login must be allowed by the account or workspace. The native Codex app-server saves the login; the panel displays the result. One device sign-in can run at a time. Reopening the profile resumes the display; cancel or retry there. A daemon restart ends a pending attempt. For **Claude**, copy the displayed `ccp login <id>` command and run it in your terminal. It opens the native Claude subscription login for that profile with its proxy settings. For Claude and Codex, `ccp login <id>` runs native sign-in in the selected profile with its proxy settings, and `ccp login <id> --status` checks the result.
-3. Select **Enable profile** when ready. Repeat for the second profile. New chats rotate among enabled, ready profiles; resumes stay with the original one. Disabling a profile blocks both new chats and resumes without stopping running chats. Setup does not change **Current**, allocate a chat, or advance rotation. **Set current** is only needed for unscoped maintenance commands (e.g. `ccp claude auth status`). Disabling Current clears it without selecting a replacement.
+3. Select **Enable profile** when ready. Repeat for the second profile. New chats use the configured routing mode; resumes stay with the original profile. Disabling a profile blocks both new chats and resumes without stopping running chats. Setup does not change **Current**, allocate a chat, or advance rotation. **Set current** is only needed for unscoped maintenance commands (e.g. `ccp claude auth status`). Disabling Current clears it without selecting a replacement.
+
+### Choosing a profile
+
+The **Routing mode** in Settings applies across providers. A new chat selects among eligible profiles of its own provider. **Round robin** cycles through them; **Most quota remaining** and **Least quota remaining** compare the smallest remaining percentage across the account's applicable limits. **Highest priority** uses the numeric priority set in Accounts (0 to 100; higher wins). Ties rotate rather than always selecting the first profile.
+
+In every mode, a fresh, matching quota reading of zero excludes that profile from new admissions. If all eligible profiles are known to be exhausted, the launch is refused. Missing, stale, or already-reset readings are unknown, not zero: usage-based modes prefer measured profiles but can still use an unmeasured one. Antigravity's text report is not used for ranking. Sticky resumes stay with their owner even if its quota is exhausted; the provider can still refuse the request.
 
 ### Antigravity ACP
 
@@ -93,7 +99,7 @@ ccp codex login status
 
 `ccp` sends argv and cwd over a private Unix socket, applies an allowlisted environment patch, and runs the selected native tool in the same terminal. Its routing message goes to stderr, not the provider's stdout. If the server is unavailable, nothing launches. Remove conflicting inherited API-key, provider, or storage overrides rather than inadvertently charging another identity.
 
-- **New:** deterministic round-robin per provider. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook. Antigravity selects a profile per ACP connection and binds each successful `session/new` to it.
+- **New:** select a profile using the configured routing mode. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook. Antigravity selects a profile per ACP connection and binds each successful `session/new` to it.
 - **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native IDs are supported (opaque strings for ACP, UUIDs for Claude and Codex). A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.
 - **Miscellaneous:** help/version flags, supported auth, doctor, features and MCP management commands use Current. No Current means no launch. In Claude, `--help` shows help; the word `help` alone is a chat prompt.
 - **Unsupported:** `--last`, `claude -c`, pickers, forks, ephemeral/remote/background modes, hook or home overrides, and unrecognized routing-sensitive argument forms. The startup log is not the provider's activity history. In-app session navigation and raw native commands bypass the launcher.
@@ -108,14 +114,14 @@ Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per dire
 
 Proxy URLs are visible as you type. The panel API and copied commands omit saved credentials. The native process receives the full proxy URL, including credentials, in its environment. Tools that inherit that environment can read it too.
 
-Quota is **informational**. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
+Quota is a **best-effort snapshot**, not a reservation. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
 
 Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it. Databases with separate proxy columns are not upgraded by this version.
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
 - Antigravity: explicit native text report via the card or `ccp usage <id>`; not included in background polling.
 - Claude: Linux file-backed OAuth token in the selected `CLAUDE_CONFIG_DIR`, read-only GET to the vendor usage endpoint. Expired credentials require native renewal; the dashboard does not rotate a refresh token behind an active session.
-- Opening Dashboard or Accounts refreshes stale enabled Claude and Codex profiles; a profile's own refresh button can also check it while disabled. Both views share the same five-minute cache, with at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Neither quota nor provider connectivity participates in routing. Inherit uses the service environment for quota, the caller's environment for launches.
+- Opening Dashboard or Accounts refreshes stale enabled Claude and Codex profiles; a profile's own refresh button can also check it while disabled. Both views share the same five-minute cache, with at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Usage-based routing also requests a stale-data refresh in the background when admitting a new launch. The launch uses already-cached observations; it never waits for a provider quota check. Inherit uses the service environment for quota, the caller's environment for launches.
 
 ## Storage and recovery
 
