@@ -46,7 +46,8 @@ if "/usage" in args:
         print("Gemini Models\tWeekly Limit Remaining\t76%\t2030-01-01T00:00:00Z")
         sys.exit()
     assert args == ["--output-format", "json", *usage], args
-    assert not sys.stdin.read()
+    assert os.path.samefile("/proc/self/fd/0", "/dev/null")
+    assert os.environ["BROWSER"] == "/bin/false"
     if (home / "report.json").exists():
         sys.stdout.buffer.write((home / "report.json").read_bytes())
         sys.exit(1 if (home / "fail-report").exists() else 0)

@@ -83,7 +83,7 @@ pub fn has_login(home: &Path) -> Result<bool> {
     Ok(login_stamp(home)?.is_some())
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, serde::Serialize)]
 pub struct LoginStamp(u64, u64, u64, i64, i64);
 
 pub fn login_stamp(home: &Path) -> Result<Option<LoginStamp>> {

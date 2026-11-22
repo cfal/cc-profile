@@ -1,6 +1,15 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use super::{signin, unavailable};
+use crate::{
+    agy,
+    native::{Build, clean_command},
+    store::Config,
+    types::Result,
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{process::Stdio, time::Duration};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::io::AsyncReadExt;
 
 #[derive(Deserialize)]
 struct NativeResult {
@@ -39,20 +48,7 @@ struct Bucket {
     disabled: bool,
 }
 
-#[derive(Serialize)]
-pub struct Report {
-    windows: Vec<Window>,
-}
-
-#[derive(Serialize)]
-struct Window {
-    group: &'static str,
-    window: &'static str,
-    remaining_pct: f64,
-    reset_at_ms: Option<i64>,
-}
-
-pub fn parse(bytes: &[u8]) -> Option<Report> {
+fn snapshot(bytes: &[u8]) -> Option<Value> {
     let result: NativeResult = serde_json::from_slice(bytes).ok()?;
     if result.status != "SUCCESS" || result.num_turns != 0 || result.command.name != "usage" {
         return None;
@@ -96,13 +92,45 @@ pub fn parse(bytes: &[u8]) -> Option<Report> {
                 .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
                 .map(|t| (t.unix_timestamp_nanos() / 1_000_000) as i64)
                 .filter(|ms| *ms > 0);
-            windows.push(Window {
-                group: label,
-                window,
-                remaining_pct: fraction * 100.0,
-                reset_at_ms,
-            });
+            windows.push(json!({
+                "kind": "model", "label": format!("{label}, {window}"),
+                "used_pct": 100. - fraction * 100., "reset_at_ms": reset_at_ms,
+            }));
         }
     }
-    (!windows.is_empty()).then_some(Report { windows })
+    (!windows.is_empty()).then(|| json!({"windows": windows}))
+}
+
+pub(super) async fn fetch(c: &Config, build: &Build) -> Result<Value> {
+    if !build.supported || !build.unchanged() {
+        return Err(unavailable());
+    }
+    if !agy::has_login(&c.home)? {
+        return Err(signin());
+    }
+    let rt = agy::Runtime::new()?;
+    let mut cmd = clean_command(&build.bin, &c.home, Some(c));
+    rt.configure(&mut cmd, &c.home, &agy::usage_args(true));
+    let mut child = cmd
+        .env("NO_COLOR", "1")
+        .env("BROWSER", "/bin/false")
+        .stdout(Stdio::piped())
+        .spawn()?;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        const LIMIT: usize = 64 * 1024;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .take(LIMIT as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > LIMIT || !child.wait().await?.success() || !build.unchanged() {
+            return Err(unavailable());
+        }
+        snapshot(&bytes).ok_or_else(unavailable)
+    })
+    .await
+    .map_err(|_| unavailable())?
 }

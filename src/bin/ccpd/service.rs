@@ -250,10 +250,6 @@ pub fn web(s: Shared) -> Router {
             "/api/v1/accounts/{id}/quota/refresh",
             post(super::quotas::one),
         )
-        .route(
-            "/api/v1/accounts/{id}/quota/report",
-            post(super::quotas::report),
-        )
         .route("/api/v1/quota/refresh", post(super::quotas::bulk))
         .route("/api/v1/current/{tool}", put(current))
         .route(

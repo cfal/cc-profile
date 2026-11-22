@@ -4,10 +4,12 @@ from pathlib import Path
 import pty
 import select
 import signal
+import sqlite3
 import subprocess
 import time
 import unittest
 import uuid
+from contextlib import closing
 
 import test_service as svc
 
@@ -213,19 +215,44 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(self.s.cli("agy").returncode, 0)
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], c["id"])
 
-    def test_panel_report_needs_login_and_withholds_unexpected_output(self):
+    def refresh_quota(self, c=None, stale_only=False):
+        route = f"accounts/{c['id']}/quota/refresh" if c else "quota/refresh"
+        status, data, _ = self.s.api("POST", route, {"stale_only": stale_only})
+        self.assertEqual(status, 202, data)
+        return data["queued"]
+
+    def wait_quota(self, c, status):
+        deadline = time.monotonic() + 5
+        while True:
+            rows = self.s.api("GET", "accounts?tool=agy")[1]["items"]
+            q = next(row["quota"] for row in rows if row["id"] == c["id"])
+            if not q["loading"] and q["status"] == status:
+                return q
+            self.assertLess(time.monotonic(), deadline, q)
+            time.sleep(.02)
+
+    def allow_retry(self, c):
+        with closing(sqlite3.connect(self.s.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("UPDATE quota_cache SET retry_ms=0 WHERE config_id=?", (c["id"],))
+
+    def test_quota_cache_needs_login_and_withholds_unexpected_output(self):
         c = self.profile("report", enable=False)
         cid, home = str(c["id"]), Path(c["home"])
-        report = lambda: self.s.api("POST","accounts/"+cid+"/quota/report",{})[:2]
-        self.assertEqual(report()[1]["error"],"sign_in_required")
+        self.assertEqual(self.refresh_quota(stale_only=True), 0)  # Disabled, but can check manually.
+        self.assertEqual(self.refresh_quota(c), 1)
+        self.assertIsNone(self.wait_quota(c, "sign_in_required")["snapshot"])
+        self.assertEqual(self.refresh_quota(c), 0)
         self.assertFalse((home/"usage-calls").exists())
         self.assertEqual(self.s.cli("login",cid).returncode,0)
         before = self.s.api("GET","startups?tool=agy")[1]
-        self.assertEqual(report(), (200, {"windows":[
-            {"group":"Gemini Models","window":"Weekly","remaining_pct":76,"reset_at_ms":1893456000000},
-            {"group":"Gemini Models","window":"5 hours","remaining_pct":100,"reset_at_ms":None},
-            {"group":"Claude and GPT models","window":"Weekly","remaining_pct":0,"reset_at_ms":None},
-        ]}))
+        self.assertEqual(self.refresh_quota(c), 1)  # Login changed during backoff.
+        good = self.wait_quota(c, "fresh")
+        self.assertFalse(good["stale"])
+        self.assertEqual(good["snapshot"], {"windows":[
+            {"kind":"model","label":"Gemini Models, Weekly","used_pct":24,"reset_at_ms":1893456000000},
+            {"kind":"model","label":"Gemini Models, 5 hours","used_pct":0,"reset_at_ms":None},
+            {"kind":"model","label":"Claude and GPT models, Weekly","used_pct":100,"reset_at_ms":None},
+        ]})
         obs = json.loads((home/"last-run").read_text())
         self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
         self.assertFalse(Path(obs["runtime"]).exists())
@@ -240,12 +267,19 @@ class Antigravity(unittest.TestCase):
                    json.dumps(dict(valid,command={"name":"usage","data":{"groups":"fixture-private"}}))]
         for raw in invalid:
             (home/"report.json").write_text(raw)
-            status, response = report()
-            self.assertEqual((status,response["error"]), (503,"report_unavailable"))
-            self.assertNotIn("fixture-private", str(response))
+            self.allow_retry(c)
+            self.assertEqual(self.refresh_quota(c), 1)
+            q = self.wait_quota(c, "unavailable")
+            self.assertTrue(q["stale"])
+            self.assertEqual((q["success_ms"], q["snapshot"]), (good["success_ms"], good["snapshot"]))
+            self.assertGreaterEqual(q["retry_ms"] - q["attempt_ms"], 30000)
+            self.assertEqual(self.refresh_quota(c), 0)
+            self.assertNotIn("fixture-private", str(q))
         (home/"report.json").write_text(json.dumps(valid))
         (home/"fail-report").touch()
-        self.assertEqual(report()[1]["error"],"report_unavailable")
+        self.allow_retry(c)
+        self.assertEqual(self.refresh_quota(c), 1)
+        self.assertTrue(self.wait_quota(c, "unavailable")["stale"])
         calls = [json.loads(line) for line in (home/"usage-calls").read_text().splitlines()]
         self.assertEqual(calls, [["--output-format","json","--settings",
                                  '{"disableSlashCommands":false}',"-p","/usage"]] * (2 + len(invalid)))
@@ -253,35 +287,78 @@ class Antigravity(unittest.TestCase):
         self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
 
     def test_panel_usage_rechecks_profile_and_login_after_native_exit(self):
-        from concurrent.futures import ThreadPoolExecutor
-        c = self.profile("hold", enable=False)
+        c = self.profile("hold")
         cid, home = str(c["id"]), Path(c["home"])
         self.assertEqual(self.s.cli("login",cid).returncode,0)
         token = home/".gemini/antigravity-cli/antigravity-oauth-token"
         hold = home/"hold-report"
-        with ThreadPoolExecutor(max_workers=1) as worker:
-            for n in (1, 2):
-                hold.touch()
-                try:
-                    result = worker.submit(self.s.api,"POST",f"accounts/{cid}/quota/report",{})
-                    calls = home/"usage-calls"
-                    deadline = time.monotonic() + 5
-                    while not calls.exists() or len(calls.read_text().splitlines()) < n:
-                        self.assertLess(time.monotonic(),deadline)
-                        time.sleep(.02)
-                    if n == 1:
-                        status, _, _ = self.s.api("PATCH",f"accounts/{cid}",
-                                                  {"revision":c["revision"],"label":"changed"})
-                        self.assertEqual(status,200)
-                    else:
-                        replacement = token.with_suffix(".replacement")
-                        replacement.touch(mode=0o600)
-                        replacement.write_text("inert fixture marker")
-                        replacement.replace(token)
-                finally:
-                    hold.unlink()
-                status, body, _ = result.result()
-                self.assertEqual((status,body["error"]),(409,"stale_config"))
+        for n, edit in enumerate(({"label":"changed"}, {"proxy_mode":"direct"}, None), start=1):
+            hold.touch()
+            try:
+                self.assertEqual(self.refresh_quota(stale_only=True), 1)
+                calls = home/"usage-calls"
+                deadline = time.monotonic() + 5
+                while not calls.exists() or len(calls.read_text().splitlines()) < n:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.02)
+                self.assertEqual(self.refresh_quota(c), 0)
+                self.assertEqual(self.refresh_quota(), 0)
+                if edit:
+                    status, c, _ = self.s.api("PATCH", f"accounts/{cid}", dict(edit, revision=c["revision"]))
+                    self.assertEqual(status, 200)
+                else:
+                    replacement = token.with_suffix(".replacement")
+                    replacement.touch(mode=0o600)
+                    replacement.write_text("inert fixture marker")
+                    replacement.replace(token)
+            finally:
+                hold.unlink()
+            self.assertIsNone(self.wait_quota(c, "not_checked").get("snapshot"))
+        self.assertEqual(self.refresh_quota(stale_only=True), 1)
+        self.wait_quota(c, "fresh")
+        self.assertEqual(json.loads((home/"last-run").read_text())["proxy"], [None]*4)
+        self.allow_retry(c)
+        self.assertEqual(self.refresh_quota(stale_only=True), 0)  # Fresh even outside cooldown.
+        token.unlink()
+        self.assertIsNone(self.wait_quota(c, "not_checked").get("snapshot"))
+
+    def test_quota_worker_never_runs_a_replaced_or_unsupported_binary(self):
+        c = self.profile("pinned")
+        self.assertEqual(self.s.cli("login", str(c["id"])).returncode, 0)
+        exe = self.s.root/"bin/agy"
+        exe.write_text(exe.read_text().replace('print("1.5.14")', 'print("1.5.99")'))
+        self.assertEqual(self.refresh_quota(stale_only=True), 1)
+        self.assertIsNone(self.wait_quota(c, "unavailable")["snapshot"])
+        self.s.stop()
+        self.s.start()
+        self.s.session = self.s.api("POST", "login", {"password": self.s.password})[1]["session"]
+        self.assertFalse(self.s.api("GET", "accounts?tool=agy")[1]["supported"])
+        self.allow_retry(c)
+        self.assertEqual(self.refresh_quota(c), 1)
+        self.assertIsNone(self.wait_quota(c, "unavailable")["snapshot"])
+        self.assertFalse((Path(c["home"])/"usage-calls").exists())
+
+    def test_bulk_skips_profile_disabled_while_waiting_for_shared_slot(self):
+        held = [Path(self.s.account("claude", name)["home"]) for name in ("a", "b")]
+        for home in held:
+            (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
+            (home/"hold-fetch").touch()
+        try:
+            self.assertEqual(self.refresh_quota(), 2)
+            deadline = time.monotonic() + 5
+            while not all((home/"quota-count").exists() for home in held):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.02)
+            queued = self.profile("queued")
+            self.assertEqual(self.s.cli("login", str(queued["id"])).returncode, 0)
+            self.assertEqual(self.refresh_quota(stale_only=True), 1)
+            self.assertEqual(self.s.api("PATCH", f"accounts/{queued['id']}", {
+                "revision":queued["revision"], "enabled":False})[0], 200)
+        finally:
+            for home in held:
+                (home/"hold-fetch").unlink()
+        self.assertIsNone(self.wait_quota(queued, "not_checked").get("snapshot"))
+        self.assertFalse((Path(queued["home"])/"usage-calls").exists())
 
     def test_acp_correlates_opaque_ids_and_checks_owner_before_forwarding(self):
         a,b=self.profile("a"),self.profile("b")
@@ -355,6 +432,14 @@ class Antigravity(unittest.TestCase):
     def test_acp_priority_pins_connection_and_native_reports_remain_unranked(self):
         a,b = self.profile("a"),self.profile("b")
         self.assertEqual(self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"priority":90})[0],200)
+        for c in (a, b):
+            self.assertEqual(self.s.cli("login", str(c["id"])).returncode, 0)
+        (Path(a["home"])/"report.json").write_text(json.dumps({
+            "status":"SUCCESS", "num_turns":0, "command":{"name":"usage", "data":{"groups":[
+                {"name":"Gemini Models", "buckets":[{"window":"weekly", "remaining_fraction":0}]}]}}}))
+        self.assertEqual(self.refresh_quota(stale_only=True), 2)
+        self.assertEqual(self.wait_quota(a, "fresh")["snapshot"]["windows"][0]["used_pct"], 100)
+        self.wait_quota(b, "fresh")
         self.assertEqual(self.s.api("PUT","settings",{"routing_mode":"priority"})[0],200)
         new = lambda n: (n,"session/new",{"fixtureId":str(n),"cwd":"/work"})
         self.bridge([],new(1),new(2))
@@ -364,6 +449,12 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(self.s.api("GET","sessions")[1]["items"][0]["config_id"],a["id"])
         result, = self.bridge(["--for-session","1"],(1,"session/resume",{"sessionId":"1"}))
         self.assertEqual(result["result"]["home"],b["home"])
+        with closing(sqlite3.connect(self.s.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("UPDATE quota_cache SET success_ms=1,attempt_ms=1,retry_ms=0")
+        self.bridge([], new(4))
+        for c in (a, b):
+            self.assertTrue(self.wait_quota(c, "fresh")["stale"])
+            self.assertEqual(len((Path(c["home"])/"usage-calls").read_text().splitlines()), 1)
 
     def test_conflicting_native_reply_is_not_released_or_rebound(self):
         a = self.profile("a")
