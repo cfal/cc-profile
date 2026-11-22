@@ -43,7 +43,6 @@ const ready = {
   unsupported_build: "Native build unavailable or unsupported",
 };
 const quotaStates = {
-  native_report: "Native quota report",
   not_checked: "Not checked",
   sign_in_required: "Sign-in required",
   rate_limited: "Rate limited",
@@ -603,13 +602,15 @@ function resetTime(ms) {
     : el("time", {class: "reset-time", datetime: d.toISOString(), title: d.toLocaleString()},
         el("span", {}, fmt(ms)), " ", el("span", {class: mins > 0 ? "countdown" : ""}, "· " + delta));
 }
-function quotaDetails(q) {
+function quotaDetails(q, tool) {
   const s = q.snapshot, details = document.createDocumentFragment();
   details.append(el("p", {class: "caption"}, [
     (!q.success_ms || q.loading || q.stale || q.status !== "fresh") && quotaText(q),
     q.stale && q.status !== "fresh" && (quotaStates[q.status] || "Unavailable"),
+    s && tool === "agy" && "Model-pool limits",
     s?.plan,
     q.success_ms && "Last checked " + fmt(q.success_ms),
+    !q.loading && q.status !== "fresh" && q.retry_ms > Date.now() && "Retry after " + new Date(q.retry_ms).toLocaleTimeString(),
   ].filter(Boolean).join(" · ")));
   for (const w of s?.windows || []) {
     const remaining = 100 - w.used_pct;
@@ -661,40 +662,17 @@ function quotaDetails(q) {
   }
   return details;
 }
-function modelPoolReport(windows) {
-  const groups = new Map();
-  for (const w of windows) {
-    if (!groups.has(w.group))
-      groups.set(w.group, el("section", {class: "quota-card"}, el("h3", {}, w.group)));
-    const reset = w.reset_at_ms == null ? null : new Date(w.reset_at_ms);
-    groups.get(w.group).append(el("div", {class: "quota"},
-      el("strong", {}, w.window),
-      el("div", {}, percent(w.remaining_pct) + " left",
-        el("progress", {value: w.remaining_pct, max: 100, "aria-label": w.group + ", " + w.window + " remaining"})),
-      reset ? el("time", {datetime: reset.toISOString()}, "Resets " + reset.toLocaleString(undefined, {
-        timeZone: "UTC", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
-      }) + " UTC") : text("Reset unknown", "caption")));
-  }
-  return Array.from(groups.values());
-}
 function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   const link = showProfile && el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id});
   const badge = showProfile && pill("Disabled");
   let submitting = false, loading = false;
   // Keep keyboard focus while either the request or the daemon's quota check is pending.
   const syncButton = () => button.setAttribute("aria-disabled", String(submitting || loading));
-  const native = c.tool === "agy";
-  const button = ib(native ? "View native quota report" : "Refresh quota", native ? "activity" : "refresh-cw", async () => {
+  const button = ib("Refresh quota", "refresh-cw", async () => {
     if (submitting || loading) return;
     submitting = true;
     syncButton();
     try {
-      if (native) {
-        const result = await api("accounts/" + c.id + "/quota/report", "POST", {});
-        if (section.isConnected && !dialog.open)
-          modal("Model-pool limits: " + c.label, modelPoolReport(result.windows), "Close");
-        return;
-      }
       await api("accounts/" + c.id + "/quota/refresh", "POST", {});
       await refreshed();
     } finally {
@@ -703,10 +681,6 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
     }
   });
   const body = el("div");
-  if (native) {
-    const cmd = "ccp usage " + c.id;
-    body.append(el("div", {class: "row"}, code(cmd), ib("Copy quota command", "copy", () => copy(cmd))));
-  }
   const section = el("section", {class: "quota-card"}, el("div", {class: "sectionhead"},
     el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body);
   function update(profile) {
@@ -718,7 +692,7 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
     }
     loading = !!profile.quota.loading;
     syncButton();
-    if (!native) body.replaceChildren(quotaDetails(profile.quota));
+    body.replaceChildren(quotaDetails(profile.quota, profile.tool));
   }
   update(c);
   return {section, update};
@@ -747,7 +721,7 @@ function openDashboard(profiles) {
     if (current === seq && overview.isConnected) draw(rows);
   }
   function draw(rows) {
-    all.disabled = !rows.some((c) => c.enabled && c.tool !== "agy");
+    all.disabled = !rows.some((c) => c.enabled);
     empty.hidden = rows.length > 0;
     const ids = new Set(rows.map((c) => c.id));
     for (const [id, card] of cards) {
@@ -768,7 +742,7 @@ function openDashboard(profiles) {
     if (rows.some((c) => c.quota.loading)) poll = setTimeout(guard(read), 1000);
   }
   draw(profiles);
-  if (profiles.some((c) => c.enabled && c.tool !== "agy")) guard(() => refresh(true))();
+  if (profiles.some((c) => c.enabled)) guard(() => refresh(true))();
   return log;
 }
 // A poll or full Accounts refresh may overlap a cancel/retry. Only use a
@@ -922,7 +896,7 @@ async function accounts(params, ver, enter) {
   for (const a of data.items) {
     const q = a.quota;
     const windows = (q.snapshot?.windows || [])
-      .filter((w) => w.kind === "account" && Number.isFinite(w.used_pct)).slice(0, 2);
+      .filter((w) => w.kind === (t === "agy" ? "model" : "account") && Number.isFinite(w.used_pct)).slice(0, 2);
     const summary = windows.map((w) => w.label + " " + percent(100 - w.used_pct) + " left")
       .join(" · ");
     list.append(
@@ -1043,7 +1017,7 @@ async function accounts(params, ver, enter) {
           "Create a profile or use an existing directory.",
         ),
   );
-  if (enter && t !== "agy") {
+  if (enter) {
     await api("quota/refresh", "POST", { stale_only: true });
     if (ver === version) timer = setTimeout(() => render().catch((e) => notice(e.message)), 400);
   } else if (data.items.some((a) => a.quota.loading))

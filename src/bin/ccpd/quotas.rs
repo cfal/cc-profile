@@ -1,5 +1,3 @@
-mod agy_usage;
-
 use crate::service::{Shared, blocking};
 use axum::{
     Json,
@@ -60,9 +58,6 @@ fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {
     }
 }
 pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
-    if c.tool == "agy" {
-        return Ok(json!({"status":"native_report","loading":false}));
-    }
     let busy = j.active.lock().unwrap().contains(&c.id);
     let Some(stamp) = inputs(c) else {
         return Ok(json!({"status":"unavailable","loading":busy}));
@@ -108,20 +103,12 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
             Scope::All => configs(&db, "claude")?
                 .into_iter()
                 .chain(configs(&db, "codex")?)
+                .chain(configs(&db, "agy")?)
                 .filter(|c| c.enabled)
                 .collect(),
         };
         let mut jobs = Vec::new();
         for c in cs {
-            if c.tool == "agy" {
-                if matches!(scope, Scope::Account(_)) {
-                    return Err(Error::bad(
-                        "native_report",
-                        "Request the native quota report instead.",
-                    ));
-                }
-                continue;
-            }
             let Some(stamp) = inputs(&c) else { continue };
             let cache = cached(&db, c.id)?;
             if cache.as_ref().is_some_and(|r| {
@@ -170,6 +157,8 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                     // Discard numbers if inputs changed in flight, not a provider's Retry-After.
                     let (status, success, snapshot) = if inputs(&config(db, id)?).as_ref() == Some(&stamp) {
                         (status, success, snapshot)
+                    } else if c.tool == "agy" {
+                        return Ok(());
                     } else {
                         (if status=="fresh" { "unavailable" } else { status }, None, None)
                     };
@@ -216,78 +205,4 @@ pub async fn one(
         StatusCode::ACCEPTED,
         queue(s, Scope::Account(id), false).await?,
     ))
-}
-
-// Model pools describe this explicit native lookup, not account-wide routing capacity.
-pub async fn report(
-    State(s): State<Shared>,
-    Path(id): Path<i64>,
-) -> Result<Json<agy_usage::Report>> {
-    use ccpd::{
-        agy,
-        native::{clean_command, unsupported_build},
-    };
-    use std::{process::Stdio, time::Duration};
-    use tokio::io::AsyncReadExt;
-    let c = config(&*s.store.db()?, id)?;
-    if c.tool != "agy" {
-        return Err(Error::bad(
-            "wrong_tool",
-            "Use this provider's quota meters.",
-        ));
-    }
-    if !c.present() || !s.agy.supported || !s.agy.unchanged() {
-        return Err(unsupported_build());
-    }
-    let Some(login) = agy::login_stamp(&c.home)? else {
-        return Err(Error::bad(
-            "sign_in_required",
-            "Sign in to this profile first.",
-        ));
-    };
-    let _slot = s.quotas.slots.try_acquire().map_err(|_| {
-        Error::conflict("busy", "Another quota check is running. Try again shortly.")
-    })?;
-    let unavailable = || {
-        Error::unavailable(
-            "report_unavailable",
-            "Native quota report unavailable. Run ccp usage for this profile in your terminal.",
-        )
-    };
-    let rt = agy::Runtime::new()?;
-    let mut cmd = clean_command(&s.agy.bin, &c.home, Some(&c));
-    rt.configure(&mut cmd, &c.home, &agy::usage_args(true));
-    cmd.env("NO_COLOR", "1")
-        .env("BROWSER", "/bin/false")
-        .stdout(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|_| unavailable())?;
-    let output = tokio::time::timeout(Duration::from_secs(15), async {
-        const MAX_REPORT: usize = 64 * 1024;
-        let mut bytes = Vec::new();
-        child
-            .stdout
-            .take()
-            .unwrap()
-            .take(MAX_REPORT as u64 + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| unavailable())?;
-        if bytes.len() > MAX_REPORT || !child.wait().await.map_err(|_| unavailable())?.success() {
-            return Err(unavailable());
-        }
-        agy_usage::parse(&bytes).ok_or_else(unavailable)
-    })
-    .await
-    .map_err(|_| unavailable())??;
-    let current = config(&*s.store.db()?, id)?;
-    if current.revision != c.revision
-        || !current.present()
-        || agy::login_stamp(&current.home)? != Some(login)
-    {
-        return Err(Error::conflict(
-            "stale_config",
-            "Profile or login changed during quota lookup.",
-        ));
-    }
-    Ok(Json(output))
 }

@@ -1,3 +1,5 @@
+mod agy_usage;
+
 use crate::{
     native::{Build, PROXIES, clean_command, stamp},
     paths, rpc,
@@ -24,7 +26,7 @@ pub fn auth_stamp(c: &Config) -> String {
     };
     stamp(&path)
 }
-// Bind numbers to the inputs used to fetch them, not to label, priority, Current or Enabled.
+// Claude and Codex observations are independent of edits to label, priority or routing state.
 fn input_stamp(c: &Config, auth: &str) -> (String, bool) {
     let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
     // Older normalizers collapsed malformed reset timestamps into trustworthy-looking nulls.
@@ -50,7 +52,16 @@ fn input_stamp(c: &Config, auth: &str) -> (String, bool) {
     )
 }
 pub fn inputs(c: &Config) -> Option<String> {
-    (c.tool != "agy" && c.present()).then(|| input_stamp(c, &auth_stamp(c)).0)
+    if !c.directory_matches() {
+        return None;
+    }
+    let auth = if c.tool == "agy" {
+        let login = crate::agy::login_stamp(&c.home).ok()?;
+        json!(["agy-usage-v1", c.revision, login]).to_string()
+    } else {
+        auth_stamp(c)
+    };
+    Some(input_stamp(c, &auth).0)
 }
 fn absent(path: &Path) -> bool {
     path.symlink_metadata()
@@ -109,7 +120,7 @@ fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
 // Only called for present profiles. Cache failures or unidentifiable logins cannot deny a launch.
 pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
     if c.tool == "agy" {
-        return None; // Native text reports do not provide structured account-wide allowances.
+        return None; // A model pool, even an exhausted one, is not an account-wide allowance.
     }
     let (stamp, snapshot): (String, String) = db
         .prepare_cached(
@@ -378,7 +389,7 @@ pub async fn fetch(c: &Config, build: &Build, curl: Option<&Path>, cwd: &Path) -
         return Err(unavailable().into());
     }
     if c.tool == "agy" {
-        return Err(unavailable().into());
+        return Ok(agy_usage::fetch(c, build).await?);
     }
     if c.tool == "codex" {
         let (mut client, quota) = tokio::time::timeout(Duration::from_secs(12), async {
