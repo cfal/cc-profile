@@ -312,8 +312,21 @@ pub(super) async fn run(
         }
         Ok(status(child.wait().await?))
     };
+    let tui = req.argv.is_empty() || agy::conversation_arg(&req.argv).is_some();
+    let shutdown = async {
+        loop {
+            let sig = signals.recv().await;
+            // A foreground TUI already receives terminal Ctrl+C with its launcher.
+            if !(tui
+                && sig == libc::SIGINT
+                && unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) == libc::getpgrp() })
+            {
+                return sig;
+            }
+        }
+    };
     tokio::select! {
         r=pump=>r,
-        s=signals.recv()=>{stop(&mut child,s).await;Ok(ExitCode::from((128+s) as u8))}
+        s=shutdown=>{stop(&mut child,s).await;Ok(ExitCode::from((128+s) as u8))}
     }
 }

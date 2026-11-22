@@ -20,6 +20,15 @@ obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy",
        "runtime": str(rt), "home": str(home), "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
 if not args:
+    if (home/"interactive-test").exists():
+        import signal
+        def interrupted(*_):
+            with (home/"interrupts").open("a") as f:
+                f.write("SIGINT\n")
+        signal.signal(signal.SIGINT, interrupted)
+        (home/"tui-ready").touch()
+        print(input(), flush=True)
+        sys.exit()
     print("fixture Antigravity TUI")
     sys.exit()
 if args == ["models"]:

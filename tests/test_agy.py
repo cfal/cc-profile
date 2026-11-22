@@ -1,8 +1,11 @@
 import json
 import os
 from pathlib import Path
+import pty
 import select
+import signal
 import subprocess
+import time
 import unittest
 import uuid
 
@@ -66,6 +69,39 @@ class Antigravity(unittest.TestCase):
         for args in [("--continue",), ("--conversation","unknown"), ("--settings","{}")]:
             self.assertNotEqual(self.s.cli("agy",*args).returncode,0)
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+
+    def test_nonfatal_tui_interrupt_is_delivered_once(self):
+        home = Path(self.profile("terminal")["home"])
+        (home/"interactive-test").touch()
+        pid, fd = pty.fork()
+        if not pid:
+            os.chdir(self.s.root)
+            os.execve(svc.LAUNCHER,[str(svc.LAUNCHER),"agy"],self.s.env)
+        try:
+            deadline = time.monotonic() + 5
+            while not (home/"tui-ready").exists():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.03)
+            os.write(fd,b"\x03")
+            time.sleep(2.3)
+            os.write(fd,b"still here\n")
+            deadline = time.monotonic() + 5
+            while True:
+                done, status = os.waitpid(pid,os.WNOHANG)
+                if done:
+                    pid = 0
+                    self.assertEqual(status,0)
+                    break
+                self.assertLess(time.monotonic(),deadline)
+                time.sleep(.03)
+            self.assertEqual((home/"interrupts").read_text().splitlines(),["SIGINT"])
+        finally:
+            if pid:
+                try: os.killpg(pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                try: os.waitpid(pid,0)
+                except ChildProcessError: pass
+            os.close(fd)
 
     def test_provider_named_link_dispatches_tui_and_acp(self):
         self.profile("linked")
