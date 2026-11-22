@@ -146,14 +146,18 @@ sys.exit(17)
                 self.assertEqual((p.returncode,p.stdout),(1,""))
 
     def test_denial_sends_override_names_not_values_and_does_not_retry(self):
-        self.env["ANTHROPIC_API_KEY"]="private-override"
         self.respond=lambda path,r:(409,{"message":"owner disabled"})
-        p=self.run_ccp("claude","--resume","id")
-        self.assertEqual((p.returncode,p.stdout,p.stderr),(1,"","ccp: owner disabled\n"))
-        (path,raw),=self.calls
-        self.assertEqual(path,"/v2/launch")
-        self.assertEqual(json.loads(raw)["override_names"],["ANTHROPIC_API_KEY"])
-        self.assertNotIn(b"private-override",raw)
+        for args, key in [(("claude","--resume","id"),"ANTHROPIC_API_KEY"), (("codex",),"CODEX_ACCESS_TOKEN")]:
+            with self.subTest(key=key):
+                self.env[key]="private-override"
+                self.calls.clear()
+                p=self.run_ccp(*args)
+                self.assertEqual((p.returncode,p.stdout,p.stderr),(1,"","ccp: owner disabled\n"))
+                (path,raw),=self.calls
+                self.assertEqual(path,"/v2/launch")
+                self.assertEqual(json.loads(raw)["override_names"],[key])
+                self.assertNotIn(b"private-override",raw)
+                del self.env[key]
 
     def test_profile_login_never_falls_back_to_current_or_an_unrelated_command(self):
         for changes in [{"config_id": 8}, {"decision": "current"}, {"argv": ["chat"]}]:

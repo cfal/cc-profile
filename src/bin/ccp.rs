@@ -56,6 +56,7 @@ const CLAUDE_OVERRIDES: &[&str] = &[
 const CODEX_OVERRIDES: &[&str] = &[
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
     "OPENAI_BASE_URL",
     "CODEX_SQLITE_HOME",
     "CODEX_MANAGED_CONFIG_PATH",
