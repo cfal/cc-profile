@@ -234,7 +234,7 @@ async fn run() -> Result<ExitCode> {
     let alias = invoked
         .as_deref()
         .and_then(|p| Path::new(p).file_name())
-        .filter(|name| *name == "codex" || *name == "claude");
+        .filter(|name| matches!(name.to_str(), Some("codex" | "claude" | "agy")));
     let first = alias.map(OsString::from).or_else(|| args.next());
     let mut login_profile = None;
     let login_tool: String;

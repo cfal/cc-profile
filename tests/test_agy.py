@@ -67,6 +67,19 @@ class Antigravity(unittest.TestCase):
             self.assertNotEqual(self.s.cli("agy",*args).returncode,0)
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
 
+    def test_provider_named_link_dispatches_tui_and_acp(self):
+        self.profile("linked")
+        alias = self.s.root / "aliases/agy"
+        alias.parent.mkdir()
+        alias.symlink_to(svc.LAUNCHER)
+        self.s.env["PATH"] = str(alias.parent) + ":" + self.s.env["PATH"]
+        for args, wire, expected in [([], "", "fixture Antigravity TUI"),
+                (["acp"], '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n', '"protocolVersion"')]:
+            result = subprocess.run(["agy", *args], input=wire, text=True, capture_output=True,
+                                    env=self.s.env, cwd=self.s.root, timeout=8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(expected, result.stdout)
+
     def test_tui_resume_uses_the_unique_saved_file_not_rotation(self):
         a, b = self.profile("first"), self.profile("owner")
         uid = str(uuid.uuid4())

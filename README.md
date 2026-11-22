@@ -29,6 +29,7 @@ To route interactive shell commands, add these to your shell startup file:
 ```sh
 alias codex='ccp codex'
 alias claude='ccp claude'
+alias agy='ccp agy'
 ```
 
 For programs that don't expand shell aliases, use a separate directory of launcher links instead. For the install above:
@@ -37,6 +38,7 @@ For programs that don't expand shell aliases, use a separate directory of launch
 mkdir -p "$HOME/.local/ccp-bin"
 ln -s "$HOME/.local/bin/ccp" "$HOME/.local/ccp-bin/codex"
 ln -s "$HOME/.local/bin/ccp" "$HOME/.local/ccp-bin/claude"
+ln -s "$HOME/.local/bin/ccp" "$HOME/.local/ccp-bin/agy"
 export PATH="$HOME/.local/ccp-bin:$PATH"
 ```
 

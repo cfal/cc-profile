@@ -43,9 +43,13 @@ class NativeACP(unittest.TestCase):
             return subprocess.run(["hty", *args], capture_output=True, text=True, timeout=18)
         self.addCleanup(hty, "delete", name)
         self.addCleanup(hty, "kill", name)
+        alias = s.root / "aliases/agy"
+        alias.parent.mkdir()
+        alias.symlink_to(svc.LAUNCHER)
+        s.env["PATH"] = str(alias.parent) + ":" + s.env["PATH"]
         p = hty("run", "--name", name, "--snapshot", "--wait-until-text", "Google OAuth", "--timeout", "10000",
                 "--", "env", "-i", "-C", str(s.root), "TERM=xterm-256color",
-                *(f"{k}={v}" for k,v in s.env.items()), str(svc.LAUNCHER), "agy")
+                *(f"{k}={v}" for k,v in s.env.items()), os.getenv("CCP_TEST_AGY_ALIAS", str(alias)))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("Google OAuth", p.stdout)
         row, = s.api("GET","startups?tool=agy")[1]["items"]
