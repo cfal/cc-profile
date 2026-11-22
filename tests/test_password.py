@@ -79,6 +79,25 @@ class PanelPassword(unittest.TestCase):
         self.assertEqual(s.api("POST","login",{"password":s.password})[0],401)
         self.assertEqual(s.api("POST","login",{"password":new})[0],200)
 
+    def test_panel_password_change_verifies_current_password_and_revokes_sessions(self):
+        s = self.s
+        _, account, _ = s.api("POST", "setup", {"password": s.password})
+        other_tab = s.api("POST", "login", {"password": s.password})[1]["session"]
+        change = {"current_password": s.password, "new_password": "1234"}
+        self.assertEqual(s.api("POST", "password", change)[0], 403)
+        s.session = account["session"]
+        self.assertEqual(s.api("POST", "password", change, {"Origin": "https://example.invalid"})[0], 403)
+        self.assertEqual(s.api("POST", "password", dict(change, current_password="wrong"))[0], 400)
+        self.assertEqual(s.api("POST", "password", dict(change, new_password="abc"))[0], 400)
+        self.assertEqual(s.api("POST", "password", change)[:2], (200, {}))
+        self.assertFalse(s.api("GET", "session")[1]["signed_in"])
+        s.session = other_tab
+        self.assertEqual(s.api("GET", "accounts?tool=codex")[0], 403)
+        s.stop()
+        s.start()
+        self.assertEqual(s.api("POST", "login", {"password": s.password})[0], 401)
+        self.assertEqual(s.api("POST", "login", {"password": "1234"})[0], 200)
+
     def test_upgrading_an_existing_router_keeps_mappings_and_rejects_old_tokens(self):
         s=self.s
         s.stop()
@@ -98,7 +117,11 @@ class PanelPassword(unittest.TestCase):
 
     def test_password_guessing_is_throttled(self):
         s=self.s
-        self.assertEqual(s.api("POST","setup",{"password":s.password})[0],200)
-        for _ in range(5):
+        status, data, _ = s.api("POST","setup",{"password":s.password})
+        self.assertEqual(status, 200)
+        s.session = data["session"]
+        self.assertEqual(s.api("POST","password",{"current_password":"wrong","new_password":"1234"})[0],400)
+        for _ in range(4):
             self.assertEqual(s.api("POST","login",{"password":"incorrect password"})[0],401)
         self.assertEqual(s.api("POST","login",{"password":s.password})[0],429)
+        self.assertEqual(s.api("POST","password",{"current_password":s.password,"new_password":"1234"})[0],429)

@@ -56,15 +56,19 @@ pub fn already_set() -> Error {
         "A panel password is already set. Sign in instead.",
     )
 }
-pub fn save(store: &Store, hash: String, first_only: bool) -> Result<i64> {
+pub fn save(store: &Store, hash: String, expected_revision: Option<i64>) -> Result<i64> {
     store.write(|db| {
         let changed = db.execute(
             "UPDATE panel_password SET verifier=?,revision=revision+1
-            WHERE id=1 AND (NOT ? OR revision=0)",
-            params![hash, first_only],
+            WHERE id=1 AND (?2 IS NULL OR revision=?2)",
+            params![hash, expected_revision],
         )?;
         if changed != 1 {
-            return Err(already_set());
+            return Err(if expected_revision == Some(0) {
+                already_set()
+            } else {
+                Error::conflict("password_changed", "Panel password changed. Sign in again.")
+            });
         }
         Ok(
             db.query_row("SELECT revision FROM panel_password WHERE id=1", [], |r| {
@@ -94,7 +98,7 @@ pub fn prompt() -> Result<()> {
     }
     let verifier = hash(&new)?;
     let store = Store::open_user(&state)?;
-    save(&store, verifier, false)?;
+    save(&store, verifier, None)?;
     eprintln!(
         "Password set for {}. Previous browser sessions for this panel are signed out.",
         database.display()

@@ -230,6 +230,7 @@ pub fn web(s: Shared) -> Router {
         )
         .route("/api/v1/setup", post(auth::setup))
         .route("/api/v1/login", post(auth::login))
+        .route("/api/v1/password", post(auth::change_password))
         .route("/api/v1/session", get(auth::session))
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/accounts", get(accounts).post(add))

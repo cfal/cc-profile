@@ -50,6 +50,30 @@ impl Auth {
             .map(|_| ())
             .ok_or_else(Error::denied)
     }
+    fn verify(&self, password: &str, verifier: &str, rev: i64) -> Result<bool> {
+        let recent = |r: i64, time: Instant| r == rev && time.elapsed() < Duration::from_secs(30);
+        if self
+            .failures
+            .lock()
+            .unwrap()
+            .is_some_and(|(r, n, t)| recent(r, t) && n >= 5)
+        {
+            return Err(limited());
+        }
+        let valid = password::matches(password, verifier)?;
+        let mut failures = self.failures.lock().unwrap();
+        if failures.is_none_or(|(r, _, _)| r <= rev) {
+            if valid {
+                *failures = None;
+            } else {
+                let count = failures
+                    .filter(|(r, _, t)| recent(*r, *t))
+                    .map_or(1, |(_, n, _)| n.saturating_add(1));
+                *failures = Some((rev, count, Instant::now()));
+            }
+        }
+        Ok(valid)
+    }
 }
 #[derive(Deserialize)]
 pub struct Login {
@@ -83,7 +107,7 @@ async fn authenticate(s: Shared, v: Login, setup: bool) -> Result<Response> {
             if verifier.is_some() {
                 return Err(password::already_set());
             }
-            return password::save(&a.store, password::hash(&v.password)?, true);
+            return password::save(&a.store, password::hash(&v.password)?, Some(0));
         }
         let Some(verifier) = verifier else {
             return Err(Error::conflict(
@@ -91,21 +115,7 @@ async fn authenticate(s: Shared, v: Login, setup: bool) -> Result<Response> {
                 "Set the panel password first.",
             ));
         };
-        let recent = |r: i64, time: Instant| r == rev && time.elapsed() < Duration::from_secs(30);
-        if a.auth
-            .failures
-            .lock()
-            .unwrap()
-            .is_some_and(|(r, n, t)| recent(r, t) && n >= 5)
-        {
-            return Err(limited());
-        }
-        if !password::matches(&v.password, &verifier)? {
-            let mut failures = a.auth.failures.lock().unwrap();
-            let count = failures
-                .filter(|(r, _, t)| recent(*r, *t))
-                .map_or(1, |(_, n, _)| n.saturating_add(1));
-            *failures = Some((rev, count, Instant::now()));
+        if !a.auth.verify(&v.password, &verifier, rev)? {
             return Err(Error(
                 axum::http::StatusCode::UNAUTHORIZED,
                 "wrong_password",
@@ -115,7 +125,6 @@ async fn authenticate(s: Shared, v: Login, setup: bool) -> Result<Response> {
         if password::revision(&a.store)? != rev {
             return Err(Error::denied());
         }
-        *a.auth.failures.lock().unwrap() = None;
         Ok(rev)
     })
     .await?;
@@ -132,6 +141,38 @@ async fn authenticate(s: Shared, v: Login, setup: bool) -> Result<Response> {
     }
     sessions.insert(sid.clone(), (now() + 8 * 3_600_000, revision));
     Ok(Json(json!({"session":sid})).into_response())
+}
+#[derive(Deserialize)]
+pub struct ChangePassword {
+    current_password: String,
+    new_password: String,
+}
+pub async fn change_password(
+    State(s): State<Shared>,
+    h: HeaderMap,
+    Json(v): Json<ChangePassword>,
+) -> Result<Json<Value>> {
+    let permit = s
+        .auth
+        .slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| limited())?;
+    blocking(move || {
+        let _permit = permit;
+        let (rev, verifier) = password::state(&s.store)?;
+        s.auth.signed_in(&h, rev)?;
+        if !s.auth.verify(
+            &v.current_password,
+            &verifier.ok_or_else(Error::denied)?,
+            rev,
+        )? {
+            return Err(Error::bad("wrong_password", "Incorrect current password."));
+        }
+        password::save(&s.store, password::hash(&v.new_password)?, Some(rev))?;
+        Ok(Json(json!({})))
+    })
+    .await
 }
 pub async fn session(State(s): State<Shared>, h: HeaderMap) -> Result<Json<Value>> {
     let a = s.clone();
