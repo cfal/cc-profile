@@ -384,9 +384,12 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
         }
         let invocation = parsed.as_ref().ok();
         let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
-        let server = (req.tool == "agy" || (req.tool == "codex" && req.argv.first().is_some_and(|s| s == "app-server")))
-            && invocation.is_some_and(|i| i.intent != Intent::Misc);
-        let intent = invocation.map(|i| if server && req.tool=="agy" {"acp"} else if server {"app_server"} else {i.intent.name()}).unwrap_or("unsupported");
+        let intent = invocation.map(|i| match (req.tool.as_str(), req.argv.first().map(String::as_str), &i.intent) {
+            ("agy", None, Intent::New) => "tui",
+            ("agy", Some("acp"), Intent::New | Intent::Resume(_)) => "acp",
+            ("codex", Some("app-server"), Intent::New | Intent::Resume(_)) => "app_server",
+            _ => i.intent.name(),
+        }).unwrap_or("unsupported");
         let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);
         let mode = if invocation.is_some_and(|i| i.intent == Intent::New) {
             routing_mode(db)?
@@ -407,7 +410,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                 match &i.intent {
                     Intent::New => {
                         if req.tool == "claude" { id = Some(assign_claude(db, &c, &workspace, ms)?); }
-                        else if !server { state = "pending"; }
+                        else if req.tool == "codex" && intent != "app_server" { state = "pending"; }
                         db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                     }
                     Intent::Resume(uid) => {

@@ -46,6 +46,23 @@ class Antigravity(unittest.TestCase):
         self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
         self.assertEqual(self.s.cli("agy","acp").returncode,1)
 
+    def test_native_tui_selects_a_profile_without_claiming_a_session(self):
+        a = self.profile("first")
+        b = self.profile("second")
+        for owner in (a, b):
+            result = self.s.cli("agy")
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, "fixture Antigravity TUI"), result.stderr)
+            obs = json.loads((Path(owner["home"]) / "last-run").read_text())
+            self.assertEqual((obs["home"], obs["cwd"]), (owner["home"], str(self.s.root)))
+            self.assertEqual(obs["proxy"], ["https://proxy.invalid:8443/"] * 4)
+            self.assertFalse(Path(obs["runtime"]).exists())
+            row = self.s.api("GET","startups?tool=agy")[1]["items"][0]
+            self.assertEqual((row["config_id"],row["intent"],row["state"],row["native_id"]),
+                             (owner["id"],"tui","routed",None))
+        for args in [("--continue",), ("--conversation","unknown"), ("--settings","{}")]:
+            self.assertNotEqual(self.s.cli("agy",*args).returncode,0)
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+
     def test_panel_report_needs_login_and_withholds_unexpected_output(self):
         c = self.profile("report", enable=False)
         cid, home = str(c["id"]), Path(c["home"])

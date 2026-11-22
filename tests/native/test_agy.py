@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_service as svc
@@ -16,7 +17,7 @@ AGY = os.getenv("CCP_TEST_AGY") or shutil.which("agy")
 
 @unittest.skipUnless(AGY and shutil.which("bwrap"), "set CCP_TEST_AGY to the pinned Linux binary; bwrap required")
 class NativeACP(unittest.TestCase):
-    def test_initialize_and_unauthenticated_new_use_isolated_file_storage(self):
+    def setUp(self):
         class Service(svc.Service):
             def start(self):
                 # The agent sees only its disposable test filesystem, never the host bus or network.
@@ -32,6 +33,27 @@ class NativeACP(unittest.TestCase):
         _,c,_=s.api("POST","accounts",{"tool":"agy","label":"Native","create":True})
         s.api("PATCH",f"accounts/{c['id']}",{"revision":c["revision"],"enabled":True})
         s.env["DBUS_SESSION_BUS_ADDRESS"]="unix:path=/run/not-a-real-desktop-bus"
+        self.service, self.profile = s, c
+
+    @unittest.skipUnless(shutil.which("hty"), "hty required for the native terminal UI")
+    def test_bare_launch_opens_native_tui_without_creating_a_session(self):
+        s = self.service
+        name = "ccp-agy-" + uuid.uuid4().hex
+        def hty(*args):
+            return subprocess.run(["hty", *args], capture_output=True, text=True, timeout=18)
+        self.addCleanup(hty, "delete", name)
+        self.addCleanup(hty, "kill", name)
+        p = hty("run", "--name", name, "--snapshot", "--wait-until-text", "Google OAuth", "--timeout", "10000",
+                "--", "env", "-i", "-C", str(s.root), "TERM=xterm-256color",
+                *(f"{k}={v}" for k,v in s.env.items()), str(svc.LAUNCHER), "agy")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("Google OAuth", p.stdout)
+        row, = s.api("GET","startups?tool=agy")[1]["items"]
+        self.assertEqual((row["intent"], row["config_id"], row["native_id"]), ("tui", self.profile["id"], None))
+        self.assertEqual(s.api("GET","sessions?tool=agy")[1]["items"], [])
+
+    def test_initialize_and_unauthenticated_new_use_isolated_file_storage(self):
+        s, c = self.service, self.profile
         p=subprocess.Popen([svc.LAUNCHER,"agy","acp","--stdio","--disable-telemetry"],cwd=s.root,env=s.env,
                            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         with p:

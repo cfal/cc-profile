@@ -1,4 +1,4 @@
-# Antigravity ACP on Linux
+# Antigravity on Linux
 
 This adapter targets the unmodified `agy` **1.5.14** CLI. The router launches it on the execution machine; it does not run a replacement inference service, copy tokens, or implement Google's OAuth exchange.
 
@@ -11,6 +11,12 @@ This adapter targets the unmodified `agy` **1.5.14** CLI. The router launches it
 For an existing session, launch `ccp agy acp --for-session <id>` and then send native `initialize` and `session/load` with that exact ID, its workspace and the harness's MCP servers. The selector is interpreted by **ccp**, not passed to agy. Use `session/resume` instead when advertised and the harness already has the history. There is no transparent cross-account multiplexing on one connection. If the harness always spawns with static args, it must keep a suitable process alive or add the selector on reopen.
 
 The bridge correlates successful `session/new` responses by request ID and records the returned **opaque** session ID and the requested cwd before exposing the reply. An unknown session, disabled/missing owner, wrong-profile load, or unavailable router is a refusal, never permission to start a replacement session. Native errors, permission requests and client replies stay on the original stdio protocol; launcher diagnostics go to stderr. Frames must be newline-delimited UTF-8 JSON-RPC 2.0, at most 8 MiB, with at most 1024 outstanding requests. Sign in before connecting: the bridge advertises no in-band authentication methods and rejects `authenticate`. This keeps the harness from running a raw terminal login against the desktop identity. Forks, storage overrides and API-key/ADC authentication are not managed launch modes. Disabling a profile refuses subsequent new/load/resume requests without terminating an active session.
+
+## Native terminal UI
+
+For the native terminal UI, run `ccp agy` in the workspace. It inherits the terminal and uses the selected profile's private HOME, bus-less runtime and proxy. The startup log records the profile, not a conversation ID. Use ACP when another process needs to reopen an exact tracked session.
+
+On 1.5.14, `--conversation` [resumes an existing conversation](https://antigravity.google/docs/cli/commands/resume); it does not assign an ID. In a disposable, signed-out Linux profile we tried a fresh UUID directory under `conversations/` and `brain/`, an empty `conversations/<uuid>.db`, and an empty `conversations/<uuid>.pb`. The directories were ignored, the database was rejected as uninitialized, and the protobuf file as too short for ciphertext. In all cases the native CLI ignored the flag. AgY can print its own resume ID on normal exit or expose it to a configured TUI status line. The router neither scrapes terminal output nor replaces the user's status line.
 
 ## Credentials and keyrings
 
@@ -40,7 +46,7 @@ In separate offline tests, setting `ANTIGRAVITY_GEMINI_DIR` and `ANTIGRAVITY_APP
 
 On the Dashboard or in Accounts select **View native quota report**, or run `ccp usage <id>` locally. Both invoke the separate native print-mode command `agy -p /usage`, not a prompt on the ACP stream. Print mode doesn't accept ACP's directory flags; it uses the same private HOME and file-store environment instead. The dashboard requests the native text report on demand, with bounded time and output. It does not invent structured percentages or store the free-form report in SQLite. In an offline signed-out run, `agy -p /usage` offered interactive OAuth rather than quota. The dashboard skips profiles without a private token file and refuses login prompts or unsuccessful output; use the terminal command if no usable report is available. Bulk quota refresh does not run this command. Context-window usage, credit balances and subscription quota are different quantities.
 
-The custom profile proxy is supplied in both uppercase and lowercase forms of `HTTP_PROXY` and `HTTPS_PROXY` for login, ACP, and native usage. We tested the pinned Linux binary with the real launcher and daemon in a network namespace with only loopback. Local HTTP proxies recorded each CONNECT destination and returned 502 without forwarding traffic.
+The custom profile proxy is supplied in both uppercase and lowercase forms of `HTTP_PROXY` and `HTTPS_PROXY` for login, TUI, ACP, and native usage. We tested the following operations on the pinned Linux binary with the real launcher and daemon in a network namespace with only loopback. Local HTTP proxies recorded each CONNECT destination and returned 502 without forwarding traffic.
 
 | Native operation | Traffic observed at the proxy |
 | --- | --- |

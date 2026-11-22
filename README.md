@@ -1,6 +1,6 @@
 # cc-profile
 
-`ccp` starts Claude Code, Codex, or Antigravity ACP with a config chosen by a local router. By default, new chats rotate among enabled, ready profiles. Settings can instead select by remaining quota or account priority. Resuming an exact session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
+`ccp` starts Claude Code, Codex, or Antigravity with a config chosen by a local router. By default, new launches rotate among enabled, ready profiles. Settings can instead select by remaining quota or account priority. Resuming a tracked session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
 
 ## Install
 
@@ -81,7 +81,9 @@ In every mode, a fresh, matching quota reading of zero excludes that profile fro
 
 Codex quota can be displayed without being used for routing. The router ranks a Codex profile only when the native app-server confirms file-backed login and the login and config still match the reading. Keyring and auto storage, a project config override, or an ambiguous managed policy make the score unknown. Ordinary model or trust settings in the profile do not by themselves disqualify it. Antigravity's native text report is for display only.
 
-### Antigravity ACP
+### Antigravity
+
+Run `ccp agy` to open the native terminal UI in the current workspace with a profile selected by the routing policy. The TUI receives that profile's private HOME, filesystem login environment, and proxy. Its startup is logged, but conversations created inside it are **not** added to Sessions. Only the bare TUI command is supported; use ACP for tracked sessions and exact resumes.
 
 Use `ccp login <profile-id>` for native Google sign-in, then configure the harness to launch `ccp agy acp`. Use `ccp agy acp --for-session <id>` before sending a load request to reopen a session. The native processes use a private profile home and select filesystem credential storage instead of the desktop keyring. See [Antigravity setup, storage findings and verification limits](docs/antigravity.md) for the harness contract and upgrade caveats.
 

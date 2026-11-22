@@ -19,6 +19,9 @@ assert home.is_absolute()
 obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],
        "runtime": str(rt), "home": str(home), "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
+if not args:
+    print("fixture Antigravity TUI")
+    sys.exit()
 if args == ["-p", "/usage"]:
     assert Path.cwd() == home
     print("Model quotas: weekly remaining 76%" if not (home / "bad-report").exists()
