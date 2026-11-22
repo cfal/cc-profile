@@ -167,13 +167,14 @@ else:
         self.p.wait(timeout=5)
         self.p.stderr.close()
 
-    def api(self, method, route, body=None, extra=None, *, connect_host="127.0.0.1"):
+    def api(self, method, route, body=None, extra=None, *, connect_host="127.0.0.1", raw=False):
         conn = http.client.HTTPConnection(connect_host, self.port, timeout=8)
         headers = {"Origin": "http://127.0.0.1:%s" % self.port, "Content-Type": "application/json",
                    "X-CCP-Session": self.session}
         headers.update(extra or {})
         try:
-            conn.request(method, "/api/v1/" + route, json.dumps(body) if body is not None else None, headers)
+            payload = body if raw or body is None else json.dumps(body)
+            conn.request(method, "/api/v1/" + route, payload, headers)
             r = conn.getresponse()
             body = r.read()
             data = json.loads(body) if r.headers.get_content_type()=="application/json" else body.decode()
@@ -728,9 +729,15 @@ else:
             uuid.UUID(g["handle"])
         self.assertEqual(self.reset_list(r),v)
         self.assertFalse((h/"reset-consumes.jsonl").exists())
-        for body in ({}, {"creditId":selected["id"]}, {"handle":handle,"idempotencyKey":"client-key"}):
+        (h/"track-child").touch()
+        for body in ({}, [handle], {"creditId":selected["id"]}, {"handle":handle,"idempotencyKey":"client-key"}):
             status,data,_ = self.api("POST",r+"redeem",body)
             self.assertEqual((status,data["error"]),(400,"bad_request"))
+        duplicate = '{"handle":"%s","handle":"%s"}' % (v["grants"][0]["handle"],handle)
+        status,data,_ = self.api("POST",r+"redeem",duplicate,raw=True)
+        self.assertEqual((status,data.get("error")),(400,"bad_request"))
+        self.assertFalse((h/"child-pid").exists())
+        self.assertFalse((h/"reset-consumes.jsonl").exists())
         self.assertEqual(self.api("POST",r+"redeem",{"handle":handle})[:2], (200,{"outcome":"reset"}))
         def mutations():
             return [json.loads(row) for row in (h/"reset-consumes.jsonl").read_text().splitlines()]
@@ -829,10 +836,6 @@ else:
         self.assertEqual(json.loads((h/"reset-consumes.jsonl").read_text())["params"],
                          json.loads((other/"reset-consumes.jsonl").read_text())["params"])
         self.assertEqual(redeem(r,a),(200,{"outcome":"alreadyRedeemed"}))
-        for _ in range(150):
-            if all((p/"quota-count").exists() for p in [h,other]): break
-            time.sleep(.02)
-        self.assertTrue(all((p/"quota-count").exists() for p in [h,other]))
         (h/"lose-reset-reply").unlink()
         for outcome in ("nothingToReset","noCredit"):
             (h/"reset-outcome").write_text(outcome)
@@ -868,6 +871,87 @@ else:
         wait(lambda: not Path("/proc/"+(h/"held-old-pid").read_text()).exists())
         self.assertEqual(used(),0)
         self.assertEqual((h/"quota-count").read_text(),"fetch\nfetch\n")
+
+    def test_unknown_reset_fences_aliases_and_registers_refresh_before_reply(self):
+        import sqlite3
+        c,h,r,_,_ = self.reset_fixture()
+        alias,a,ar,summary,publish = self.reset_fixture("same-account")
+        # A capped list need not include the selected credit on the alias.
+        summary["credits"] = [summary["credits"][1]]
+        publish()
+        self.reset_list(ar)
+        selected=self.reset_list(r)["grants"][0]
+        def quotas():
+            return {x["id"]:x["quota"] for x in self.api("GET","accounts?tool=codex")[1]["items"]}
+        def wait(check):
+            for _ in range(200):
+                if check(): return
+                time.sleep(.02)
+            self.fail("timed out waiting for quota job")
+        for profile in (c,alias):
+            (Path(profile["home"])/"empty-quota").touch()
+            self.assertEqual(self.api("POST",f"accounts/{profile['id']}/quota/refresh",{})[1],{"queued":1})
+        wait(lambda: all(q["status"]=="fresh" and not q["loading"] for q in quotas().values()))
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("UPDATE quota_cache SET retry_ms=0 WHERE config_id=?",[alias["id"]])
+        (a/"hold-old-quota").touch()
+        (h/"hold-old-quota").touch()
+        try:
+            self.api("POST",f"accounts/{alias['id']}/quota/refresh",{})
+            wait(lambda: (a/"held-old-pid").exists())
+            self.assertEqual(self.api("PATCH",f"accounts/{alias['id']}",{"label":"renamed","revision":alias["revision"]})[0],200)
+            self.assertEqual(quotas()[alias["id"]]["snapshot"]["windows"][0]["used_pct"],100)
+            (h/"lose-reset-reply").touch()
+            (h/"empty-quota").unlink()
+            status,error,_=self.api("POST",r+"redeem",{"handle":selected["handle"]})
+            self.assertEqual((status,error["error"]),(503,"outcome_unknown"))
+            q=quotas()
+            self.assertEqual((q[c["id"]]["status"],q[c["id"]]["loading"]),("not_checked",True))
+            self.assertEqual((q[alias["id"]]["status"],q[alias["id"]]["loading"]),("not_checked",False))
+        finally:
+            (a/"hold-old-quota").unlink()
+            (h/"hold-old-quota").unlink()
+        wait(lambda: quotas()[c["id"]]["status"]=="fresh")
+        wait(lambda: not Path("/proc/"+(a/"held-old-pid").read_text()).exists())
+        self.assertEqual(quotas()[c["id"]]["snapshot"]["windows"][0]["used_pct"],0)
+        self.assertEqual(quotas()[alias["id"]]["status"],"not_checked")
+        self.assertEqual((a/"quota-count").read_text(),"fetch\nfetch\n")
+        self.assertEqual(self.reset_list(r)["grants"][0],selected)
+        self.assertEqual(len((h/"reset-consumes.jsonl").read_text().splitlines()),1)
+
+    def test_confirmed_reset_registers_only_verifiable_alias_refreshes(self):
+        c,h,r,_,_=self.reset_fixture()
+        file_alias,f,fr,_,_=self.reset_fixture("file-alias")
+        keyring,k,kr,_,_=self.reset_fixture("keyring-alias")
+        (k/"config.toml").write_text('cli_auth_credentials_store="keyring"')
+        for profile,home,route in ((file_alias,f,fr),(keyring,k,kr)):
+            (home/"auth.json").write_text("{}")
+            self.reset_list(route)
+            self.api("POST",f"accounts/{profile['id']}/quota/refresh",{})
+        def quotas():
+            return {p["id"]:p["quota"] for p in self.api("GET","accounts?tool=codex")[1]["items"]}
+        for _ in range(200):
+            q=quotas()
+            if all(q[p["id"]]["status"]=="fresh" and not q[p["id"]]["loading"] for p in (file_alias,keyring)): break
+            time.sleep(.02)
+        else: self.fail("initial alias observations failed")
+        selected=self.reset_list(r)["grants"][1]
+        for home in (h,f): (home/"hold-old-quota").touch()
+        try:
+            self.assertEqual(self.api("POST",r+"redeem",{"handle":selected["handle"]})[:2], (200,{"outcome":"reset"}))
+            q=quotas()
+            for profile in (c,file_alias):
+                self.assertEqual((q[profile["id"]]["status"],q[profile["id"]]["loading"]),("not_checked",True))
+            self.assertEqual((q[keyring["id"]]["status"],q[keyring["id"]]["loading"]),("not_checked",False))
+            self.assertEqual((k/"quota-count").read_text(),"fetch\n")
+        finally:
+            for home in (h,f): (home/"hold-old-quota").unlink()
+        for _ in range(200):
+            if not any(q["loading"] for q in quotas().values()): break
+            time.sleep(.02)
+        else: self.fail("post-reset checks did not finish")
+        self.assertEqual(quotas()[keyring["id"]]["status"],"not_checked")
+        self.assertEqual((k/"quota-count").read_text(),"fetch\n")
 
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")

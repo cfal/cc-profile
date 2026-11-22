@@ -11,6 +11,7 @@ use ccpd::{
     types::{Error, Result, now},
 };
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, time::Duration};
@@ -54,7 +55,12 @@ fn spent(db: &Connection, credit: &str) -> Result<bool> {
         )?
         .exists([credit])?)
 }
-fn profile(s: &Shared, db: &Connection, id: i64) -> Result<(Config, String)> {
+struct Profile {
+    config: Config,
+    stamp: String,
+    input: String,
+}
+fn profile(s: &Shared, db: &Connection, id: i64) -> Result<Profile> {
     let c = config(db, id)?;
     if c.tool != "codex" || !c.present() {
         return Err(stale_config());
@@ -62,13 +68,13 @@ fn profile(s: &Shared, db: &Connection, id: i64) -> Result<(Config, String)> {
     if !s.codex.supported || !s.codex.unchanged() {
         return Err(unsupported_build());
     }
-    let stamp = digest(json!([
-        id,
-        c.revision,
-        inputs(&c).ok_or_else(stale_config)?,
-        s.codex.fingerprint
-    ]));
-    Ok((c, stamp))
+    let input = inputs(&c).ok_or_else(stale_config)?;
+    let stamp = digest(json!([id, c.revision, input, s.codex.fingerprint]));
+    Ok(Profile {
+        config: c,
+        input,
+        stamp,
+    })
 }
 struct Grant {
     id: String,
@@ -197,11 +203,12 @@ pub async fn list(State(s): State<Shared>, Path(id): Path<i64>, body: Body) -> R
         return Err(Error::bad("bad_request", "Expected an empty JSON object."));
     }
     let _slot = s.identity_slots.try_acquire().map_err(|_| busy())?;
-    let (c, stamp) = profile(&s, &*s.store.db()?, id)?;
-    let (rpc, listing) = inspect(&s, &c).await?;
+    let p = profile(&s, &*s.store.db()?, id)?;
+    let (rpc, listing) = inspect(&s, &p.config).await?;
     rpc.close().await;
     s.store.write(|db| {
-        if profile(&s, db, id)?.1 != stamp { return Err(stale_config()); }
+        let stamp = p.stamp;
+        if profile(&s, db, id)?.stamp != stamp { return Err(stale_config()); }
         let mut views = Vec::new();
         for grant in listing.grants {
             if spent(db, &grant.credit)? {
@@ -239,22 +246,21 @@ fn offer(db: &Connection, id: i64, handle: &str) -> Result<Offer> {
 
 async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
     let _slot = s.reset_write.try_lock().map_err(|_| busy())?;
-    let (c, stamp, offer) = {
+    let (p, offer) = {
         let db = s.store.db()?;
-        let (c, stamp) = profile(&s, &db, id)?;
-        (c, stamp, offer(&db, id, &handle)?)
+        (profile(&s, &db, id)?, offer(&db, id, &handle)?)
     };
-    if stamp != offer.profile {
+    if p.stamp != offer.profile {
         return Err(stale_config());
     }
-    let (mut rpc, listing) = inspect(&s, &c).await.map_err(|e| {
+    let (mut rpc, listing) = inspect(&s, &p.config).await.map_err(|e| {
         if e.1 == "sign_in_required" {
             stale_config()
         } else {
             e
         }
     })?;
-    if offer.account != listing.account || profile(&s, &*s.store.db()?, id)?.1 != stamp {
+    if offer.account != listing.account || profile(&s, &*s.store.db()?, id)?.stamp != p.stamp {
         return Err(stale_config());
     }
     if let Some(outcome) = offer.outcome {
@@ -266,7 +272,7 @@ async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
         .find(|g| g.credit == offer.credit && g.details == offer.details)
         .ok_or_else(stale_grant)?;
     let key: String = s.store.write(|db| {
-        if profile(&s, db, id)?.1 != stamp { return Err(stale_config()); }
+        if profile(&s, db, id)?.stamp != p.stamp { return Err(stale_config()); }
         if grant.expires.is_some_and(|t| t <= now()) || spent(db, &offer.credit)? {
             return Err(stale_grant());
         }
@@ -287,51 +293,77 @@ async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
         ),
     )
     .await;
-    let result = reply.ok().and_then(Result::ok).ok_or_else(unknown)?;
-    let outcome = result["outcome"]
-        .as_str()
+    let result = reply.ok().and_then(Result::ok);
+    let outcome = result
+        .as_ref()
+        .and_then(|v| v["outcome"].as_str())
         .filter(|o| {
             matches!(
                 *o,
                 "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit"
             )
-        })
-        .ok_or_else(unknown)?;
-    let affected = s.store
+        });
+    let refresh = s
+        .store
         .write(|db| {
-            db.execute(
-                "UPDATE reset_grants SET outcome=?,seen_ms=? WHERE credit=? AND attempt=?",
-                params![outcome, now(), offer.credit, key],
-            )?;
-            let mut affected = vec![id];
-            let mut stmt = db.prepare("SELECT DISTINCT config_id,profile FROM reset_grants WHERE credit=? AND config_id<>?")?;
-            for row in stmt.query_map(params![offer.credit,id], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, String>(1)?)))? {
-                let (other, stamp) = row?;
-                if profile(&s, db, other).is_ok_and(|(_, current)| stamp == current) {
-                    affected.push(other);
-                }
+            if let Some(outcome) = outcome {
+                db.execute(
+                    "UPDATE reset_grants SET outcome=?,seen_ms=? WHERE credit=? AND attempt=?",
+                    params![outcome, now(), offer.credit, key],
+                )?;
             }
-            for id in &affected { s.quotas.invalidate(db, *id)?; }
-            Ok(affected)
+            retire_observations(&s, db, &p, &offer)
         })
         .map_err(|_| unknown())?;
-    tokio::spawn(quotas::after_reset(s.clone(), id, affected));
     rpc.close().await;
+    quotas::after_reset(s.clone(), id, refresh).await;
+    let outcome = outcome.ok_or_else(unknown)?;
     Ok(Json(json!({"outcome":outcome})))
+}
+
+fn retire_observations(
+    s: &Shared,
+    db: &Connection,
+    p: &Profile,
+    offer: &Offer,
+) -> Result<Vec<(i64, String)>> {
+    let selected = p.config.id;
+    let mut refresh = vec![(selected, p.input.clone())];
+    s.quotas.invalidate(db, selected)?;
+    // Old confirmations identify caches to retire, not permission to fetch a possibly different login.
+    let mut aliases = db.prepare("SELECT DISTINCT config_id FROM reset_grants WHERE (account=? OR credit=?) AND config_id<>?")?;
+    let mut bound = db.prepare(
+        "SELECT 1 FROM reset_grants WHERE config_id=? AND profile=? AND (account=? OR credit=?)",
+    )?;
+    for row in aliases.query_map(params![offer.account, offer.credit, selected], |r| {
+        r.get::<_, i64>(0)
+    })? {
+        let id = row?;
+        if let Ok(p) = profile(s, db, id)
+            && p.config.enabled
+            && bound.exists(params![id, p.stamp, offer.account, offer.credit])?
+            && quotas::verified_alias(db, id, &p.input)?
+        {
+            refresh.push((id, p.input));
+        }
+        s.quotas.invalidate(db, id)?;
+    }
+    Ok(refresh)
+}
+
+// An externally tagged field requires an object with exactly one key (not a positional array).
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Selection {
+    Handle(String),
 }
 pub async fn redeem(
     State(s): State<Shared>,
     Path(id): Path<i64>,
-    body: Body,
+    body: std::result::Result<Json<Selection>, JsonRejection>,
 ) -> Result<Json<Value>> {
-    let invalid = || Error::bad("bad_request", "Expected only the selected reset handle.");
-    let Json(v) = body.map_err(|_| invalid())?;
-    let handle = v
-        .as_object()
-        .filter(|m| m.len() == 1)
-        .and_then(|m| m.get("handle")?.as_str())
-        .ok_or_else(invalid)?
-        .to_owned();
+    let Json(Selection::Handle(handle)) =
+        body.map_err(|_| Error::bad("bad_request", "Expected only the selected reset handle."))?;
     // Finish recording the provider response even if the browser disconnects.
     tokio::spawn(consume(s, id, handle))
         .await
