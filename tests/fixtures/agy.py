@@ -64,8 +64,11 @@ if "/usage" in args:
                 {"window":"weekly","disabled":True,"remaining_fraction":0.25},
                 {"window":"weekly","remaining_amount":99},
                 {"window":"weekly","remaining_fraction":1.2},
+                {"window":"weekly","remaining_fraction":"not-a-fraction"},
                 {"window":"fixture-private","remaining_fraction":0.25}]},
             {"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","remaining_fraction":0}]},
+            {"name":"Gemini Models","disabled":True},
+            {"name":"unused","buckets":{"unknown_schema":"fixture-private"}},
             {"name":"fixture-private","buckets":[{"window":"weekly","remaining_fraction":1}]}]}}}))
     sys.exit()
 assert args[0] == "acp" and args[-4:] == ["--gemini-dir",str(home/".gemini"),"--app-data-dir","antigravity-cli"], args

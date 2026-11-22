@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Deserialize)]
@@ -24,7 +25,8 @@ struct Group {
     name: String,
     #[serde(default)]
     disabled: bool,
-    buckets: Vec<Bucket>,
+    #[serde(default)]
+    buckets: Value,
 }
 
 #[derive(Deserialize)]
@@ -66,7 +68,13 @@ pub fn parse(bytes: &[u8]) -> Option<Report> {
         else {
             continue;
         };
-        for b in group.buckets {
+        let Value::Array(rows) = group.buckets else {
+            continue;
+        };
+        for b in rows
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<Bucket>(v).ok())
+        {
             let Some(fraction) = b.remaining_fraction.filter(|v| (0.0..=1.0).contains(v)) else {
                 continue;
             };
