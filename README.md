@@ -24,6 +24,24 @@ On x86-64 the outputs are `target/x86_64-unknown-linux-musl/release/{ccp,ccpd,cc
 
 Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path --agy-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
 
+To route interactive shell commands, add these to your shell startup file:
+
+```sh
+alias codex='ccp codex'
+alias claude='ccp claude'
+```
+
+For programs that don't expand shell aliases, use a separate directory of launcher links instead. For the install above:
+
+```sh
+mkdir -p "$HOME/.local/ccp-bin"
+ln -s "$HOME/.local/bin/ccp" "$HOME/.local/ccp-bin/codex"
+ln -s "$HOME/.local/bin/ccp" "$HOME/.local/ccp-bin/claude"
+export PATH="$HOME/.local/ccp-bin:$PATH"
+```
+
+Link to the same `ccp` or `cc-profile` installation you use for direct commands. Keep the real native tools later on PATH; do not replace them with the links. The launcher and daemon must resolve the same native executable. A daemon `--*-bin` override must identify the native entrypoint, not a launcher link. Native npm and shell entrypoints work normally; scripts that call back into `ccp` are not supported as aliases.
+
 Open **http://127.0.0.1:8743**. On the first visit, set a panel password; subsequent visits use **Sign in**. No pairing token is needed. The first visitor can claim an unconfigured panel, so on a shared machine run **`ccpd set-password` before starting the service**. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and the daemon startup log show the database path: use the same `XDG_STATE_HOME` in your shell and service so they address the same panel. Use `--port PORT` to change the panel port. For a VM, forward the same loopback port using SSH. Do not expose the panel publicly.
 
 Sign-in survives reloads in the same tab. A separately opened tab signs in independently. In **Settings**, choose a light, dark, or system theme for this browser, or change the panel password using the current one. Changing it signs out all tabs; it does not stop running agents.

@@ -1,6 +1,6 @@
 use ccpd::{
     invocation::{Intent, Invocation, classify},
-    native::{PROXIES, executable},
+    native::{PROXIES, native_executable, version_probe_reply},
     paths,
     protocol::{Failure, Plan, Request, RoutingMode, VERSION, profile_login_args},
     socket,
@@ -10,8 +10,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     env,
     ffi::{CString, OsString},
-    fs, io,
-    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    io,
+    os::unix::ffi::OsStrExt,
     path::Path,
     process::ExitCode,
     time::Duration,
@@ -226,8 +226,13 @@ impl NativeExec {
     }
 }
 async fn run() -> Result<ExitCode> {
-    let mut args = env::args_os().skip(1);
-    let first = args.next();
+    let mut args = env::args_os();
+    let invoked = args.next();
+    let alias = invoked
+        .as_deref()
+        .and_then(|p| Path::new(p).file_name())
+        .filter(|name| *name == "codex" || *name == "claude");
+    let first = alias.map(OsString::from).or_else(|| args.next());
     let mut login_profile = None;
     let login_tool: String;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -241,7 +246,12 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Some("--version" | "-V") => {
-            println!("ccp {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "{}",
+                version_probe_reply()
+                    .as_deref()
+                    .unwrap_or(concat!("ccp ", env!("CARGO_PKG_VERSION")))
+            );
             return Ok(ExitCode::SUCCESS);
         }
         Some(t @ ("claude" | "codex" | "agy")) => (
@@ -294,14 +304,20 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::from(2));
         }
     };
-    let binary = executable(tool);
-    if let Some(path) = &binary {
-        if let (Ok(own), Ok(native)) = (fs::metadata("/proc/self/exe"), fs::metadata(path))
-            && (native.dev(), native.ino()) == (own.dev(), own.ino())
-        {
-            eprintln!("ccp: native command resolves to the launcher.");
+    if argv == ["--version"]
+        && let Some(reply) = version_probe_reply()
+    {
+        println!("{reply}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let binary = match native_executable(tool) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("ccp: {e}");
             return Ok(ExitCode::from(2));
         }
+    };
+    if let Some(path) = &binary {
         path.to_str().ok_or_else(utf8)?;
     }
     let cwd = env::current_dir()?;
