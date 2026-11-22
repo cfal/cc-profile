@@ -21,6 +21,13 @@ class Native(unittest.TestCase):
         self.addCleanup(self.s.doCleanups)
         self.s.setUp()
 
+    def test_empty_profiles_report_signed_out(self):
+        for tool in ("claude", "codex"):
+            profile = self.s.account(tool, tool + "-empty")
+            self.assertEqual(self.s.api("GET", f"accounts/{profile['id']}/identity")[:2],
+                             (200, {"state":"signed_out", "email":None}), tool)
+        self.assertEqual(self.s.api("GET", "startups")[1]["items"], [])
+
     def test_claude_delimiter_depends_on_print_mode(self):
         c = self.s.account("claude","delimiter")
         for verb in ("rc","remote-control"):

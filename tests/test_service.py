@@ -23,12 +23,20 @@ if sys.argv[1:] == ["--version"]:
     print("codex-cli 0.171.0" if t == "codex" else "2.1.329 (Claude Code)")
     sys.exit()
 home = pathlib.Path(os.environ["CODEX_HOME" if t == "codex" else "CLAUDE_CONFIG_DIR"])
+if t == "claude" and sys.argv[1:] == ["auth","status","--json"]:
+    path = home / "fixture-identity.json"
+    print(path.read_text() if path.exists() else '{"loggedIn":false}')
+    sys.exit(0 if path.exists() else 1)
 if sys.argv[1:2] == ["app-server"]:
     if (home/"track-child").exists(): (home/"child-pid").write_text(str(os.getpid()))
     for line in sys.stdin:
         r = json.loads(line)
         if "id" not in r: continue
         result = {}
+        if r["method"] == "account/read":
+            assert r["params"] == {"refreshToken":False}
+            path = home / "fixture-identity.json"
+            result = json.loads(path.read_text()) if path.exists() else {"account":None}
         if r["method"] in ("thread/start","thread/resume","unrelated"):
             uid = r.get("params",{}).get("threadId",str(uuid.uuid4()))
             result = {"thread":{"id":uid,"sessionId":uid,"ephemeral":r.get("params",{}).get("ephemeral",False),
@@ -486,6 +494,26 @@ else:
         self.assertFalse(self.api("GET","sessions")[1]["items"])
         logs=self.api("GET","startups")[1]["items"]
         self.assertEqual([row["reason"] for row in logs],["unsupported_invocation"]*14)
+
+    def test_native_identity_is_profile_scoped_and_only_exposes_display_fields(self):
+        for tool in ("claude","codex"):
+            c = self.account(tool,tool+"-account")
+            path = f"accounts/{c['id']}/identity"
+            self.assertEqual(self.api("GET",path,extra={"X-CCP-Session":""})[0],403)
+            self.assertEqual(self.api("GET",path)[:2],(200,{"state":"signed_out","email":None}))
+            raw = {"type":"chatgpt","email":tool+"@example.test","ignored":"private-test-token"}
+            path_on_disk = Path(c["home"]) / "fixture-identity.json"
+            payload = dict(raw,loggedIn=True) if tool == "claude" else {"account":raw}
+            path_on_disk.write_text(json.dumps(payload))
+            self.assertEqual(self.api("GET",path)[:2],(200,{"state":"signed_in","email":raw["email"]}))
+            raw["email"] = None
+            payload = dict(raw,loggedIn=True) if tool == "claude" else {"account":raw}
+            path_on_disk.write_text(json.dumps(payload))
+            self.assertEqual(self.api("GET",path)[:2],(200,{"state":"signed_in","email":None}))
+            path_on_disk.write_text("{invalid")
+            self.assertEqual(self.api("GET",path)[:2],(200,{"state":"unavailable","email":None}))
+        self.assertFalse(self.api("GET","sessions")[1]["items"])
+        self.assertFalse(self.api("GET","startups")[1]["items"])
 
     def test_web_authenticates_reads_and_mutations(self):
         self.assertEqual(self.api("GET","accounts?tool=codex",extra={"X-CCP-Session":""})[0],403)

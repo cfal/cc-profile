@@ -140,7 +140,7 @@ class Panel(unittest.TestCase):
             expect(completed).to_be_visible()
             finish.unlink()
             # A delayed full Accounts refresh must not replace a newer attempt either.
-            old_panel = page.get_by_role("heading",name="Profile sign-in").element_handle()
+            old_panel = page.get_by_role("heading",name="Sign-in status").element_handle()
             held.clear()
             with page.expect_request(lambda r: r.method == "GET" and r.url.endswith("/device-login")):
                 page.route(url, lambda route: held.append(route), times=1)
@@ -201,13 +201,16 @@ class Panel(unittest.TestCase):
     def test_antigravity_profile_login_and_native_report(self):
         service=self.start_service()
         _, c, _=service.api("POST","accounts",{"tool":"agy","label":"ACP work","create":True})
-        self.assertEqual(service.cli("login",str(c["id"])).returncode,0)
         with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
             page=browser.new_page(viewport={"width":390,"height":844},permissions=["clipboard-read","clipboard-write"])
             page.goto(f"http://127.0.0.1:{service.port}/#accounts?tool=agy")
             page.get_by_label("Password",exact=True).fill(service.password)
             page.get_by_role("button",name="Sign in").click()
             expect(page.get_by_role("heading",name="ACP work",exact=True)).to_be_visible()
+            expect(page.get_by_text("No saved login", exact=True)).to_be_visible()
+            self.assertEqual(service.cli("login",str(c["id"])).returncode,0)
+            page.get_by_role("button", name="Refresh sign-in status").click()
+            expect(page.get_by_text("Saved login found (validity not checked)", exact=True)).to_be_visible()
             expect(page.locator(".account-list").get_by_role("progressbar")).to_have_count(0)
             expect(page.get_by_role("button",name="Antigravity",exact=True)).to_have_attribute("aria-pressed","true")
             page.get_by_role("button",name="Copy Antigravity sign-in command").click()
@@ -229,6 +232,28 @@ class Panel(unittest.TestCase):
             page.get_by_role("button",name="Copy resume command").click()
             self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
                              ["cd","/my workspace","&&","ccp","agy","acp","--for-session",sid])
+
+    def test_identity_follows_selected_account_not_delayed_probe(self):
+        service = self.start_service()
+        a, b = (service.account("claude", label) for label in ("Work", "Home"))
+        (Path(a["home"])/"fixture-identity.json").write_text('{"loggedIn":true,"email":"work@example.test"}')
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{service.port}/#accounts?tool=claude&id={a['id']}")
+            page.get_by_label("Password",exact=True).fill(service.password)
+            page.get_by_role("button",name="Sign in").click()
+            expect(page.get_by_text("Signed in: work@example.test",exact=True)).to_be_visible()
+            endpoint = f"**/accounts/{a['id']}/identity"
+            held = []
+            page.route(endpoint, lambda route: held.append(route), times=1)
+            with page.expect_request(endpoint):
+                page.get_by_role("button",name="Refresh sign-in status").click()
+            page.locator(".account-row").filter(has_text=b["label"]).click()
+            expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
+            with page.expect_response(endpoint):
+                held[0].fulfill(json={"state":"signed_in","email":"late@example.test"})
+            expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
+            expect(page.get_by_text("late@example.test",exact=False)).to_have_count(0)
 
     def test_dashboard_quotas_above_independent_startup_filters(self):
         service = self.start_service()
@@ -281,7 +306,7 @@ class Panel(unittest.TestCase):
                     self.assertGreater(instant["y"], meter["y"] + meter["height"])
             disabled.get_by_role("link",name="Codex / Work").click()
             expect(page).to_have_url(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={codex['id']}")
-            expect(page.get_by_role("heading",name="Profile sign-in")).to_be_visible()
+            expect(page.get_by_role("heading",name="Sign-in status")).to_be_visible()
             row = page.locator(".account-row")
             bar = row.get_by_role("progressbar", name="5h remaining")
             expect(bar).to_be_visible()
@@ -343,7 +368,7 @@ class Panel(unittest.TestCase):
             self.assertEqual(len(posts), 2)  # One failed request and one successful retry.
             expect(link).to_be_focused()
             page.mouse.up()
-            expect(page.get_by_role("heading", name="Profile sign-in")).to_be_visible()
+            expect(page.get_by_role("heading", name="Sign-in status")).to_be_visible()
             expect(page).to_have_url(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={profile['id']}")
 
     def test_log_filters_and_session_navigation(self):

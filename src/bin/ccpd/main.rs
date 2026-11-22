@@ -1,5 +1,6 @@
 mod auth;
 mod device_login;
+mod identity;
 mod password;
 mod quotas;
 mod service;
@@ -97,6 +98,7 @@ async fn run() -> Result<()> {
         auth: auth::Auth::new(),
         quotas: quotas::Jobs::new(),
         logins: device_login::Logins::default(),
+        identity_slots: tokio::sync::Semaphore::new(2),
     });
     let a = app.clone();
     tokio::spawn(async move {

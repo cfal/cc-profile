@@ -34,9 +34,12 @@ class Antigravity(unittest.TestCase):
     def test_disabled_named_login_status_and_native_usage(self):
         c = self.profile("work", enable=False)
         cid, home = str(c["id"]), Path(c["home"])
+        identity = lambda: self.s.api("GET",f"accounts/{cid}/identity")[:2]
+        self.assertEqual(identity(), (200, {"state":"no_saved_login","email":None}))
         self.assertNotEqual(self.s.cli("login",cid,"--status").returncode,0)
         self.assertNotEqual(self.s.cli("usage",cid).returncode,0)
         self.assertEqual(self.s.cli("login",cid).returncode,0)
+        self.assertEqual(identity(), (200, {"state":"saved_login","email":None}))
         self.assertIn("validity not checked",self.s.cli("login",cid,"--status").stdout)
         self.assertEqual((home/".gemini/antigravity-cli/antigravity-oauth-token").stat().st_mode & 0o777,0o600)
         self.assertEqual(self.s.cli("usage",cid).stdout.strip(),"Model quotas: weekly remaining 76%")

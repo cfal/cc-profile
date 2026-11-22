@@ -202,6 +202,7 @@ const passwordInput = (name, autocomplete, props = {}) => el("input", {
   type: "password", name, required: true, maxlength: 1024, autocomplete, spellcheck: "false", ...props,
 });
 function passwordForm() {
+  selectedIdentity = null;
   clearTimeout(timer);
   version++;
   $("nav").hidden = true;
@@ -767,13 +768,41 @@ async function readLogin(path) {
     }
   }
 }
+let selectedIdentity;
+function identityView(c) {
+  if (selectedIdentity?.id === c.id && selectedIdentity.revision === c.revision) return selectedIdentity;
+  const summary = el("span", {class: "wrap", role: "status"}, "Checking sign-in…");
+  const button = ib("Refresh sign-in status", "refresh-cw", refresh);
+  const view = {id: c.id, tool: c.tool, revision: c.revision, node: el("div", {class: "row"}, summary, button), refresh};
+  selectedIdentity = view;
+  let seq = 0;
+  async function refresh() {
+    const attempt = ++seq;
+    button.disabled = true;
+    try {
+      const v = await api("accounts/" + c.id + "/identity");
+      if (selectedIdentity !== view || attempt !== seq) return;
+      const labels = {signed_in: "Signed in", signed_out: "Not signed in",
+        saved_login: "Saved login found (validity not checked)", no_saved_login: "No saved login"};
+      summary.textContent = (labels[v.state] || "Sign-in status unavailable") + (v.email ? ": " + v.email : "");
+    } catch {
+      if (attempt === seq) summary.textContent = "Sign-in status unavailable";
+    } finally { if (attempt === seq) button.disabled = false; }
+  }
+  refresh();
+  return view;
+}
+window.addEventListener("focus", () => {
+  if (selectedIdentity?.tool === "agy" && selectedIdentity.node.isConnected) selectedIdentity.refresh();
+});
 function signInPanel(c, initial, supported) {
-  const section = el("section", {}, el("h3", {}, "Profile sign-in"));
+  const identity = identityView(c);
+  const section = el("section", {}, el("h3", {}, "Sign-in status"), identity.node);
   const cmd = "ccp login " + c.id;
   const terminal = el("div", {class: "row"}, code(cmd),
     ib("Copy " + names[c.tool] + " sign-in command", "copy", () => copy(cmd)));
   if (c.tool !== "codex") {
-    section.append(el("p", {}, "Run in your terminal:"), terminal);
+    section.append(terminal);
     return section;
   }
   const endpoint = "accounts/" + c.id + "/device-login";
@@ -830,6 +859,10 @@ function signInPanel(c, initial, supported) {
         failed: "Device sign-in did not complete. Check that device login is allowed for your ChatGPT account or workspace, then try again.",
         cancelled: "Stopped waiting for sign-in.",
       };
+      if (v.state === "completed" && v.attempt !== identity.completed) {
+        identity.completed = v.attempt;
+        identity.refresh();
+      }
       body.replaceChildren(...(messages[v.state] ? [el("p", {}, messages[v.state])] : []), start);
     }
   };
@@ -841,6 +874,7 @@ async function accounts(params, ver, enter) {
     data = await api("accounts?tool=" + t);
   if (ver !== version) return;
   const c = data.items.find((c) => String(c.id) === params.get("id")) || data.items[0];
+  if (!c) selectedIdentity = null;
   const login = c && t === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
   if (ver !== version) return;
   const tabs = el(
@@ -998,6 +1032,7 @@ async function render() {
   const ver = ++version,
     { view, params } = locationState(),
     enter = lastView !== view;
+  if (view !== "accounts") selectedIdentity = null;
   lastView = view;
   $("nav").hidden = false;
   $(".logout").hidden = false;
