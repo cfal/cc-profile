@@ -38,6 +38,41 @@ pub fn session_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
+pub fn conversation_arg(args: &[String]) -> Option<&str> {
+    match args {
+        [flag, id] if flag == "--conversation" => Some(id),
+        [arg] => arg.strip_prefix("--conversation="),
+        _ => None,
+    }
+}
+
+/// Check only the exact native filenames. Never open or enumerate conversations.
+pub fn has_conversation(home: &Path, id: uuid::Uuid) -> Result<bool> {
+    let dir = home.join(".gemini").join(APP_DIR).join("conversations");
+    let unsafe_path = || {
+        Error::bad(
+            "unsafe_conversation",
+            "Cannot verify the native conversation path.",
+        )
+    };
+    match dir.canonicalize() {
+        Ok(path) if path == dir => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        _ => return Err(unsafe_path()),
+    }
+    let mut found = false;
+    for ext in ["db", "pb"] {
+        match fs::symlink_metadata(dir.join(format!("{id}.{ext}"))) {
+            Ok(m) if m.is_file() && m.uid() == paths::uid() && m.nlink() == 1 => {
+                found |= m.len() != 0;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(unsafe_path()),
+        }
+    }
+    Ok(found)
+}
+
 pub fn has_login(home: &Path) -> Result<bool> {
     let unsafe_home = || {
         Error::bad(

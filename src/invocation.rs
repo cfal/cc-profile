@@ -125,6 +125,12 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             || matches!(args, [a,b] if a=="acp" && b=="--help")
         {
             intent = Intent::Misc;
+        } else if let Some(id) = crate::agy::conversation_arg(args) {
+            let parsed = native_id(id)?;
+            if parsed != id {
+                return Err(unsupported());
+            }
+            intent = Intent::Resume(parsed);
         } else if !args.is_empty() {
             if args.first().is_none_or(|a| a != "acp") {
                 return Err(unsupported());

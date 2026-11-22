@@ -409,7 +409,7 @@ async function logs(view, params, ver, enter) {
             class: "aslink uuid",
             title: uid,
             onclick: () =>
-              view === "sessions"
+              view === "sessions" || row.intent === "tui_resume"
                 ? copy(uid).catch((e) => notice(e.message))
                 : go("sessions", { tool: row.tool, native_id: uid }),
           },

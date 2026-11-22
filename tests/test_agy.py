@@ -4,6 +4,7 @@ from pathlib import Path
 import select
 import subprocess
 import unittest
+import uuid
 
 import test_service as svc
 
@@ -65,6 +66,44 @@ class Antigravity(unittest.TestCase):
         for args in [("--continue",), ("--conversation","unknown"), ("--settings","{}")]:
             self.assertNotEqual(self.s.cli("agy",*args).returncode,0)
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+
+    def test_tui_resume_uses_the_unique_saved_file_not_rotation(self):
+        a, b = self.profile("first"), self.profile("owner")
+        uid = str(uuid.uuid4())
+        p, q = (Path(c["home"])/".gemini/antigravity-cli/conversations" for c in (a, b))
+        for d in (p, q):
+            for parent in [d.parents[1], d.parent, d]:
+                parent.mkdir(mode=0o700, exist_ok=True)
+        run = lambda *args: self.s.cli("agy", *(args or ("--conversation", uid)))
+        self.assertNotEqual(run().returncode, 0)
+        for ext in ("db", "pb"):
+            saved = q / f"{uid}.{ext}"
+            saved.touch()
+            self.assertNotEqual(run().returncode, 0)
+            saved.write_bytes(b"fixture: native saved conversation")
+            for args in (["--conversation", uid], ["--conversation=" + uid]):
+                result = run(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"args":args, "home":b["home"]})
+            duplicate = p / saved.name
+            duplicate.symlink_to(saved)
+            self.assertNotEqual(run().returncode, 0)
+            duplicate.unlink()
+            duplicate.write_bytes(b"copy")
+            self.assertIn("Conflicting", run().stderr)
+            duplicate.unlink()
+            saved.unlink()
+        (q/f"{uid}.db").write_bytes(b"fixture")
+        self.bridge([], (1, "session/new", {"cwd":"/work", "fixtureId":uid}))
+        self.assertIn("Conflicting", run().stderr)
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"][0]["config_id"], a["id"])
+        uid = str(uuid.uuid4())
+        (q/f"{uid}.db").write_bytes(b"other fixture")
+        self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"enabled":False})
+        self.assertIn("disabled", run().stderr)
+        self.assertEqual(len(self.s.api("GET","sessions?tool=agy")[1]["items"]),1)
+        self.assertEqual(self.s.cli("agy").returncode, 0)
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], a["id"])
 
     def test_panel_report_needs_login_and_withholds_unexpected_output(self):
         c = self.profile("report", enable=False)

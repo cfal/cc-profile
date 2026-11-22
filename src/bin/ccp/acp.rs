@@ -245,6 +245,16 @@ pub(super) async fn run(
     plan: &Plan,
 ) -> Result<ExitCode> {
     let saved = agy::has_login(home)?;
+    if let Some(id) = agy::conversation_arg(&req.argv)
+        && !uuid::Uuid::parse_str(id)
+            .ok()
+            .is_some_and(|id| agy::has_conversation(home, id).unwrap_or(false))
+    {
+        return Err(Error::bad(
+            "conversation_missing",
+            "Saved conversation is no longer available in the selected profile.",
+        ));
+    }
     if req.login_profile.is_some() && req.argv == agy::STATUS {
         println!(
             "{}",

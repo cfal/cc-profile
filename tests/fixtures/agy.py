@@ -22,6 +22,9 @@ obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy",
 if not args:
     print("fixture Antigravity TUI")
     sys.exit()
+if args[0].split("=")[0] == "--conversation":
+    print(json.dumps({"home": str(home), "args": args}))
+    sys.exit()
 if args == ["-p", "/usage"]:
     assert Path.cwd() == home
     print("Model quotas: weekly remaining 76%" if not (home / "bad-report").exists()

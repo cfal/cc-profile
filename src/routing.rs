@@ -56,6 +56,18 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "unknown_session",
             "No managed mapping for this session ID. See Sessions; ccp never guesses its owner.",
         ),
+        "conversation_missing" => Error::missing(
+            "conversation_missing",
+            "No registered Antigravity profile has this saved conversation.",
+        ),
+        "conversation_ambiguous" => Error::conflict(
+            "conversation_ambiguous",
+            "Conflicting Antigravity conversation owners. No profile was selected.",
+        ),
+        "unsafe_conversation" => Error::bad(
+            "unsafe_conversation",
+            "Cannot verify the native conversation path.",
+        ),
         "owner_disabled" | "owner_missing" => {
             let name = c
                 .map(|c| format!("{}/{}", c.tool, c.label))
@@ -231,6 +243,27 @@ fn choose(
                     |r| r.get(0),
                 )
                 .optional()?;
+            let owner = if req.tool == "agy" && crate::agy::conversation_arg(&req.argv).is_some() {
+                let uuid =
+                    Uuid::parse_str(uid).map_err(|_| denial("exact_id_required", None, None))?;
+                let mut found = None;
+                for c in configs(db, "agy")?.into_iter().filter(Config::present) {
+                    match crate::agy::has_conversation(&c.home, uuid) {
+                        Ok(true) if found.is_some() || owner.is_some_and(|id| id != c.id) => {
+                            return Ok(reject("conversation_ambiguous"));
+                        }
+                        Ok(true) => found = Some(c.id),
+                        Ok(false) => {}
+                        Err(_) => return Ok(reject("unsafe_conversation")),
+                    }
+                }
+                if found.is_none() {
+                    return Ok(reject("conversation_missing"));
+                }
+                found
+            } else {
+                owner
+            };
             let Some(owner) = owner else {
                 return Ok(reject("unknown_session"));
             };
@@ -339,6 +372,10 @@ impl Prior {
             || validate_binary(build, req.binary.as_deref()).is_err()
             || (!build.supported && (i.intent != Intent::Misc || req.tool == "agy"))
             || self.workspace != i.workspace
+            || (req.tool == "agy"
+                && crate::agy::conversation_arg(&req.argv).is_some()
+                && !matches!(choose(db, build, req, i, RoutingMode::RoundRobin)?,
+                    Selection::Allow(owner, _) if Some(owner.id) == self.config))
         {
             return Err(Error::conflict(
                 "stale_plan",
@@ -387,6 +424,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
         let intent = invocation.map(|i| match (req.tool.as_str(), req.argv.first().map(String::as_str), &i.intent) {
             ("agy", None, Intent::New) => "tui",
             ("agy", Some("acp"), Intent::New | Intent::Resume(_)) => "acp",
+            ("agy", _, Intent::Resume(_)) => "tui_resume",
             ("codex", Some("app-server"), Intent::New | Intent::Resume(_)) => "app_server",
             _ => i.intent.name(),
         }).unwrap_or("unsupported");
