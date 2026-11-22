@@ -1,17 +1,24 @@
 :root {
-  color-scheme: light;
-  --ink: #202927;
-  --muted: #536461;
-  --line: #dce3df;
-  --green: #006951;
-  --mint: #e2f3ea;
-  --blue: #255e8a;
-  --paper: #fff;
-  --wash: #f6f8f7;
-  --danger: #922f30;
+  color-scheme: light dark;
+  --ink: light-dark(#202927, #edf4f0);
+  --muted: light-dark(#536461, #b3c0ba);
+  --line: light-dark(#dce3df, #3c4842);
+  --control-line: light-dark(#aab8af, #73867b);
+  --green: light-dark(#006951, #7ddbb0);
+  --mint: light-dark(#e2f3ea, #234435);
+  --blue: light-dark(#255e8a, #95cafa);
+  --paper: light-dark(#fff, #191e1b);
+  --wash: light-dark(#f6f8f7, #252e28);
+  --danger: light-dark(#922f30, #ffb6ae);
   font: 14px/1.5 Arial, sans-serif;
   color: var(--ink);
   background: var(--paper);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 * {
   box-sizing: border-box;
@@ -45,9 +52,9 @@ button {
   gap: 7px;
   min-height: 35px;
   padding: 5px 11px;
-  background: white;
+  background: var(--paper);
   color: var(--ink);
-  border: 1px solid #cbd5cf;
+  border: 1px solid var(--control-line);
   border-radius: 5px;
 }
 button:disabled,
@@ -58,18 +65,17 @@ button:disabled,
 button[aria-disabled="true"] > svg {
   opacity: 0.5;
 }
-button:hover:not(:disabled):not([aria-disabled="true"]) {
+button:where(:hover:not(:disabled):not([aria-disabled="true"])) {
   background: var(--wash);
-  border-color: #9baea3;
+  border-color: var(--muted);
 }
 .primary {
   background: var(--green);
-  color: #fff;
+  color: var(--paper);
   border-color: var(--green);
 }
 .primary:hover:not(:disabled) {
-  background: #005744;
-  color: #fff;
+  background: light-dark(#005744, #9aeac7);
 }
 .icon {
   width: 35px;
@@ -89,7 +95,7 @@ svg {
   flex: none;
 }
 :focus-visible {
-  outline: 3px solid #397db5;
+  outline: 3px solid var(--blue);
   outline-offset: 2px;
 }
 [hidden] {
@@ -217,8 +223,8 @@ select {
   height: 36px;
   max-width: 100%;
   padding: 5px 9px;
-  border: 1px solid #bdc9c2;
-  background: white;
+  border: 1px solid var(--control-line);
+  background: var(--paper);
   color: var(--ink);
   border-radius: 4px;
 }
@@ -242,7 +248,7 @@ pre,
 }
 .segments {
   gap: 0;
-  background: #edf1ee;
+  background: var(--wash);
   padding: 3px;
   border-radius: 5px;
 }
@@ -253,7 +259,7 @@ pre,
   min-height: 30px;
 }
 .segments button[aria-pressed="true"] {
-  background: #fff;
+  background: var(--paper);
   color: var(--ink);
   box-shadow: 0 1px 3px #122d2024;
 }
@@ -287,7 +293,7 @@ tr:first-child td {
   border-top: 0;
 }
 tbody tr:hover {
-  background: #f9fbfa;
+  background: var(--wash);
 }
 .tiny {
   width: 36px;
@@ -334,25 +340,25 @@ td .uuid {
   padding: 2px 7px;
   font-size: 12px;
   line-height: 1.6;
-  background: #edf1ef;
-  color: #51615a;
+  background: var(--wash);
+  color: var(--muted);
   white-space: nowrap;
   font-weight: 600;
 }
 .green {
   background: var(--mint);
-  color: #175f43;
+  color: var(--green);
 }
 .blue {
-  background: #e7f0fc;
-  color: #245881;
+  background: light-dark(#e7f0fc, #24394a);
+  color: var(--blue);
 }
 .amber {
-  background: #fff0cf;
-  color: #805319;
+  background: light-dark(#fff0cf, #4a3820);
+  color: light-dark(#805319, #f7cd88);
 }
 .red {
-  background: #fce8e5;
+  background: light-dark(#fce8e5, #4f2b2b);
   color: var(--danger);
 }
 .pages {
@@ -398,7 +404,7 @@ td .uuid {
   text-align: left;
 }
 .account-row[aria-pressed="true"] {
-  background: #f0f7f3;
+  background: var(--mint);
   border-left: 3px solid var(--green);
   padding-left: 12px;
 }
@@ -455,6 +461,9 @@ td .uuid {
   height: 16px;
   accent-color: var(--green);
 }
+.quota-card {
+  container: quota-card / inline-size;
+}
 .quota {
   display: grid;
   grid-template-columns: minmax(60px, 0.8fr) minmax(90px, 1fr) minmax(120px, 1.2fr);
@@ -463,14 +472,41 @@ td .uuid {
   padding: 9px 0;
   align-items: center;
 }
-.quota progress {
+.quota progress,
+.quota-bars progress {
   display: block;
   width: 100%;
   height: 5px;
   accent-color: var(--green);
 }
+.quota-bars {
+  display: flex;
+  gap: 6px;
+  width: min(100%, 16rem);
+}
+.quota-bars progress {
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+}
+.reset-time span {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: normal;
+}
+.reset-time .countdown {
+  white-space: nowrap;
+}
 .quota time {
   font-size: 13px;
+}
+@container quota-card (max-width: 480px) {
+  .quota {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .quota > :last-child {
+    grid-column: 1/-1;
+  }
 }
 .quota-grid {
   display: grid;
@@ -516,7 +552,7 @@ td .uuid {
   gap: 8px;
 }
 .warn {
-  color: #865912;
+  color: light-dark(#865912, #edc47e);
 }
 .error {
   color: var(--danger);
@@ -526,6 +562,7 @@ dialog {
   max-height: 85vh;
   padding: 0;
   color: var(--ink);
+  background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 6px;
   box-shadow: 0 12px 48px #142e2426;
@@ -574,7 +611,7 @@ dialog .error {
   padding: 12px 16px;
   border-radius: 5px;
   background: var(--ink);
-  color: white;
+  color: var(--paper);
   z-index: 5;
 }
 .password-form {
@@ -586,6 +623,30 @@ dialog .error {
 }
 .password-form .field {
   margin-top: 22px;
+}
+.signin-theme {
+  margin-top: 28px;
+}
+.signin-theme .field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: normal;
+}
+.signin-theme select {
+  width: auto;
+}
+.settings {
+  max-width: 440px;
+}
+.settings section {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+.settings h2 {
+  margin-bottom: 12px;
 }
 .details-cell {
   background: var(--wash);
@@ -608,7 +669,8 @@ dialog .error {
   nav {
     order: 3;
     width: 100%;
-    gap: 22px;
+    gap: 10px;
+    flex-wrap: wrap;
   }
   nav a {
     padding: 6px 0 9px;
@@ -635,12 +697,6 @@ dialog .error {
   .titleline {
     gap: 14px;
     margin-bottom: 16px;
-  }
-  .quota {
-    grid-template-columns: 1fr 1fr;
-  }
-  .quota time {
-    grid-column: 1/-1;
   }
   .toolbar > label:has(input) {
     width: 100%;

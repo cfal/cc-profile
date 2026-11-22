@@ -3,6 +3,17 @@ const main = $("#main"),
   dialog = $("#dialog"),
   form = $("#form");
 const names = { claude: "Claude", codex: "Codex", agy: "Antigravity" };
+const themeKey = "ccp_theme";
+function applyTheme(preference) {
+  const value = ["light", "dark"].includes(preference) ? preference : "system";
+  document.documentElement.dataset.theme = value;
+  const control = $('select[name="theme"]');
+  if (control) control.value = value;
+}
+applyTheme(localStorage.getItem(themeKey));
+window.addEventListener("storage", (e) => {
+  if (e.key === themeKey || e.key === null) applyTheme(localStorage.getItem(themeKey));
+});
 const states = {
   routed: "Routed",
   pending: "Awaiting ID",
@@ -107,20 +118,17 @@ function guard(fn) {
   };
 }
 async function api(path, method = "GET", body) {
+  const token = sessionToken;
   const opts = {
     method,
     credentials: "omit",
-    headers: { "Content-Type": "application/json", "X-CCP-Session": sessionToken },
+    headers: { "Content-Type": "application/json", "X-CCP-Session": token },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch("/api/v1/" + path, opts);
   const v = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (r.status === 403 && sessionToken) {
-      sessionToken = "";
-      sessionStorage.removeItem("ccp_session");
-      passwordForm();
-    }
+    if (r.status === 403 && token && token === sessionToken) signedOut();
     throw Object.assign(new Error(v.message || "Request failed (" + r.status + ")."), {code: v.error});
   }
   return v;
@@ -128,7 +136,7 @@ async function api(path, method = "GET", body) {
 function locationState() {
   const [v, q] = location.hash.slice(1).split("?");
   return {
-    view: ["accounts", "sessions"].includes(v) ? v : "dashboard",
+    view: ["accounts", "sessions", "settings"].includes(v) ? v : "dashboard",
     params: new URLSearchParams(q),
   };
 }
@@ -143,6 +151,15 @@ function select(items, val, props = {}) {
   const box = el("select", props, ...items.map(([v, name]) => el("option", { value: v }, name)));
   box.value = val;
   return box;
+}
+function themeField() {
+  return field("Theme", select([["system", "System default"], ["light", "Light"], ["dark", "Dark"]],
+    document.documentElement.dataset.theme, {name: "theme", onchange: (e) => {
+      const value = e.target.value;
+      applyTheme(value);
+      if (value === "system") localStorage.removeItem(themeKey);
+      else localStorage.setItem(themeKey, value);
+    }}));
 }
 function modal(heading, fields, submit, fn) {
   $(".dialog-head h2", form).textContent = heading;
@@ -176,6 +193,9 @@ const copy = async (s) => {
   await navigator.clipboard.writeText(s);
   notice("Copied to clipboard.");
 };
+const passwordInput = (name, autocomplete, props = {}) => el("input", {
+  type: "password", name, required: true, maxlength: 1024, autocomplete, spellcheck: "false", ...props,
+});
 function passwordForm() {
   clearTimeout(timer);
   version++;
@@ -184,8 +204,7 @@ function passwordForm() {
   if (dialog.open) dialog.close();
   const setup = needsSetup, heading = setup ? "Set panel password" : "Sign in";
   document.title = heading + " | cc-profile";
-  const input = (name) => el("input", {type: "password", name, required: true, maxlength: 1024,
-    autocomplete: setup ? "new-password" : "current-password", spellcheck: "false"});
+  const input = (name) => passwordInput(name, setup ? "new-password" : "current-password");
   const password = input("password"), confirm = setup ? input("confirmation") : null;
   if (setup) password.setAttribute("aria-describedby", "password-hint");
   const submit = el("button", {type: "submit", class: "primary"}, setup ? "Set password" : "Sign in");
@@ -199,6 +218,7 @@ function passwordForm() {
     confirm && field("Confirm password", confirm),
     error,
     submit,
+    el("div", {class: "signin-theme"}, themeField()),
   );
   f.onsubmit = async (e) => {
     e.preventDefault();
@@ -225,12 +245,75 @@ function passwordForm() {
   };
   main.replaceChildren(f);
 }
-$(".logout").onclick = guard(async () => {
-  await api("logout", "POST", {});
+function signedOut() {
   sessionToken = "";
   sessionStorage.removeItem("ccp_session");
   passwordForm();
+}
+$(".logout").onclick = guard(async () => {
+  await api("logout", "POST", {});
+  signedOut();
 });
+function changePasswordForm() {
+  const current = passwordInput("current_password", "current-password"),
+    next = passwordInput("new_password", "new-password", {minlength: 4, "aria-describedby": "change-hint"}),
+    confirm = passwordInput("confirmation", "new-password");
+  const submit = el("button", {type: "submit", class: "primary"}, "Change password"),
+    error = el("p", {class: "error", role: "alert", hidden: true});
+  return el("form", {onsubmit: async (e) => {
+    e.preventDefault();
+    submit.disabled = true;
+    error.hidden = true;
+    try {
+      if ([...next.value].length < 4) throw new Error("Use at least 4 characters.");
+      if (next.value !== confirm.value) throw new Error("Passwords do not match.");
+      await api("password", "POST", {current_password: current.value, new_password: next.value});
+      signedOut();
+      notice("Password changed. Sign in again.");
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+    } finally { submit.disabled = false; }
+  }},
+    field("Current password", current), field("New password", next), field("Confirm new password", confirm),
+    el("p", {id: "change-hint", class: "caption"}, "Use at least 4 characters. Changing the password signs out all sessions."),
+    error, submit);
+}
+async function loadRouting(container) {
+  container.replaceChildren(text("Loading routing mode…"));
+  try {
+    const settings = await api("settings");
+    const mode = select([
+      ["round_robin", "Round robin"], ["most_remaining", "Most quota remaining"],
+      ["least_remaining", "Least quota remaining"], ["priority", "Highest priority"],
+    ], settings.routing_mode, {required: true});
+    const save = el("button", {type: "submit"}, "Save routing mode");
+    const error = el("p", {class: "error", role: "alert", hidden: true});
+    container.replaceChildren(el("form", {onsubmit: async (e) => {
+      e.preventDefault();
+      save.disabled = mode.disabled = true;
+      error.hidden = true;
+      try {
+        mode.value = (await api("settings", "PUT", {routing_mode: mode.value})).routing_mode;
+        notice("Routing mode saved.");
+      } catch (err) {
+        error.textContent = err.message;
+        error.hidden = false;
+      } finally { save.disabled = mode.disabled = false; }
+    }}, field("Routing mode", mode), error, save));
+  } catch (err) {
+    container.replaceChildren(el("p", {class: "error", role: "alert"}, err.message),
+      btn("Retry", () => loadRouting(container), "refresh-cw"));
+  }
+}
+function settings() {
+  const routing = el("div");
+  main.replaceChildren(title("Settings"), el("div", {class: "settings"},
+    el("section", {}, el("h2", {}, "Appearance"), themeField()),
+    el("section", {}, el("h2", {}, "New chats"), routing),
+    el("section", {}, el("h2", {}, "Panel password"), changePasswordForm())));
+  return loadRouting(routing);
+}
 function empty(heading, description, action) {
   return el(
     "div",
@@ -431,6 +514,8 @@ async function logs(view, params, ver, enter) {
 }
 function accountForm(t, c) {
   const label = el("input", { required: true, maxlength: 100, value: c?.label || "" }),
+    priority = el("input", {type: "number", min: 0, max: 100, step: 1, required: true,
+      value: c?.priority ?? 0, "aria-describedby": "priority-hint"}),
     home = el("input", { placeholder: "/home/user/profiles/work/config" });
   const source = select([["new", "Create new profile"], ["existing", "Use existing directory"]],
     "new", {"aria-label": "Profile directory"});
@@ -469,13 +554,15 @@ function accountForm(t, c) {
     c ? "Edit config" : "Add " + names[t] + " profile",
     [
       field("Label", label),
+      field("Priority", priority),
+      el("p", {id: "priority-hint", class: "caption"}, "0–100. Higher values win in priority mode."),
       ...(c ? [field("Config directory", code(c.home))] : [field("Profile directory", source), homeField]),
       field("Proxy mode", mode),
       fields,
     ],
     c ? "Save changes" : "Add profile",
     async () => {
-      const v = { label: label.value.trim(), proxy_mode: mode.value };
+      const v = { label: label.value.trim(), proxy_mode: mode.value, priority: priority.valueAsNumber };
       if (mode.value === "custom" && proxy.value) v.proxy_url = proxy.value;
       const saved = c
         ? await api("accounts/" + c.id, "PATCH", { revision: c.revision, ...v })
@@ -539,7 +626,8 @@ function resetTime(ms) {
   const d = new Date(ms);
   return Number.isNaN(d.getTime())
     ? text("Reset unknown")
-    : el("time", { datetime: d.toISOString(), title: d.toLocaleString() }, fmt(ms) + " · " + delta);
+    : el("time", {class: "reset-time", datetime: d.toISOString(), title: d.toLocaleString()},
+        el("span", {}, fmt(ms)), " ", el("span", {class: mins > 0 ? "countdown" : ""}, "· " + delta));
 }
 function quotaDetails(q) {
   const s = q.snapshot, details = document.createDocumentFragment();
@@ -627,7 +715,7 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
     const cmd = "ccp usage " + c.id;
     body.append(el("div", {class: "row"}, code(cmd), ib("Copy quota command", "copy", () => copy(cmd))));
   }
-  const section = el("section", {}, el("div", {class: "sectionhead"},
+  const section = el("section", {class: "quota-card"}, el("div", {class: "sectionhead"},
     el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body);
   function update(profile) {
     c = profile;
@@ -806,10 +894,9 @@ async function accounts(params, ver, enter) {
   const list = el("div", { class: "account-list", "aria-label": "Registered configs" });
   for (const a of data.items) {
     const q = a.quota;
-    const summary = q.snapshot?.windows
-      .filter((w) => w.kind === "account")
-      .slice(0, 2)
-      .map((w) => w.label + " " + percent(100 - w.used_pct) + " left")
+    const windows = (q.snapshot?.windows || [])
+      .filter((w) => w.kind === "account" && Number.isFinite(w.used_pct)).slice(0, 2);
+    const summary = windows.map((w) => w.label + " " + percent(100 - w.used_pct) + " left")
       .join(" · ");
     list.append(
       el(
@@ -827,6 +914,9 @@ async function accounts(params, ver, enter) {
           a.current && pill("Current", "blue"),
           pill(a.enabled ? "Enabled" : "Disabled", a.enabled ? "green" : ""),
         ),
+        windows.length > 0 && el("span", {class: "quota-bars"}, windows.map((w) =>
+          el("progress", {max: 100, value: 100 - w.used_pct, "aria-label": w.label + " remaining",
+            title: w.label + ": " + percent(100 - w.used_pct) + " left"}))),
         text(
           summary
             ? (q.stale ? "Stale · " : "") + summary
@@ -897,6 +987,7 @@ async function accounts(params, ver, enter) {
       el("p", {id: "routing-note", class: "caption"}, "Disabling this profile blocks new chats and resumes. Chats already running are not stopped."),
       el("dl", {class: "facts"},
         datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
+        datum("Priority", c.priority ?? 0),
         datum("Maintenance commands", current),
         datum("Directory", code(c.home)),
         datum("Proxy", c.proxy_mode === "custom"
@@ -964,6 +1055,7 @@ async function render() {
       : a.removeAttribute("aria-current");
   document.title = view[0].toUpperCase() + view.slice(1) + " | cc-profile";
   if (view === "accounts") await accounts(params, ver, enter);
+  else if (view === "settings") await settings();
   else await logs(view, params, ver, enter);
 }
 window.onhashchange = guard(async () => {
