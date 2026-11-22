@@ -2,6 +2,7 @@
 from contextlib import closing
 import os
 from pathlib import Path
+import re
 import shlex
 import sqlite3
 import sys
@@ -215,6 +216,7 @@ class Panel(unittest.TestCase):
             page.get_by_label("Password",exact=True).fill(service.password)
             page.get_by_role("button",name="Sign in").click()
             expect(page.get_by_role("heading",name="ACP work",exact=True)).to_be_visible()
+            expect(page.locator(".account-list").get_by_role("progressbar")).to_have_count(0)
             expect(page.get_by_role("button",name="Antigravity",exact=True)).to_have_attribute("aria-pressed","true")
             page.get_by_role("button",name="Copy Antigravity sign-in command").click()
             self.assertEqual(page.evaluate("navigator.clipboard.readText()"),"ccp login "+str(c["id"]))
@@ -247,6 +249,7 @@ class Panel(unittest.TestCase):
         self.assertEqual(status, 201)
         with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
             page = browser.new_page(viewport={"width":1240, "height":850})
+            page.clock.set_fixed_time("2033-05-15T04:00:00Z")
             page.goto(f"http://127.0.0.1:{service.port}/#startups?tool=codex")
             page.get_by_label("Password",exact=True).fill(service.password)
             page.get_by_role("button",name="Sign in").click()
@@ -268,12 +271,34 @@ class Panel(unittest.TestCase):
             disabled.get_by_role("button",name="Refresh quota",exact=True).click()
             expect(disabled).to_contain_text("100% left")
             self.assertLess(overview.bounding_box()["y"] + overview.bounding_box()["height"], logs.bounding_box()["y"])
-            for width in [1240, 320]:
+            countdown = disabled.get_by_text("· in 3d", exact=True)
+            for width in [1240, 780, 320]:
                 page.set_viewport_size({"width":width, "height":850})
                 self.check_layout(page,"dashboard-" + str(width))
+                self.assertEqual(countdown.evaluate("""s => {
+                    const r = document.createRange(); r.selectNodeContents(s); return r.getClientRects().length;
+                }"""), 1)
+                if width == 780:
+                    first = overview.locator("section").first.bounding_box()
+                    self.assertEqual(disabled.bounding_box()["y"], first["y"])
+                    self.assertLess(first["width"], 400)
+                if width <= 780:
+                    instant = disabled.locator("time span").first.bounding_box()
+                    meter = disabled.get_by_role("progressbar").bounding_box()
+                    self.assertEqual(instant["y"], countdown.bounding_box()["y"])
+                    self.assertGreater(instant["y"], meter["y"] + meter["height"])
             disabled.get_by_role("link",name="Codex / Work").click()
             expect(page).to_have_url(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={codex['id']}")
             expect(page.get_by_role("heading",name="Profile sign-in")).to_be_visible()
+            row = page.locator(".account-row")
+            bar = row.get_by_role("progressbar", name="5h remaining")
+            expect(bar).to_be_visible()
+            expect(bar).to_have_attribute("value", "100")
+            expect(row).to_have_accessible_name(re.compile("5h 100% left"))
+            self.assertLess(row.locator("strong").bounding_box()["y"], bar.bounding_box()["y"])
+            self.assertLess(bar.bounding_box()["y"], row.locator(".caption").bounding_box()["y"])
+            page.emulate_media(color_scheme="dark")
+            self.check_layout(page, "quota-bars-dark-mobile")
 
     def test_quota_poll_keeps_card_controls_interactive(self):
         service = self.start_service()
@@ -376,6 +401,128 @@ class Panel(unittest.TestCase):
         if path:
             Path(path).mkdir(exist_ok=True)
             page.screenshot(path=str(Path(path)/(name+".png")),full_page=True)
+
+    def test_theme_before_and_after_sign_in(self):
+        service = self.start_service()
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(color_scheme="dark", viewport={"width":320, "height":720})
+            page.goto(f"http://127.0.0.1:{service.port}")
+            theme = page.get_by_role("combobox", name="Theme", exact=True)
+            expect(theme).to_have_value("system")
+            root = page.locator("html")
+            background = lambda: root.evaluate("e => getComputedStyle(e).backgroundColor")
+            dark = background()
+            page.emulate_media(color_scheme="light")
+            light = background()
+            self.assertNotEqual(dark, light)
+            theme.select_option("dark")
+            page.reload()
+            expect(theme).to_have_value("dark")
+            expect(root).to_have_css("background-color", dark)
+            self.check_layout(page, "dark-signin")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            page.get_by_role("link", name="Settings", exact=True).click()
+            expect(theme).to_have_value("dark")
+            self.check_layout(page, "dark-settings-mobile")
+            theme.select_option("light")
+            page.emulate_media(color_scheme="dark")
+            expect(root).to_have_css("background-color", light)
+            page.reload()
+            expect(theme).to_have_value("light")
+            theme.select_option("system")
+            expect(root).to_have_css("background-color", dark)
+            page.get_by_role("button", name="Sign out").click()
+            expect(theme).to_have_value("system")
+            page.emulate_media(color_scheme="light")
+            expect(root).to_have_css("background-color", light)
+
+    def test_save_routing_mode_and_account_priority(self):
+        service = self.start_service()
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width":1240, "height":850})
+            page.goto(f"http://127.0.0.1:{service.port}/#settings")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            mode = page.get_by_role("combobox", name="Routing mode", exact=True)
+            expect(mode).to_have_value("round_robin")
+            for value in ("most_remaining", "least_remaining", "priority", "round_robin"):
+                mode.select_option(value)
+                save = page.get_by_role("button", name="Save routing mode")
+                with page.expect_response(lambda r: r.request.method == "PUT" and r.url.endswith("/settings")) as result:
+                    save.press("Enter")
+                self.assertEqual(result.value.status, 200)
+                self.assertEqual(service.api("GET", "settings")[1]["routing_mode"], value)
+                page.reload()
+                expect(mode).to_have_value(value)
+            self.check_layout(page, "settings")
+            page.get_by_role("link", name="Accounts", exact=True).click()
+            page.get_by_role("button", name="Add profile").click()
+            priority = page.get_by_role("spinbutton", name="Priority", exact=True)
+            expect(priority).to_have_value("0")
+            for invalid in ("-1", "101", "2.5", ""):
+                priority.fill(invalid)
+                self.assertFalse(priority.evaluate("e => e.checkValidity()"))
+            page.get_by_label("Label", exact=True).fill("Primary")
+            priority.fill("100")
+            page.get_by_role("dialog").get_by_role("button", name="Add profile").click()
+            expect(page.get_by_text("Priority", exact=True)).to_be_visible()
+            expect(page.locator(".facts dd", has_text=re.compile("^100$"))).to_be_visible()
+            self.assertEqual(service.api("GET","accounts?tool=claude")[1]["items"][0]["priority"], 100)
+            page.get_by_role("button", name="Edit config").click()
+            expect(priority).to_have_value("100")
+            priority.fill("0")
+            page.get_by_role("button", name="Save changes").click()
+            expect(page.get_by_role("dialog")).to_be_hidden()
+            page.reload()
+            expect(page.locator(".facts dd", has_text=re.compile("^0$"))).to_be_visible()
+            self.assertEqual(service.api("GET","accounts?tool=claude")[1]["items"][0]["priority"], 0)
+
+    def test_change_panel_password(self):
+        service = self.start_service()
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width":390, "height":844})
+            page.goto(f"http://127.0.0.1:{service.port}/#sessions")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            refresh = page.get_by_role("button", name="Refresh", exact=True)
+            expect(refresh).to_be_visible()
+            # Send a read with the original token only after signing in with the new password.
+            held = []
+            page.route("**/api/v1/sessions*", lambda route: held.append(route), times=1)
+            with page.expect_request("**/api/v1/sessions*"):
+                refresh.click()
+            page.get_by_role("link", name="Settings", exact=True).click()
+            current = page.get_by_label("Current password", exact=True)
+            new = page.get_by_label("New password", exact=True)
+            confirm = page.get_by_label("Confirm new password", exact=True)
+            change = page.get_by_role("button", name="Change password")
+            error = page.locator("form").filter(has=current).get_by_role("alert")
+            current.fill("incorrect")
+            new.fill("abc")
+            self.assertFalse(new.evaluate("e => e.checkValidity()"))
+            new.fill("fixture-new")
+            confirm.fill("mismatch")
+            change.click()
+            expect(error).to_have_text("Passwords do not match.")
+            confirm.fill("fixture-new")
+            with page.expect_response(lambda r: r.url.endswith("/password")) as wrong:
+                change.click()
+            self.assertEqual(wrong.value.status, 400)
+            expect(error).to_have_text(wrong.value.json()["message"])
+            current.fill(service.password)
+            change.click()
+            expect(page.get_by_role("heading", name="Sign in")).to_be_visible()
+            self.assertIsNone(page.evaluate("sessionStorage.getItem('ccp_session')"))
+            self.assertEqual(service.api("GET", "accounts?tool=claude")[0], 403)
+            page.get_by_label("Password", exact=True).fill("fixture-new")
+            page.get_by_role("button", name="Sign in").click()
+            expect(page.get_by_role("heading", name="Settings")).to_be_visible()
+            with page.expect_response("**/api/v1/sessions*") as stale:
+                held[0].continue_()
+            self.assertEqual(stale.value.status, 403)
+            expect(page.get_by_role("status")).to_have_text(stale.value.json()["message"])
+            expect(page.get_by_role("heading", name="Settings")).to_be_visible()
 
 if __name__=="__main__":
     unittest.main()
