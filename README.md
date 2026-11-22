@@ -83,7 +83,7 @@ The **Routing mode** in Settings applies across providers. A new chat selects am
 
 In every mode, a fresh, matching quota reading of zero excludes that profile from new admissions. If all eligible profiles are known to be exhausted, the launch is refused. Missing, stale, or already-reset readings are unknown, not zero: usage-based modes prefer measured profiles but can still use an unmeasured one. Sticky resumes stay with their owner even if its quota is exhausted; the provider can still refuse the request.
 
-Codex quota can be displayed without being used for routing. The router ranks a Codex profile only when the native app-server confirms file-backed login and the login and config still match the reading. Keyring and auto storage, a project config override, or an ambiguous managed policy make the score unknown. Ordinary model or trust settings in the profile do not by themselves disqualify it. Antigravity's native text report is for display only.
+Codex quota can be displayed without being used for routing. The router ranks a Codex profile only when the native app-server confirms file-backed login and the login and config still match the reading. Keyring and auto storage, a project config override, or an ambiguous managed policy make the score unknown. Ordinary model or trust settings in the profile do not by themselves disqualify it. Antigravity reports limits per model group, not a single account-wide allowance; its quota is for display only.
 
 ### Antigravity
 
