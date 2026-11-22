@@ -402,6 +402,17 @@ class Panel(unittest.TestCase):
             Path(path).mkdir(exist_ok=True)
             page.screenshot(path=str(Path(path)/(name+".png")),full_page=True)
 
+    def check_border_contrast(self, control):
+        border, surface = control.evaluate("""e => [
+            getComputedStyle(e).borderTopColor, getComputedStyle(document.documentElement).backgroundColor
+        ]""")
+        def luminance(color):
+            rgb = [int(v) / 255 for v in re.fullmatch(r"rgb\((\d+), (\d+), (\d+)\)", color).groups()]
+            return sum(w * (v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4)
+                       for w, v in zip((0.2126, 0.7152, 0.0722), rgb))
+        low, high = sorted(map(luminance, (border, surface)))
+        self.assertGreaterEqual((high + 0.05) / (low + 0.05), 3, f"{border} against {surface}")
+
     def test_theme_before_and_after_sign_in(self):
         service = self.start_service()
         with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
@@ -424,10 +435,13 @@ class Panel(unittest.TestCase):
             page.get_by_role("button", name="Sign in").click()
             page.get_by_role("link", name="Settings", exact=True).click()
             expect(theme).to_have_value("dark")
+            password = page.get_by_label("Current password", exact=True)
+            self.check_border_contrast(password)
             self.check_layout(page, "dark-settings-mobile")
             theme.select_option("light")
             page.emulate_media(color_scheme="dark")
             expect(root).to_have_css("background-color", light)
+            self.check_border_contrast(password)
             page.reload()
             expect(theme).to_have_value("light")
             theme.select_option("system")
@@ -523,6 +537,42 @@ class Panel(unittest.TestCase):
             self.assertEqual(stale.value.status, 403)
             expect(page.get_by_role("status")).to_have_text(stale.value.json()["message"])
             expect(page.get_by_role("heading", name="Settings")).to_be_visible()
+
+    def test_delayed_password_success_preserves_new_session(self):
+        service = self.start_service()
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{service.port}/#settings")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            page.get_by_label("Current password").fill(service.password)
+            page.get_by_label("New password", exact=True).fill("fixture-new")
+            page.get_by_label("Confirm new password").fill("fixture-new")
+            change = page.get_by_role("button", name="Change password")
+            original_button = change.element_handle()
+            held = []
+            page.route("**/api/v1/password", lambda route: held.append(route), times=1)
+            with page.expect_request("**/api/v1/password"):
+                change.click()
+            success = held[0].fetch()
+            self.assertEqual(success.status, 200)
+
+            # The server rotated the password but the submitting tab hasn't seen its 200 yet.
+            with page.expect_response("**/api/v1/sessions*") as rejected:
+                page.get_by_role("link", name="Sessions", exact=True).click()
+            self.assertEqual(rejected.value.status, 403)
+            page.get_by_label("Password", exact=True).fill("fixture-new")
+            page.get_by_role("button", name="Sign in").click()
+            sessions = page.get_by_role("heading", name="Sessions", exact=True)
+            expect(sessions).to_be_visible()
+            token = page.evaluate("sessionStorage.getItem('ccp_session')")
+            self.assertTrue(token)
+
+            held[0].fulfill(response=success)
+            page.wait_for_function("button => !button.disabled", arg=original_button)
+            self.assertTrue(page.evaluate("token => sessionStorage.getItem('ccp_session') === token", token))
+            expect(sessions).to_be_visible()
+            expect(page.get_by_role("status")).not_to_contain_text("Sign in again")
 
 if __name__=="__main__":
     unittest.main()

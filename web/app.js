@@ -267,7 +267,9 @@ function changePasswordForm() {
     try {
       if ([...next.value].length < 4) throw new Error("Use at least 4 characters.");
       if (next.value !== confirm.value) throw new Error("Passwords do not match.");
+      const submittingToken = sessionToken;
       await api("password", "POST", {current_password: current.value, new_password: next.value});
+      if (sessionToken !== submittingToken) return;
       signedOut();
       notice("Password changed. Sign in again.");
     } catch (err) {
