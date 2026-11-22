@@ -107,6 +107,8 @@ For a new chat, the TUI or exec client connects to a private app-server on this 
 
 Use `-C` for the workspace and `-m` to override the model. Interactive launches keep the native folder trust prompt. New `exec` launches require a Git workspace unless you explicitly pass `--skip-git-repo-check`. Configure sandbox and approval policy in the profile: the router refuses per-launch policy overrides, `--add-dir`, `--no-daemon`, and `--output-schema` for new managed chats rather than silently ignoring them.
 
+To attach an image on an exact resume, use `ccp codex resume <uuid> --image=screen.png 'What changed?'`. The same form works with `exec resume`. With interactive `-i file1 file2`, use `--` before the prompt: otherwise native Codex consumes it as another filename. Image options are not accepted for new managed chats.
+
 A direct app-server selects a profile **once per process**, not per request. The client uses native stdio; diagnostics go to stderr. Successful persistent root `thread/start` replies are associated with that profile; a resume does not create an ownership claim. Unknown or disabled owners are refused before starting a `--for-session` server. Arbitrary listeners and cross-profile routing on one connection are not supported. Ownership inspection is bounded to 2 MiB per frame, 256 bytes per string request ID, and 1024 outstanding starts. Beyond those limits, frames still pass unchanged but a mapping can be missed.
 
 Config identity includes the directory's device, inode and creation time. This detects reuse of a deleted directory's inode without writing markers into provider homes. Use a filesystem that exposes creation time (such as ext4). When upgrading an older router, make sure the original directories are mounted: the first open pins the creation time of homes matching their previously recorded device and inode. Restore any offline original and restart the daemon to finish pinning it.
@@ -118,7 +120,7 @@ Config identity includes the directory's device, inode and creation time. This d
 ```sh
 ccp claude --model opus
 ccp codex exec --json 'review these changes'
-ccp claude --resume 60000000-0000-4000-8000-000000000002
+ccp claude --permission-mode plan --resume 60000000-0000-4000-8000-000000000002 --model opus 'continue'
 ccp codex resume 01a1fb8e-61fb-71f1-9831-4c38d904ad22
 ccp codex exec resume 01a1fb8e-61fb-71f1-9831-4c38d904ad22 'continue'
 ccp claude auth status

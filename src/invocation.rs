@@ -213,17 +213,19 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut words = Vec::new();
     let mut first_word = None;
     let mut local_only_option = false;
+    let mut codex_images = false;
     let mut codex = CodexArgs::default();
     let mut skip_git_check = false;
     let mut tail = false;
     let mut resume = None;
     let mut help = false;
     let mut print_mode = false;
-    let mut it = args.iter();
+    let mut it = args.iter().peekable();
+    let positional = |arg: &str| !arg.starts_with('-') || arg == "-";
     while let Some(arg) = it.next() {
         let start = args.len() - it.len() - 1;
         let arg = arg.as_str();
-        if tail || !arg.starts_with('-') || arg == "-" {
+        if tail || positional(arg) {
             first_word.get_or_insert(start);
             words.push((arg, !tail));
             continue;
@@ -245,7 +247,6 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 | "--sandbox"
                 | "-a"
                 | "--ask-for-approval"
-                | "--dangerously-bypass-approvals-and-sandbox"
                 | "--output-schema"
         );
         skip_git_check |= key == "--skip-git-repo-check";
@@ -288,6 +289,22 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 }
                 codex.model = Some((start..args.len() - it.len(), s.to_owned()));
             }
+            (false, "-i" | "--image") => {
+                let file = value()?;
+                if file.is_empty() || (inline.is_none() && !positional(file)) {
+                    return Err(unsupported());
+                }
+                codex_images = true;
+                // Pinned Codex consumes a list, except for an attached value or after exec resume.
+                if inline.is_none()
+                    && !matches!(
+                        words.as_slice(),
+                        [("exec" | "e", true), ("resume", true), ..]
+                    )
+                {
+                    while it.next_if(|arg| positional(arg)).is_some() {}
+                }
+            }
             (false, "--device-auth" | "--with-api-key")
                 if inline.is_none() && words.first() == Some(&("login", true)) => {}
             (true, "--console" | "--claudeai" | "--sso" | "--text")
@@ -316,12 +333,15 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             (
                 true,
                 "--model"
+                | "-n"
+                | "--name"
                 | "--effort"
                 | "--output-format"
                 | "--input-format"
                 | "--max-turns"
                 | "--max-budget-usd"
                 | "--permission-mode"
+                | "--permission-prompts"
                 | "--system-prompt"
                 | "--append-system-prompt"
                 | "--agent"
@@ -345,10 +365,18 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 }
             }
             (true, "-p" | "--print") if inline.is_none() => print_mode = true,
+            (false, "--dangerously-bypass-approvals-and-sandbox" | "--yolo")
+                if inline.is_none() =>
+            {
+                local_only_option = true;
+            }
             (
                 true,
                 "--verbose"
                 | "--include-partial-messages"
+                | "--ax-screen-reader"
+                | "--no-chrome"
+                | "--allow-dangerously-skip-permissions"
                 | "--dangerously-skip-permissions"
                 | "--disable-slash-commands",
             )
@@ -359,8 +387,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 | "--no-daemon"
                 | "--search"
                 | "--skip-git-repo-check"
-                | "--strict-config"
-                | "--dangerously-bypass-approvals-and-sandbox",
+                | "--strict-config",
             ) if inline.is_none() => {}
             (_, "--last" | "--continue") | (true, "-c") => return Err(native_id("").unwrap_err()),
             _ => return Err(unsupported()),
@@ -454,6 +481,12 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         }
     };
     if !claude {
+        if codex_images && !matches!(intent, Intent::Resume(_)) {
+            return Err(Error::bad(
+                "unsupported_invocation",
+                "Image attachments require an exact Codex resume. Use resume UUID --image=FILE before the prompt.",
+            ));
+        }
         if matches!(command, Some("exec" | "e")) {
             codex.exec = first_word;
         }
@@ -605,6 +638,171 @@ mod tests {
             parse("codex", &["login", "status"]).unwrap().intent,
             Intent::Misc
         );
+    }
+
+    #[test]
+    fn local_chat_options_allow_new_chats_and_exact_resumes() {
+        let id = "60000000-0000-4000-8000-000000000002";
+        for (tool, args) in [
+            (
+                "claude",
+                vec!["--resume", id, "--dangerously-skip-permissions"],
+            ),
+            (
+                "claude",
+                vec![
+                    "--permission-mode",
+                    "plan",
+                    "--name",
+                    "update",
+                    "-r",
+                    id,
+                    "--model=opus",
+                    "--ax-screen-reader",
+                    "--",
+                    "--continue",
+                ],
+            ),
+            (
+                "claude",
+                vec![
+                    "--allow-dangerously-skip-permissions",
+                    "-r",
+                    id,
+                    "-n",
+                    "my session",
+                    "--effort",
+                    "high",
+                    "go on",
+                ],
+            ),
+            (
+                "claude",
+                vec![
+                    "-p",
+                    "--permission-prompts=none",
+                    "--no-chrome",
+                    "--resume",
+                    id,
+                    "--",
+                    "doctor",
+                ],
+            ),
+            (
+                "codex",
+                vec!["resume", id, "--dangerously-bypass-approvals-and-sandbox"],
+            ),
+            (
+                "codex",
+                vec![
+                    "--model",
+                    "resume",
+                    "--no-alt-screen",
+                    "resume",
+                    "-s",
+                    "read-only",
+                    id,
+                    "--",
+                    "--last",
+                ],
+            ),
+            (
+                "codex",
+                vec!["e", "--model=exec", "resume", "--json", id, "--yolo", "-"],
+            ),
+        ] {
+            assert_eq!(
+                parse(tool, &args).unwrap().intent,
+                Intent::Resume(id.into()),
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            parse("claude", &["-n", "auth", "--ax-screen-reader", "hello"])
+                .unwrap()
+                .intent,
+            Intent::New
+        );
+        assert_eq!(
+            parse(
+                "codex",
+                &["--no-alt-screen", "-m", "resume", "--", "--last"]
+            )
+            .unwrap()
+            .intent,
+            Intent::New
+        );
+        for (tool, args) in [
+            ("claude", vec!["--name", "--resume", id]),
+            ("claude", vec!["--resume", id, "-n"]),
+            (
+                "claude",
+                vec!["--permission-prompts", "--no-chrome", "-r", id],
+            ),
+            ("claude", vec!["--ax-screen-reader=false", "-r", id]),
+            ("claude", vec!["--name", "display", "--", "update"]),
+            ("codex", vec!["exec", "--skip-git-repo-check", "--yolo"]),
+            (
+                "claude",
+                vec!["--ax-screen-reader", "--fork-session", "-r", id],
+            ),
+            (
+                "codex",
+                vec![
+                    "--no-alt-screen",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "prompt",
+                ],
+            ),
+            (
+                "codex",
+                vec!["app-server", "--for-session", id, "--model=m"],
+            ),
+        ] {
+            assert!(parse(tool, &args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn images_follow_native_arity_only_on_exact_codex_resumes() {
+        let id = "60000000-0000-4000-8000-000000000002";
+        for args in [
+            vec!["resume", id, "-i", "a.png", "b.png", "--", "--last"],
+            vec!["--image=a.png,b.png", "resume", id, "describe"],
+            vec!["--image", "exec", "-m", "m", "resume", id],
+            vec!["resume", "--image=a.png", id, "describe"],
+            vec!["exec", "--image=a.png", "resume", id, "describe"],
+            vec!["e", "resume", "-i", "a.png,b.png", id, "describe"],
+            vec!["exec", "resume", id, "-i", "a.png", "describe"],
+        ] {
+            assert_eq!(
+                parse("codex", &args).unwrap().intent,
+                Intent::Resume(id.into()),
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["-i", "a.png", "resume", id],
+            vec!["resume", "-i", "a.png", id],
+            vec!["exec", "-i", "a.png", "resume", id],
+            vec!["--image=a.png", "--", "resume"],
+            vec!["--image=a.png", "cloud", "--help"],
+            vec!["--image=a.png", "fork", id],
+            vec!["--image=a.png", "resume", "--last"],
+            vec![
+                "exec",
+                "--skip-git-repo-check",
+                "--image=a.png",
+                "new prompt",
+            ],
+            vec!["resume", id, "--image"],
+            vec!["resume", id, "-i", "--"],
+            vec!["resume", id, "--image="],
+            vec!["exec", "resume", "-i", "a.png", "b.png", id],
+            vec!["app-server", "--for-session", id, "--image=a.png"],
+        ] {
+            assert!(parse("codex", &args).is_err(), "{args:?}");
+        }
     }
 
     #[test]
