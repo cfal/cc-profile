@@ -276,7 +276,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=10).contains(&v)
+        } else if !(1..=11).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -337,6 +337,13 @@ impl Store {
         }
         if v < 10 {
             tx.execute_batch(include_str!("saved_file_sessions.sql"))?;
+        }
+        if v < 11 {
+            tx.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN tui_workspace TEXT;
+                 UPDATE sessions SET tui_workspace=workspace WHERE evidence='saved_file';
+                 PRAGMA user_version=11;",
+            )?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
@@ -472,13 +479,14 @@ impl Store {
             (
                 "sessions",
                 "owner",
-                "SELECT s.seq,s.tool,s.native_id,s.owner,c.label,c.enabled,s.evidence,s.bound_ms,s.last_routed_ms,s.workspace",
+                "SELECT s.seq,s.tool,s.native_id,s.owner,c.label,c.enabled,s.evidence,s.bound_ms,s.last_routed_ms,s.workspace,s.tui_workspace",
             )
         } else {
             (
                 "launches",
                 "config_id",
-                "SELECT s.seq,s.tool,s.native_id,s.config_id,c.label,c.enabled,s.intent,s.state,s.reason,s.created_ms,s.workspace,s.request_id,s.observed_ms",
+                "SELECT s.seq,s.tool,s.native_id,s.config_id,c.label,c.enabled,s.intent,s.state,s.reason,s.created_ms,s.workspace,s.request_id,s.observed_ms,
+                 EXISTS(SELECT 1 FROM sessions m WHERE m.tool=s.tool AND m.native_id=s.native_id AND m.owner=s.config_id)",
             )
         };
         let mut sql =
@@ -508,9 +516,9 @@ impl Store {
         let mut items=db.prepare(&sql)?.query_map(params_from_iter(args),|r|{
             let mut v=json!({"seq":r.get::<_,i64>(0)?,"tool":r.get::<_,String>(1)?,"native_id":r.get::<_,Option<String>>(2)?,
                 "config_id":r.get::<_,Option<i64>>(3)?,"label":r.get::<_,Option<String>>(4)?,"enabled":r.get::<_,Option<bool>>(5)?});
-            if sessions {v["evidence"]=r.get::<_,String>(6)?.into();v["bound_ms"]=r.get::<_,i64>(7)?.into();v["last_routed_ms"]=r.get::<_,i64>(8)?.into();v["workspace"]=r.get::<_,String>(9)?.into();}
+            if sessions {v["evidence"]=r.get::<_,String>(6)?.into();v["bound_ms"]=r.get::<_,i64>(7)?.into();v["last_routed_ms"]=r.get::<_,i64>(8)?.into();v["workspace"]=r.get::<_,String>(9)?.into();v["tui_workspace"]=r.get::<_,Option<String>>(10)?.into();}
             else{for (i,k) in [(6,"intent"),(7,"state"),(8,"reason"),(10,"workspace"),(11,"request_id")]{v[k]=r.get::<_,Option<String>>(i)?.into();}
-                 v["created_ms"]=r.get::<_,i64>(9)?.into();v["observed_ms"]=r.get::<_,Option<i64>>(12)?.into();}
+                 v["created_ms"]=r.get::<_,i64>(9)?.into();v["observed_ms"]=r.get::<_,Option<i64>>(12)?.into();v["mapped"]=r.get::<_,bool>(13)?.into();}
             Ok(v)
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         let cursor = if items.len() > count as usize {

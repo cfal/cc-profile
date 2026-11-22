@@ -123,6 +123,7 @@ fn agy_tui_resume_replay_rechecks_the_saved_conversation_with_native_options() {
     assert_eq!(confirmed["seq"], first["seq"]);
     assert_eq!(confirmed["evidence"], "observed");
     assert_eq!(confirmed["workspace"], "/acp");
+    assert_eq!(confirmed["tui_workspace"], f.root.to_str().unwrap());
 }
 
 #[test]

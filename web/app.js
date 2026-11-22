@@ -409,7 +409,7 @@ async function logs(view, params, ver, enter) {
             class: "aslink uuid",
             title: uid,
             onclick: () =>
-              view === "sessions" || (row.intent === "tui_resume" && row.state === "denied")
+              view === "sessions" || (row.intent === "tui_resume" && !row.mapped)
                 ? copy(uid).catch((e) => notice(e.message))
                 : go("sessions", { tool: row.tool, native_id: uid }),
           },
@@ -428,14 +428,18 @@ async function logs(view, params, ver, enter) {
       ),
       el("div", { class: "caption" }, simple(row.reason || "")),
     );
-    const commands = sessions
-      ? ib("Copy resume command", "copy", () => {
-          const args = row.tool === "agy"
-            ? (row.evidence === "saved_file" ? " --conversation=" : " acp --for-session ") + shell(uid)
-            : (row.tool === "claude" ? " --resume " : " resume ") + uid;
-          return copy("cd " + shell(row.workspace) + " && ccp " + row.tool + args);
-        })
-      : null;
+    let commands;
+    if (sessions) {
+      const resume = (label, glyph, cwd, args) => ib(label, glyph, () =>
+        copy("cd " + shell(cwd) + " && ccp " + row.tool + args));
+      const fileOnly = row.evidence === "saved_file";
+      const both = row.tool === "agy" && !fileOnly && row.tui_workspace != null;
+      commands = el("div", {class: "row"},
+        !fileOnly && resume(both ? "Copy ACP resume command" : "Copy resume command", "copy", row.workspace,
+          row.tool === "agy" ? " acp --for-session " + shell(uid) : (row.tool === "claude" ? " --resume " : " resume ") + uid),
+        (fileOnly || both) && resume(both ? "Copy terminal resume command" : "Copy resume command",
+          both ? "square-terminal" : "copy", row.tui_workspace || row.workspace, " --conversation=" + shell(uid)));
+    }
     const det = ib("Startup details", "chevron-right", async () => {
       expanded = expanded === row.seq ? null : row.seq;
       await render();
@@ -446,7 +450,7 @@ async function logs(view, params, ver, enter) {
           idLink,
           alias,
           el("div", {}, cfg, row.enabled === false && el("div", {}, pill("Disabled"))),
-          el("span", {class:"wrap"}, row.workspace),
+          el("span", {class:"wrap"}, (row.evidence === "saved_file" && row.tui_workspace) || row.workspace),
           pill(simple(row.evidence)),
           fmt(row.last_routed_ms),
           commands,

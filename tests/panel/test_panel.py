@@ -241,11 +241,14 @@ class Panel(unittest.TestCase):
             expect(page.locator("body")).not_to_contain_text("fixture-private")
             sid = "acp:it's here"
             tui_id = "707996ed-9668-43f7-b4d8-bc92e2021fe1"
+            both_id = str(uuid.uuid4())
             with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
                 db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
                            "VALUES('agy',?,?,'observed','/my workspace',1,1)",(sid,c["id"]))
                 db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
                            "VALUES('agy',?,?,'saved_file','/a tui workspace',2,2)",(tui_id,c["id"]))
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms) "
+                           "VALUES('agy',?,?,'observed','/dual acp','/dual tui',3,4)",(both_id,c["id"]))
             page.get_by_role("navigation").get_by_text("Sessions").click()
             expect(page.get_by_role("button",name=sid,exact=True)).to_be_visible()
             page.get_by_role("row").filter(has_text="/my workspace").get_by_role("button",name="Copy resume command").click()
@@ -254,6 +257,11 @@ class Panel(unittest.TestCase):
             page.get_by_role("row").filter(has_text="/a tui workspace").get_by_role("button",name="Copy resume command").click()
             self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
                              ["cd","/a tui workspace","&&","ccp","agy","--conversation="+tui_id])
+            both = page.get_by_role("row").filter(has_text="/dual acp")
+            for label, args in [("Copy ACP resume command",["/dual acp","&&","ccp","agy","acp","--for-session",both_id]),
+                                ("Copy terminal resume command",["/dual tui","&&","ccp","agy","--conversation="+both_id])]:
+                both.get_by_role("button",name=label).click()
+                self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),["cd",*args])
 
     def test_identity_follows_selected_account_not_delayed_probe(self):
         service = self.start_service()

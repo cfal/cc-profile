@@ -455,9 +455,13 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                         db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                     }
                     Intent::Resume(uid) => {
-                        let known = db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=? AND owner=?", params![ms, req.tool, uid, c.id])?;
-                        if known == 0 && i.agy_tui {
-                            insert_binding(db, "agy", uid, c.id, &workspace, "saved_file", ms)?;
+                        if i.agy_tui {
+                            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms)
+                                VALUES('agy',?1,?2,'saved_file',?3,?3,?4,?4)
+                                ON CONFLICT(tool,native_id) DO UPDATE SET last_routed_ms=excluded.last_routed_ms,tui_workspace=excluded.tui_workspace
+                                WHERE owner=excluded.owner", params![uid,c.id,workspace,ms])?;
+                        } else {
+                            db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=?", params![ms, req.tool, uid])?;
                         }
                     }
                     Intent::Misc => {}

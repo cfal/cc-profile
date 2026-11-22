@@ -209,6 +209,26 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
 }
 
 #[test]
+fn upgrading_an_old_tui_startup_does_not_create_a_mapping() {
+    let f = Fixture::new();
+    f.store.db().unwrap().execute_batch(
+        "INSERT INTO configs(id,tool,label,home,dev,ino,birth_ns) VALUES(42,'agy','old','/offline',1,2,3);
+         INSERT INTO launches(request_id,tool,intent,state,reason,native_id,config_id,workspace,digest,ticket_digest,created_ms)
+           VALUES('old','agy','tui_resume','routed','sticky','legacy-id',42,'/work',x'01',x'01',1);
+         PRAGMA user_version=9;",
+    ).unwrap();
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    assert_eq!(
+        upgraded.page(false, &Page::default()).unwrap()["items"][0]["mapped"],
+        false
+    );
+    assert_eq!(
+        upgraded.page(true, &Page::default()).unwrap()["items"],
+        json!([])
+    );
+}
+
+#[test]
 fn unsupported_config_schema_is_not_rewritten() {
     let f = Fixture::new();
     let path = f.root.join("state/unsupported.sqlite3");
