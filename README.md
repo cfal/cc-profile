@@ -87,7 +87,7 @@ Codex quota can be displayed without being used for routing. The router ranks a 
 
 ### Antigravity
 
-Run `ccp agy` to open the native terminal UI in the current workspace with the selected profile's private HOME, filesystem login environment, and proxy. New TUI conversations are not tracked. To reopen one, use `ccp agy --conversation <uuid>` (or `--conversation=<uuid>`, as printed by AgY on exit). The router checks for that exact saved conversation in registered profiles, refuses missing or conflicting matches or a disabled owner, and never rotates on resume. Native AgY validates and opens the conversation; ccp does not read transcripts. ACP remains the interface for tracked sessions.
+Run `ccp agy` to open the native terminal UI in the current workspace with the selected profile's private HOME, filesystem login environment, and proxy. New TUI conversations are not tracked until explicitly resumed. Use `ccp agy --conversation <uuid>` (or `--conversation=<uuid>`, as printed by AgY on exit). The router checks for that exact saved conversation in registered profiles, refuses missing or conflicting matches or a disabled owner, and never rotates on resume. Sessions then lists its owner and a TUI resume command. Native AgY validates and opens the conversation; ccp does not read transcripts.
 
 Use `ccp login <profile-id>` for native Google sign-in, then configure the harness to launch `ccp agy acp`. Use `ccp agy acp --for-session <id>` before sending a load request to reopen a session. The native processes use a private profile home and select filesystem credential storage instead of the desktop keyring. See [Antigravity setup, storage findings and verification limits](docs/antigravity.md) for the harness contract and upgrade caveats.
 

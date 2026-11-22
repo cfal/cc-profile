@@ -238,8 +238,8 @@ fn choose(
         Intent::Resume(uid) => {
             let owner = db
                 .query_row(
-                    "SELECT owner FROM sessions WHERE tool=? AND native_id=?",
-                    params![req.tool, uid],
+                    "SELECT owner FROM sessions WHERE tool=? AND native_id=? AND (? OR evidence!='saved_file')",
+                    params![req.tool, uid, i.agy_tui],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -455,7 +455,10 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                         db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                     }
                     Intent::Resume(uid) => {
-                        db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=?", params![ms, req.tool, uid])?;
+                        let known = db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=? AND owner=?", params![ms, req.tool, uid, c.id])?;
+                        if known == 0 && i.agy_tui {
+                            insert_binding(db, "agy", uid, c.id, &workspace, "saved_file", ms)?;
+                        }
                     }
                     Intent::Misc => {}
                 }
@@ -499,11 +502,11 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
             };
         }
         let id = crate::agy::session_id(&o.native_id)?;
-        let existing: Option<i64> = db
+        let existing: Option<(i64, String)> = db
             .query_row(
-                "SELECT owner FROM sessions WHERE tool='agy' AND native_id=?",
+                "SELECT owner,evidence FROM sessions WHERE tool='agy' AND native_id=?",
                 [id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
         match o.event.as_str() {
@@ -519,7 +522,13 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
                     .ok_or_else(|| Error::bad("bad_cwd", "Expected an absolute ACP workspace."))?;
                 match existing {
                     None => insert_binding(db, "agy", id, owner, ws, "observed", now()),
-                    Some(n) if n == owner => Ok(()),
+                    Some((n, evidence)) if n == owner => {
+                        if evidence == "saved_file" {
+                            db.execute("UPDATE sessions SET evidence='observed',workspace=?,last_routed_ms=? WHERE tool='agy' AND native_id=?",
+                                params![ws,now(),id])?;
+                        }
+                        Ok(())
+                    }
                     _ => Err(Error::conflict(
                         "observation_conflict",
                         "Session already belongs to another profile.",
@@ -528,7 +537,7 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
             }
             "session/load" | "session/resume" => {
                 let c = config(db, owner)?;
-                if existing != Some(owner) || !c.enabled || !c.present() {
+                if !existing.is_some_and(|(n,e)| n == owner && e == "observed") || !c.enabled || !c.present() {
                     return Err(Error::denied());
                 }
                 db.execute(

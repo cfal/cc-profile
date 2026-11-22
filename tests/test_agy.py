@@ -171,6 +171,7 @@ class Antigravity(unittest.TestCase):
                                   env=self.s.env, cwd=self.s.root, stdin=subprocess.DEVNULL,
                                   text=True, capture_output=True, timeout=8)
         self.assertNotEqual(run().returncode, 0)
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"], [])
         for ext in ("db", "pb"):
             saved = q / f"{uid}.{ext}"
             saved.touch()
@@ -187,7 +188,9 @@ class Antigravity(unittest.TestCase):
                 self.assertEqual((row["config_id"],row["intent"],row["reason"],row["native_id"]),
                                  (b["id"],"tui_resume","sticky",uid))
             self.assertNotEqual(run("--conversation",uid,"--sandbox","--conversation="+uid).returncode,0)
-            self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+            row, = self.s.api("GET","sessions?tool=agy")[1]["items"]
+            self.assertEqual((row["config_id"],row["native_id"],row["evidence"],row["workspace"]),
+                             (b["id"],uid,"saved_file",str(self.s.root)))
             duplicate = p / saved.name
             duplicate.symlink_to(saved)
             self.assertNotEqual(run().returncode, 0)
@@ -201,15 +204,21 @@ class Antigravity(unittest.TestCase):
             config_dir.chmod(0o700)
             duplicate.unlink()
             saved.unlink()
-        (q/f"{uid}.db").write_bytes(b"fixture")
+            self.assertIn("No registered", run().stderr)
+        (p/f"{uid}.db").write_bytes(b"moved")
+        self.assertIn("Conflicting", run().stderr)
+        self.assertNotEqual(self.s.cli("agy","acp","--for-session",uid).returncode,0)
+        # ACP has its own observed IDs, including a conflicting file owned elsewhere.
+        uid = str(uuid.uuid4())
         self.bridge([], (1, "session/new", {"cwd":"/work", "fixtureId":uid}))
+        (q/f"{uid}.db").write_bytes(b"fixture")
         self.assertIn("Conflicting", run().stderr)
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"][0]["config_id"], a["id"])
         uid = str(uuid.uuid4())
         (q/f"{uid}.db").write_bytes(b"other fixture")
         self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"enabled":False})
         self.assertIn("disabled", run().stderr)
-        self.assertEqual(len(self.s.api("GET","sessions?tool=agy")[1]["items"]),1)
+        self.assertEqual(len(self.s.api("GET","sessions?tool=agy")[1]["items"]),2)
         self.assertEqual(self.s.cli("agy").returncode, 0)
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], c["id"])
 

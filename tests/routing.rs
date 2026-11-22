@@ -76,8 +76,53 @@ fn agy_tui_resume_replay_rechecks_the_saved_conversation_with_native_options() {
         &b,
     );
     assert_eq!(launch(&f.store, &b, &r).unwrap().config_id, c.id);
+    assert_eq!(launch(&f.store, &b, &r).unwrap().config_id, c.id);
+    let first = &f.store.page(true, &Page::default()).unwrap()["items"][0];
+    assert_eq!(first["evidence"], "saved_file");
+    let reopened = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    assert_eq!(
+        reopened.page(true, &Page::default()).unwrap()["items"],
+        json!([first])
+    );
+    let again = req(&f, "agy", &["--conversation", &id.to_string()], &b);
+    reopened
+        .db()
+        .unwrap()
+        .execute("UPDATE sessions SET last_routed_ms=1", [])
+        .unwrap();
+    launch(&reopened, &b, &again).unwrap();
+    assert_eq!(
+        reopened.page(true, &Page::default()).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let row = &reopened.page(true, &Page::default()).unwrap()["items"][0];
+    assert_eq!(row["seq"], first["seq"]);
+    assert_eq!(row["bound_ms"], first["bound_ms"]);
+    assert!(row["last_routed_ms"].as_i64().unwrap() > 1);
     std::fs::remove_file(saved).unwrap();
     assert_eq!(launch(&f.store, &b, &r).unwrap_err().1, "stale_plan");
+    let acp = req(&f, "agy", &["acp"], &b);
+    launch(&f.store, &b, &acp).unwrap();
+    let mut event = Observation {
+        request_id: acp.request_id,
+        ticket: acp.ticket,
+        event: "session/load".into(),
+        source: "acp".into(),
+        native_id: id.to_string(),
+        workspace: Some("/acp".into()),
+    };
+    assert!(observe(&f.store, &event).is_err());
+    event.event = "session/new".into();
+    observe(&f.store, &event).unwrap();
+    event.event = "session/load".into();
+    observe(&f.store, &event).unwrap();
+    let confirmed = &f.store.page(true, &Page::default()).unwrap()["items"][0];
+    assert_eq!(confirmed["seq"], first["seq"]);
+    assert_eq!(confirmed["evidence"], "observed");
+    assert_eq!(confirmed["workspace"], "/acp");
 }
 
 #[test]

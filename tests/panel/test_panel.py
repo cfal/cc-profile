@@ -240,14 +240,20 @@ class Panel(unittest.TestCase):
             expect(dialog).to_be_hidden()
             expect(page.locator("body")).not_to_contain_text("fixture-private")
             sid = "acp:it's here"
+            tui_id = "707996ed-9668-43f7-b4d8-bc92e2021fe1"
             with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
                 db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
                            "VALUES('agy',?,?,'observed','/my workspace',1,1)",(sid,c["id"]))
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
+                           "VALUES('agy',?,?,'saved_file','/a tui workspace',2,2)",(tui_id,c["id"]))
             page.get_by_role("navigation").get_by_text("Sessions").click()
             expect(page.get_by_role("button",name=sid,exact=True)).to_be_visible()
-            page.get_by_role("button",name="Copy resume command").click()
+            page.get_by_role("row").filter(has_text="/my workspace").get_by_role("button",name="Copy resume command").click()
             self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
                              ["cd","/my workspace","&&","ccp","agy","acp","--for-session",sid])
+            page.get_by_role("row").filter(has_text="/a tui workspace").get_by_role("button",name="Copy resume command").click()
+            self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
+                             ["cd","/a tui workspace","&&","ccp","agy","--conversation="+tui_id])
 
     def test_identity_follows_selected_account_not_delayed_probe(self):
         service = self.start_service()

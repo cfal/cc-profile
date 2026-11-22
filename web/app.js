@@ -409,7 +409,7 @@ async function logs(view, params, ver, enter) {
             class: "aslink uuid",
             title: uid,
             onclick: () =>
-              view === "sessions" || row.intent === "tui_resume"
+              view === "sessions" || (row.intent === "tui_resume" && row.state === "denied")
                 ? copy(uid).catch((e) => notice(e.message))
                 : go("sessions", { tool: row.tool, native_id: uid }),
           },
@@ -429,10 +429,12 @@ async function logs(view, params, ver, enter) {
       el("div", { class: "caption" }, simple(row.reason || "")),
     );
     const commands = sessions
-      ? ib("Copy resume command", "copy", () =>
-          copy("cd " + shell(row.workspace) + " && ccp " + row.tool +
-            (row.tool === "agy" ? " acp --for-session " + shell(uid) : (row.tool === "claude" ? " --resume " : " resume ") + uid)),
-        )
+      ? ib("Copy resume command", "copy", () => {
+          const args = row.tool === "agy"
+            ? (row.evidence === "saved_file" ? " --conversation=" : " acp --for-session ") + shell(uid)
+            : (row.tool === "claude" ? " --resume " : " resume ") + uid;
+          return copy("cd " + shell(row.workspace) + " && ccp " + row.tool + args);
+        })
       : null;
     const det = ib("Startup details", "chevron-right", async () => {
       expanded = expanded === row.seq ? null : row.seq;

@@ -162,6 +162,7 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
         UPDATE tools SET cursor=42 WHERE tool='codex';
         INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
             VALUES('codex','existing-id',42,'observed','/ws',1,1);
+        UPDATE sqlite_sequence SET seq=90 WHERE name='sessions';
         INSERT INTO quota_cache(config_id,revision,attempt_ms,retry_ms,failures,status,stamp,snapshot)
             VALUES(42,4,1,0,0,'ok','original','{}');").unwrap();
     drop(db);
@@ -192,6 +193,13 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     )
     .unwrap();
     assert_eq!(db.last_insert_rowid(), 51);
+    db.execute(
+        "INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
+        VALUES('agy','new-uuid',51,'saved_file','/ws',2,2)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(db.last_insert_rowid(), 91);
     assert!(
         !db.prepare("PRAGMA foreign_key_check")
             .unwrap()
