@@ -34,6 +34,7 @@ pub struct App {
     pub quotas: super::quotas::Jobs,
     pub logins: super::device_login::Logins,
     pub identity_slots: tokio::sync::Semaphore,
+    pub reset_write: tokio::sync::Mutex<()>,
 }
 impl App {
     pub fn build(&self, t: &str) -> &Build {
@@ -238,6 +239,14 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
         .route("/api/v1/accounts/{id}/identity", get(super::identity::read))
+        .route(
+            "/api/v1/accounts/{id}/resets/list",
+            post(super::resets::list),
+        )
+        .route(
+            "/api/v1/accounts/{id}/resets/redeem",
+            post(super::resets::redeem),
+        )
         .route(
             "/api/v1/accounts/{id}/device-login",
             get(super::device_login::status).post(super::device_login::start),

@@ -276,7 +276,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=11).contains(&v)
+        } else if !(1..=12).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -344,6 +344,9 @@ impl Store {
                  UPDATE sessions SET tui_workspace=workspace WHERE evidence='saved_file';
                  PRAGMA user_version=11;",
             )?;
+        }
+        if v < 12 {
+            tx.execute_batch(include_str!("reset_grants.sql"))?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
@@ -470,6 +473,8 @@ impl Store {
     }
     pub fn prune(&self) -> Result<()> {
         self.write(|db|{
+            // Keep successful receipts and unresolved keys; old unconfirmed offers/definite negatives can be relisted.
+            db.execute("DELETE FROM reset_grants WHERE seen_ms<? AND (attempt IS NULL OR outcome IN ('nothingToReset','noCredit'))", [now()-86_400_000])?;
             db.execute("UPDATE launches SET state='unobserved',reason='thread_id_timeout' WHERE state='pending' AND created_ms<?",[now()-86_400_000])?;
             db.execute("DELETE FROM launches WHERE created_ms<?",[now()-90*86_400_000])?; Ok(())
         })

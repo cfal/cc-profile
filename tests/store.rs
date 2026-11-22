@@ -4,6 +4,34 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn reset_offers_upgrade_without_touching_profiles_and_keep_uncertain_attempts() {
+    let f = Fixture::new();
+    let c = f.add("codex", "work");
+    f.store
+        .db()
+        .unwrap()
+        .execute_batch("DROP TABLE reset_grants; PRAGMA user_version=11")
+        .unwrap();
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    let db = upgraded.db().unwrap();
+    assert_eq!(config(&db, c.id).unwrap().revision, c.revision);
+    for (handle, key) in [("pending", Some("key")), ("unconfirmed", None)] {
+        db.execute("INSERT INTO reset_grants(handle,config_id,profile,account,credit,details,seen_ms,attempt) VALUES(?,?,'p','a','c','d',0,?)",
+            rusqlite::params![handle,c.id,key]).unwrap();
+    }
+    drop(db);
+    upgraded.prune().unwrap();
+    let db = upgraded.db().unwrap();
+    assert_eq!(
+        db.query_row("SELECT group_concat(handle) FROM reset_grants", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "pending"
+    );
+}
+
+#[test]
 fn directory_identity_is_compatible_with_existing_native_databases() {
     use std::os::unix::fs::MetadataExt;
     let f = Fixture::new();
