@@ -247,7 +247,10 @@ fn choose(
                 let uuid =
                     Uuid::parse_str(uid).map_err(|_| denial("exact_id_required", None, None))?;
                 let mut found = None;
-                for c in configs(db, "agy")?.into_iter().filter(Config::present) {
+                for c in configs(db, "agy")?
+                    .into_iter()
+                    .filter(Config::directory_matches)
+                {
                     match crate::agy::has_conversation(&c.home, uuid) {
                         Ok(true) if found.is_some() || owner.is_some_and(|id| id != c.id) => {
                             return Ok(reject("conversation_ambiguous"));

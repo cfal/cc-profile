@@ -188,6 +188,11 @@ class Antigravity(unittest.TestCase):
             duplicate.unlink()
             duplicate.write_bytes(b"copy")
             self.assertIn("Conflicting", run().stderr)
+            config_dir = Path(a["home"])/".config"
+            config_dir.mkdir(mode=0o700, exist_ok=True)
+            config_dir.chmod(0o755)
+            self.assertIn("Conflicting", run().stderr)
+            config_dir.chmod(0o700)
             duplicate.unlink()
             saved.unlink()
         (q/f"{uid}.db").write_bytes(b"fixture")

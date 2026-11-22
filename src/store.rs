@@ -62,9 +62,11 @@ impl Config {
         (dev == self.dev && ino == self.ino && self.home.canonicalize().ok()? == self.home)
             .then_some(birth)
     }
+    pub(crate) fn directory_matches(&self) -> bool {
+        self.birth_ns.is_some() && self.observed_birth() == self.birth_ns
+    }
     pub fn present(&self) -> bool {
-        self.birth_ns.is_some()
-            && self.observed_birth() == self.birth_ns
+        self.directory_matches()
             && (self.tool != "agy" || crate::agy::has_login(&self.home).is_ok())
     }
     pub fn public(&self) -> Value {
