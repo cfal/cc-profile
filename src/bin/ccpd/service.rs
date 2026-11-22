@@ -31,7 +31,6 @@ pub struct App {
     pub codex: Build,
     pub agy: Build,
     pub state_dir: PathBuf,
-    pub port: u16,
     pub auth: Auth,
     pub quotas: super::quotas::Jobs,
     pub logins: super::device_login::Logins,

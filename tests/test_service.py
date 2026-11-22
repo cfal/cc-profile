@@ -122,12 +122,15 @@ else:
             self.assertNotIn("set-cookie",headers)
             self.session = data["session"]
 
-    def start(self, *args, warning=None):
+    def start(self, *args, warning=None, listen=None):
+        if listen is not None:
+            args = ("--listen", listen, *args)
         self.p = subprocess.Popen([str(getattr(self, "binary", DAEMON)), "--port", "0", *args], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
         if warning is not None:
             self.assertIn(warning, self.p.stderr.readline())
         line = self.p.stderr.readline()
-        self.assertIn("http://127.0.0.1:", line, line)
+        host = listen or "127.0.0.1"
+        self.assertIn(f"http://{'[' + host + ']' if ':' in host else host}:", line, line)
         self.port = int(re.search(r":(\d+)$", line.strip())[1])
 
     def stop(self):
@@ -135,8 +138,8 @@ else:
         self.p.wait(timeout=5)
         self.p.stderr.close()
 
-    def api(self, method, route, body=None, extra=None):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+    def api(self, method, route, body=None, extra=None, *, connect_host="127.0.0.1"):
+        conn = http.client.HTTPConnection(connect_host, self.port, timeout=8)
         headers = {"Origin": "http://127.0.0.1:%s" % self.port, "Content-Type": "application/json",
                    "X-CCP-Session": self.session}
         headers.update(extra or {})
@@ -486,7 +489,8 @@ else:
 
     def test_web_authenticates_reads_and_mutations(self):
         self.assertEqual(self.api("GET","accounts?tool=codex",extra={"X-CCP-Session":""})[0],403)
-        for extra in [{"X-CCP-Session":""}, {"Host":"example.invalid"}, {"Origin":"https://example.invalid"}]:
+        for extra in [{"X-CCP-Session":""}, {"Sec-Fetch-Site":"cross-site"}, {"Sec-Fetch-Site":"same-site"},
+                      {"Content-Type":"text/plain"}]:
             with self.subTest(extra=extra):
                 status, _, _ = self.api("POST", "accounts", {}, extra)
                 self.assertEqual(status, 403)

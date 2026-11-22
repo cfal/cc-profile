@@ -190,20 +190,16 @@ pub async fn logout(State(s): State<Shared>, h: HeaderMap) -> Result<Response> {
     Ok(Json(json!({})).into_response())
 }
 async fn check(s: &Shared, method: &Method, path: &str, h: &HeaderMap) -> Result<()> {
-    let host = h
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if host != format!("127.0.0.1:{}", s.port) && host != format!("localhost:{}", s.port) {
-        return Err(Error::denied());
-    }
+    // A reverse proxy can change the authority without changing the browser's request origin.
     let mutation = !matches!(*method, Method::GET | Method::HEAD);
     if mutation
-        && (h.get(header::ORIGIN).and_then(|h| h.to_str().ok()) != Some(&format!("http://{host}"))
-            || !h
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.split(';').next() == Some("application/json")))
+        && (matches!(
+            h.get("sec-fetch-site").and_then(|h| h.to_str().ok()),
+            Some("cross-site" | "same-site")
+        ) || !h
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.split(';').next() == Some("application/json")))
     {
         return Err(Error::denied());
     }

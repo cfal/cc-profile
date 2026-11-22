@@ -25,7 +25,7 @@ class PanelPassword(unittest.TestCase):
         self.assertNotEqual(s.api("POST","login",{"token":"obsolete token"})[0],200)
         self.assertEqual(s.api("GET","accounts?tool=claude")[0],403)
         self.assertEqual(s.api("POST","setup",{"password":"abc"})[0],400)
-        self.assertEqual(s.api("POST","setup",{"password":s.password},{"Origin":"https://example.invalid"})[0],403)
+        self.assertEqual(s.api("POST","setup",{"password":s.password},{"Sec-Fetch-Site":"cross-site"})[0],403)
         passwords = ["1234", " a b"]
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             results=list(pool.map(lambda p:s.api("POST","setup",{"password":p}),passwords))
@@ -40,6 +40,25 @@ class PanelPassword(unittest.TestCase):
             verifier,=db.execute("SELECT verifier FROM panel_password").fetchone()
             self.assertTrue(verifier.startswith("$argon2id$"))
             self.assertNotIn(passwords[winner],verifier)
+
+    def test_wildcard_listener_allows_first_visit_setup_and_proxied_sign_in(self):
+        s = self.s
+        s.stop()
+        s.start(listen="0.0.0.0")
+        # A proxy may rewrite Host and terminate TLS on a different port.
+        headers = {"Host": "ccpd.internal", "Origin": "https://panel.example:8443", "Sec-Fetch-Site": "same-origin"}
+        def api(method, route, body=None):
+            return s.api(method, route, body, headers, connect_host="127.0.0.2")[:2]
+        self.assertEqual(api("GET", "session"), (200, {"setup_required": True, "signed_in": False}))
+        self.assertEqual(api("GET", "settings")[0], 403)
+        creds = {"password": s.password}
+        status, result = api("POST", "setup", creds)
+        self.assertEqual(status, 200, result)
+        s.session = result["session"]
+        self.assertEqual(api("PUT", "settings", {"routing_mode": "priority"})[0], 200)
+        self.assertEqual(api("POST", "logout", {})[0], 200)
+        self.assertEqual(api("GET", "settings")[0], 403)
+        self.assertEqual(api("POST", "login", creds)[0], 200)
 
     def set_local(self,password,confirmation):
         pid,fd=pty.fork()
@@ -86,7 +105,7 @@ class PanelPassword(unittest.TestCase):
         change = {"current_password": s.password, "new_password": "1234"}
         self.assertEqual(s.api("POST", "password", change)[0], 403)
         s.session = account["session"]
-        self.assertEqual(s.api("POST", "password", change, {"Origin": "https://example.invalid"})[0], 403)
+        self.assertEqual(s.api("POST", "password", change, {"Sec-Fetch-Site": "cross-site"})[0], 403)
         self.assertEqual(s.api("POST", "password", dict(change, current_password="wrong"))[0], 400)
         self.assertEqual(s.api("POST", "password", dict(change, new_password="abc"))[0], 400)
         self.assertEqual(s.api("POST", "password", change)[:2], (200, {}))

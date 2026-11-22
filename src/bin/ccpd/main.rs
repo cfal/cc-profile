@@ -11,6 +11,7 @@ use ccpd::{
 };
 use std::{
     env, fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     os::unix::fs::{FileTypeExt, PermissionsExt},
     sync::Arc,
     time::Duration,
@@ -27,6 +28,7 @@ async fn main() {
 async fn run() -> Result<()> {
     unsafe { libc::umask(0o077) };
     let mut args = env::args().skip(1);
+    let mut listen = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let mut port = 8743;
     let mut claude = None;
     let mut agy = None;
@@ -34,7 +36,7 @@ async fn run() -> Result<()> {
     let bad = || {
         Error::bad(
             "arguments",
-            "Usage: ccpd [--port PORT] [--claude-bin PATH] [--codex-bin PATH] [--agy-bin PATH]\n       ccpd set-password",
+            "Usage: ccpd [--listen IP] [--port PORT] [--claude-bin PATH] [--codex-bin PATH] [--agy-bin PATH]\n       ccpd set-password",
         )
     };
     while let Some(k) = args.next() {
@@ -48,6 +50,7 @@ async fn run() -> Result<()> {
                 println!("{}", bad());
                 return Ok(());
             }
+            "--listen" => listen = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,
             "--port" => port = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,
             "--claude-bin" => claude = Some(args.next().ok_or_else(bad)?),
             "--agy-bin" => agy = Some(args.next().ok_or_else(bad)?),
@@ -68,10 +71,11 @@ async fn run() -> Result<()> {
             eprintln!("ccpd: {t} compatibility link needs repair (Accounts).");
         }
     }
-    let tcp = TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|_| Error::unavailable("listener", "Could not bind loopback panel port."))?;
-    let port = tcp.local_addr()?.port();
+    let addr = SocketAddr::new(listen, port);
+    let tcp = TcpListener::bind(addr).await.map_err(|e| {
+        Error::unavailable("listener", format!("Could not bind panel to {addr}: {e}"))
+    })?;
+    let bound = tcp.local_addr()?;
     let sock = runtime.join("launch.sock");
     match fs::symlink_metadata(&sock) {
         Ok(m) if m.file_type().is_socket() => fs::remove_file(&sock)?,
@@ -95,7 +99,6 @@ async fn run() -> Result<()> {
         codex,
         agy,
         state_dir: state,
-        port,
         auth: auth::Auth::new(),
         quotas: quotas::Jobs::new(),
         logins: device_login::Logins::default(),
@@ -109,7 +112,7 @@ async fn run() -> Result<()> {
         }
     });
     eprintln!(
-        "ccpd {}: http://127.0.0.1:{port}\npanel database: {}\nlaunch socket: {}",
+        "ccpd {}: http://{bound}\npanel database: {}\nlaunch socket: {}",
         env!("CARGO_PKG_VERSION"),
         Store::user_db_path(&app.state_dir).display(),
         sock.display()
