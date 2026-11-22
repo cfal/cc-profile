@@ -76,6 +76,9 @@ class Service(unittest.TestCase):
             bin = paths / tool
             bin.write_text("#!" + sys.executable + "\n" + FAKE)
             bin.chmod(0o700)
+        if not getattr(self, "native", False):
+            shutil.copyfile(ROOT / "tests/fixtures/agy.py", paths / "agy")
+            (paths / "agy").chmod(0o700)
         curl = paths / "curl"
         curl.write_text("#!" + sys.executable + r'''
 import json, os, pathlib, sys, time

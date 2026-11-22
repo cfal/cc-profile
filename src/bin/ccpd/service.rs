@@ -28,6 +28,7 @@ pub struct App {
     pub store: Store,
     pub claude: Build,
     pub codex: Build,
+    pub agy: Build,
     pub state_dir: PathBuf,
     pub port: u16,
     pub auth: Auth,
@@ -38,6 +39,8 @@ impl App {
     pub fn build(&self, t: &str) -> &Build {
         if t == "claude" {
             &self.claude
+        } else if t == "agy" {
+            &self.agy
         } else {
             &self.codex
         }

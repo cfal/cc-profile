@@ -26,7 +26,9 @@ pub const PROXIES: [&str; 8] = [
 ];
 pub fn env_patch(c: &Config) -> (BTreeMap<String, String>, Vec<String>) {
     let mut set = BTreeMap::from([(
-        if c.tool == "codex" {
+        if c.tool == "agy" {
+            "HOME"
+        } else if c.tool == "codex" {
             "CODEX_HOME"
         } else {
             "CLAUDE_CONFIG_DIR"
@@ -159,7 +161,9 @@ impl Build {
         }
         let supported = match tool {
             "claude" => version.split_whitespace().next() == Some("2.1.329"),
-            _ => version == "codex-cli 0.171.0",
+            "codex" => version == "codex-cli 0.171.0",
+            "agy" => version == "1.5.14",
+            _ => false,
         };
         Self {
             bin,

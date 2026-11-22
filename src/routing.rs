@@ -18,9 +18,11 @@ fn check_req(r: &Request) -> Result<()> {
     tool(&r.tool)?;
     if let Some(id) = r.login_profile
         && (id <= 0
-            || ![false, true].into_iter().any(|status| {
-                profile_login_args(&r.tool, status).is_some_and(|args| r.argv.as_slice() == args)
-            }))
+            || !(r.tool == "agy" && r.argv == crate::agy::USAGE)
+                && ![false, true].into_iter().any(|status| {
+                    profile_login_args(&r.tool, status)
+                        .is_some_and(|args| r.argv.as_slice() == args)
+                }))
     {
         return Err(Error::bad(
             "bad_request",
@@ -51,7 +53,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
     match code {
         "unknown_session" => Error::missing(
             "unknown_session",
-            "No managed mapping for this UUID. See Sessions; ccp never guesses its owner.",
+            "No managed mapping for this session ID. See Sessions; ccp never guesses its owner.",
         ),
         "owner_disabled" | "owner_missing" => {
             let name = c
@@ -148,7 +150,7 @@ fn choose(db: &Connection, build: &Build, req: &Request, i: &Invocation) -> Resu
     if let Err(e) = validate_binary(build, req.binary.as_deref()) {
         return Ok(Selection::Refuse(None, e));
     }
-    if !build.supported && i.intent != Intent::Misc {
+    if !build.supported && (i.intent != Intent::Misc || req.tool == "agy") {
         return Ok(reject("unsupported_build"));
     }
     if let Some(id) = req.login_profile {
@@ -294,7 +296,7 @@ impl Prior {
             || !matches!(self.state.as_str(), "routed" | "pending")
             || now() - self.created > 30_000
             || validate_binary(build, req.binary.as_deref()).is_err()
-            || (!build.supported && i.intent != Intent::Misc)
+            || (!build.supported && (i.intent != Intent::Misc || req.tool == "agy"))
             || self.workspace != i.workspace
         {
             return Err(Error::conflict(
@@ -331,9 +333,9 @@ pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
         }
         let invocation = parsed.as_ref().ok();
         let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
-        let server = req.tool == "codex" && req.argv.first().is_some_and(|s| s == "app-server")
+        let server = (req.tool == "agy" || (req.tool == "codex" && req.argv.first().is_some_and(|s| s == "app-server")))
             && invocation.is_some_and(|i| i.intent != Intent::Misc);
-        let intent = invocation.map(|i| if server {"app_server"} else {i.intent.name()}).unwrap_or("unsupported");
+        let intent = invocation.map(|i| if server && req.tool=="agy" {"acp"} else if server {"app_server"} else {i.intent.name()}).unwrap_or("unsupported");
         let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);
         let selection = match &parsed {
             Ok(i) => choose(db, build, req, i)?,
@@ -377,7 +379,68 @@ pub struct Observation {
     pub native_id: String,
     pub workspace: Option<String>,
 }
+fn acp_event(store: &Store, o: &Observation) -> Result<()> {
+    store.write(|db| {
+        let owner: i64 = db.query_row(
+            "SELECT config_id FROM launches WHERE tool='agy' AND intent='acp' AND state='routed'
+             AND request_id=? AND ticket_digest=?",
+            params![o.request_id, digest(&o.ticket)], |r| r.get(0)
+        ).optional()?.ok_or_else(Error::denied)?;
+        if o.event == "admit_new" {
+            let c = config(db, owner)?;
+            return if c.enabled && c.present() {
+                Ok(())
+            } else {
+                Err(Error::denied())
+            };
+        }
+        let id = crate::agy::session_id(&o.native_id)?;
+        let existing: Option<i64> = db
+            .query_row(
+                "SELECT owner FROM sessions WHERE tool='agy' AND native_id=?",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match o.event.as_str() {
+            "session/new" => {
+                let ws = o
+                    .workspace
+                    .as_deref()
+                    .filter(|w| {
+                        std::path::Path::new(w).is_absolute()
+                            && w.len() <= 4096
+                            && !w.chars().any(char::is_control)
+                    })
+                    .ok_or_else(|| Error::bad("bad_cwd", "Expected an absolute ACP workspace."))?;
+                match existing {
+                    None => insert_binding(db, "agy", id, owner, ws, "observed", now()),
+                    Some(n) if n == owner => Ok(()),
+                    _ => Err(Error::conflict(
+                        "observation_conflict",
+                        "Session already belongs to another profile.",
+                    )),
+                }
+            }
+            "session/load" | "session/resume" => {
+                let c = config(db, owner)?;
+                if existing != Some(owner) || !c.enabled || !c.present() {
+                    return Err(Error::denied());
+                }
+                db.execute(
+                    "UPDATE sessions SET last_routed_ms=? WHERE tool='agy' AND native_id=?",
+                    params![now(), id],
+                )?;
+                Ok(())
+            }
+            _ => Err(Error::bad("wrong_event", "Unsupported ACP operation.")),
+        }
+    })
+}
 pub fn observe(store: &Store, o: &Observation) -> Result<()> {
+    if o.source == "acp" {
+        return acp_event(store, o);
+    }
     let uid = native_id(&o.native_id)?;
     let intent = match (o.event.as_str(), o.source.as_str()) {
         ("thread/started", "app-server") => "new",

@@ -1,4 +1,7 @@
-use super::NativeExec;
+use super::{
+    NativeExec,
+    child::{Signals, status, stop},
+};
 use ccpd::{
     invocation::{Intent, Invocation, native_id},
     paths,
@@ -11,15 +14,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     fs, io,
-    os::unix::{fs::DirBuilderExt, process::ExitStatusExt},
+    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
-    process::{ExitCode, ExitStatus, Stdio},
+    process::{ExitCode, Stdio},
     time::Duration,
 };
 use tokio::{
     net::UnixStream,
-    process::{Child, Command},
-    signal::unix::{Signal, SignalKind, signal},
+    process::Command,
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
@@ -51,37 +53,6 @@ fn command(binary: &Path, argv: &[String], plan: &Plan) -> Command {
     }
     cmd
 }
-struct Signals {
-    int: Signal,
-    term: Signal,
-    hup: Signal,
-}
-impl Signals {
-    fn new() -> io::Result<Self> {
-        Ok(Self {
-            int: signal(SignalKind::interrupt())?,
-            term: signal(SignalKind::terminate())?,
-            hup: signal(SignalKind::hangup())?,
-        })
-    }
-    async fn recv(&mut self) -> i32 {
-        tokio::select! { _=self.int.recv()=>libc::SIGINT, _=self.term.recv()=>libc::SIGTERM, _=self.hup.recv()=>libc::SIGHUP }
-    }
-}
-fn status(s: ExitStatus) -> ExitCode {
-    ExitCode::from(s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(1)) as u8)
-}
-async fn stop(child: &mut Child, sig: i32) {
-    if let Some(id) = child.id() {
-        unsafe {
-            libc::kill(id as i32, sig);
-        }
-        if timeout(2 * SECOND, child.wait()).await.is_err() {
-            let _ = child.kill().await;
-        }
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Thread {

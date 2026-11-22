@@ -9,6 +9,8 @@ pub fn profile_login_args(tool: &str, status: bool) -> Option<&'static [&'static
         ("claude", true) => Some(&["auth", "status"]),
         ("codex", false) => Some(&["login"]),
         ("codex", true) => Some(&["login", "status"]),
+        ("agy", false) => Some(&["acp", "--login"]),
+        ("agy", true) => Some(crate::agy::STATUS),
         _ => None,
     }
 }

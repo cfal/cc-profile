@@ -58,7 +58,9 @@ impl Config {
             .then_some(birth)
     }
     pub fn present(&self) -> bool {
-        self.birth_ns.is_some() && self.observed_birth() == self.birth_ns
+        self.birth_ns.is_some()
+            && self.observed_birth() == self.birth_ns
+            && (self.tool != "agy" || crate::agy::has_login(&self.home).is_ok())
     }
     pub fn public(&self) -> Value {
         fn redact(raw: &Option<String>) -> Value {
@@ -266,7 +268,7 @@ impl Store {
             tx.execute_batch(
                 "ALTER TABLE configs ADD COLUMN birth_ns INTEGER; PRAGMA user_version=3;",
             )?;
-        } else if !(3..=6).contains(&v) {
+        } else if !(3..=7).contains(&v) {
             return Err(Error::unavailable(
                 "schema",
                 "Unsupported router database version.",
@@ -301,6 +303,15 @@ impl Store {
                  ALTER TABLE configs DROP COLUMN https_proxy;
                  PRAGMA user_version=6;",
             )?;
+        }
+        if v < 7 {
+            tx.execute_batch(include_str!("antigravity.sql"))?;
+            if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
+                return Err(Error::unavailable(
+                    "schema",
+                    "Profile migration found inconsistent session references.",
+                ));
+            }
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
@@ -365,6 +376,9 @@ impl Store {
         let name = label(v["label"].as_str().unwrap_or(""))?;
         let requested = Path::new(v["home"].as_str().unwrap_or(""));
         let (dev, ino, birth) = directory(requested, &self.state_dir)?;
+        if t == "agy" {
+            crate::agy::has_login(requested)?;
+        }
         let normalized: PathBuf = requested.components().collect();
         let home = normalized.to_str().ok_or_else(Error::denied)?;
         let (mode, url) = proxy_settings(v, None)?;
@@ -376,7 +390,7 @@ impl Store {
                 return Err(Error::conflict("legacy_home",format!("An older config at {path} has not been verified. Restore its original directory and restart ccpd, or register a separate new directory.")));
             }
             // Legacy rows may contain a trailing slash or an embedded "./".
-            for tool in ["claude","codex"] {
+            for tool in crate::types::TOOLS {
                 if configs(db,tool)?.iter().any(|c| c.home == normalized && (c.dev != dev || c.ino != ino || c.birth_ns != Some(birth))) {
                 return Err(Error::conflict("home_replaced", format!(
                     "{home} belongs to a registered config whose directory was replaced. Restore the original directory to keep its sessions, or move the replacement to a new path and register it there."

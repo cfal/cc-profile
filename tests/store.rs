@@ -142,6 +142,59 @@ fn a_reused_inode_at_a_new_path_can_be_registered_without_inheriting_the_owner()
 }
 
 #[test]
+fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
+    let f = Fixture::new();
+    let path = f.root.join("state/v6.sqlite3");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(include_str!("../src/schema.sql")).unwrap();
+    db.execute_batch(include_str!("../src/panel_password.sql"))
+        .unwrap();
+    db.execute_batch("ALTER TABLE configs ADD COLUMN birth_ns INTEGER;")
+        .unwrap();
+    db.execute_batch(include_str!("../src/directory_identity.sql"))
+        .unwrap();
+    db.execute_batch("ALTER TABLE configs DROP COLUMN observer_stamp;
+        ALTER TABLE configs DROP COLUMN https_proxy; ALTER TABLE configs RENAME COLUMN http_proxy TO proxy_url;
+        PRAGMA user_version=6;
+        INSERT INTO configs(id, tool,label,home,dev,ino,birth_ns,enabled,current,revision)
+            VALUES(42,'codex','existing','/offline/home',1,2,3,1,1,4);
+        UPDATE sqlite_sequence SET seq=50 WHERE name='configs';
+        UPDATE tools SET cursor=42 WHERE tool='codex';
+        INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
+            VALUES('codex','existing-id',42,'observed','/ws',1,1);
+        INSERT INTO quota_cache(config_id,revision,attempt_ms,retry_ms,failures,status,stamp,snapshot)
+            VALUES(42,4,1,0,0,'ok','original','{}');").unwrap();
+    drop(db);
+    let upgraded = ccpd::store::Store::open(&path).unwrap();
+    let db = upgraded.db().unwrap();
+    let c = config(&db, 42).unwrap();
+    assert!(c.enabled && c.current);
+    assert_eq!(c.revision, 4);
+    assert!(
+        db.prepare(
+            "SELECT 1 FROM sessions s JOIN quota_cache q ON s.owner=q.config_id
+        JOIN tools t ON t.tool=s.tool AND t.cursor=s.owner
+        WHERE s.native_id='existing-id' AND s.owner=42 AND q.stamp='original'"
+        )
+        .unwrap()
+        .exists([])
+        .unwrap()
+    );
+    db.execute(
+        "INSERT INTO configs(tool,label,home,dev,ino,birth_ns) VALUES('agy','new','/new',1,3,4)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(db.last_insert_rowid(), 51);
+    assert!(
+        !db.prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+}
+
+#[test]
 fn v5_custom_proxies_keep_the_previous_https_route_and_credentials() {
     let f = Fixture::new();
     let profiles = [

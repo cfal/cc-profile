@@ -60,9 +60,11 @@ pub fn now() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+pub const TOOLS: [&str; 3] = ["claude", "codex", "agy"];
+
 pub fn tool(s: &str) -> Result<&str> {
     match s {
-        "claude" | "codex" => Ok(s),
-        _ => Err(Error::bad("unknown_tool", "Expected claude or codex.")),
+        "claude" | "codex" | "agy" => Ok(s),
+        _ => Err(Error::bad("unknown_tool", "Expected claude, codex or agy.")),
     }
 }

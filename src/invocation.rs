@@ -119,6 +119,36 @@ fn claude_command(word: &str) -> bool {
     )
 }
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
+    if tool == "agy" {
+        let mut intent = Intent::New;
+        if matches!(args, [a] if a=="--version" || a=="--help")
+            || matches!(args, [a,b] if a=="acp" && b=="--help")
+        {
+            intent = Intent::Misc;
+        } else {
+            if args.first().is_none_or(|a| a != "acp") {
+                return Err(unsupported());
+            }
+            let mut it = args[1..].iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--stdio" | "--sandbox" | "--process-per-session" | "--disable-telemetry" => {}
+                    "--for-session" if intent == Intent::New => {
+                        intent = Intent::Resume(
+                            crate::agy::session_id(it.next().map(String::as_str).unwrap_or(""))?
+                                .to_owned(),
+                        );
+                    }
+                    _ => return Err(unsupported()),
+                }
+            }
+        }
+        return Ok(Invocation {
+            intent,
+            workspace: cwd.into(),
+            codex: Default::default(),
+        });
+    }
     let claude = tool == "claude";
     if !claude
         && args.first().is_some_and(|s| s == "app-server")

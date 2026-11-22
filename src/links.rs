@@ -248,7 +248,7 @@ pub fn configure(
             }
             safe_dir(rp)?;
             safe_dir(parent)?;
-            for t in ["claude", "codex"] {
+            for t in crate::types::TOOLS {
                 for c in configs(db, t)? {
                     if op.starts_with(&c.home) || c.home.starts_with(op) || rp.starts_with(&c.home)
                     {

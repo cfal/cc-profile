@@ -248,6 +248,9 @@ pub async fn fetch(c: &Config, build: &Build, curl: Option<&Path>, cwd: &Path) -
     if !c.present() {
         return Err(unavailable().into());
     }
+    if c.tool == "agy" {
+        return Err(unavailable().into());
+    }
     if c.tool == "codex" {
         let v = rpc::codex(
             build,

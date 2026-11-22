@@ -64,6 +64,9 @@ fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {
         [id],|r|Ok(Cache{status:r.get(0)?,attempt:r.get(1)?,success:r.get(2)?,retry:r.get(3)?,fails:r.get(4)?,snapshot:r.get(5)?,stamp:r.get(6)?})).optional()?)
 }
 pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
+    if c.tool == "agy" {
+        return Ok(json!({"status":"native_report","loading":false}));
+    }
     let busy = j.active.lock().unwrap().contains(&c.id);
     let Some(stamp) = inputs(c) else {
         return Ok(json!({"status":"unavailable","loading":busy}));
@@ -101,6 +104,15 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
         };
         let mut jobs = Vec::new();
         for c in cs {
+            if c.tool == "agy" {
+                if id.is_some() {
+                    return Err(Error::bad(
+                        "native_report",
+                        "Request the native quota report instead.",
+                    ));
+                }
+                continue;
+            }
             let Some(stamp) = inputs(&c) else { continue };
             let cache = cached(&db, c.id)?;
             if cache.as_ref().is_some_and(|r| {

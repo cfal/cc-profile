@@ -29,11 +29,12 @@ async fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     let mut port = 8743;
     let mut claude = "claude".to_owned();
+    let mut agy = "agy".to_owned();
     let mut codex = "codex".to_owned();
     let bad = || {
         Error::bad(
             "arguments",
-            "Usage: ccpd [--port PORT] [--claude-bin PATH] [--codex-bin PATH]\n       ccpd set-password",
+            "Usage: ccpd [--port PORT] [--claude-bin PATH] [--codex-bin PATH] [--agy-bin PATH]\n       ccpd set-password",
         )
     };
     while let Some(k) = args.next() {
@@ -49,6 +50,7 @@ async fn run() -> Result<()> {
             }
             "--port" => port = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,
             "--claude-bin" => claude = args.next().ok_or_else(bad)?,
+            "--agy-bin" => agy = args.next().ok_or_else(bad)?,
             "--codex-bin" => codex = args.next().ok_or_else(bad)?,
             _ => return Err(bad()),
         }
@@ -61,7 +63,7 @@ async fn run() -> Result<()> {
     let _listener_lock = paths::locked(&runtime.join("listener.lock"))?;
     let store = Store::open_user(&state)?;
     store.prune()?;
-    for t in ["claude", "codex"] {
+    for t in ccpd::types::TOOLS {
         if ccpd::links::repair(&store, t).is_err() {
             eprintln!("ccpd: {t} compatibility link needs repair (Accounts).");
         }
@@ -86,10 +88,12 @@ async fn run() -> Result<()> {
     fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
     let claude = Build::detect("claude", &claude, &state).await;
     let codex = Build::detect("codex", &codex, &state).await;
+    let agy = Build::detect("agy", &agy, &state).await;
     let app = Arc::new(service::App {
         store,
         claude,
         codex,
+        agy,
         state_dir: state,
         port,
         auth: auth::Auth::new(),

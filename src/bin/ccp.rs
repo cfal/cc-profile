@@ -19,17 +19,23 @@ use std::{
 use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
+#[path = "ccp/acp.rs"]
+mod acp;
+#[path = "ccp/child.rs"]
+mod child;
 #[path = "ccp/codex.rs"]
 mod codex;
 
-const HELP: &str = "Usage: ccp <claude|codex> [native arguments...]
+const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
 
   ccp claude --model opus
   ccp codex exec --json 'review these changes'
   ccp claude --resume <session-uuid>
   ccp codex resume <session-uuid>
   ccp codex app-server [--for-session <uuid>]
+  ccp agy acp [--for-session <session-id>]
   ccp login <profile-id> [--status]
+  ccp usage <antigravity-profile-id>
 
 New chats rotate; exact resumes use their original config. No transfers,
 pickers or --last. Manage accounts and Current in the ccpd web panel
@@ -63,7 +69,9 @@ fn utf8() -> Error {
     Error::bad("encoding", "Arguments and working directory must be UTF-8.")
 }
 fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invocation>)> {
-    let home = if req.tool == "codex" {
+    let home = if req.tool == "agy" {
+        "HOME"
+    } else if req.tool == "codex" {
         "CODEX_HOME"
     } else {
         "CLAUDE_CONFIG_DIR"
@@ -92,8 +100,8 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
         return Err(invalid());
     }
     let mut managed = None;
-    if req.tool == "codex" && req.login_profile.is_none() {
-        let i = classify("codex", &req.argv, &req.cwd)?;
+    if matches!(req.tool.as_str(), "codex" | "agy") && req.login_profile.is_none() {
+        let i = classify(&req.tool, &req.argv, &req.cwd)?;
         let reason = match i.intent {
             Intent::New => "round_robin",
             Intent::Resume(_) => "sticky",
@@ -236,31 +244,46 @@ async fn run() -> Result<ExitCode> {
             println!("ccp {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
         }
-        Some(t @ ("claude" | "codex")) => (
+        Some(t @ ("claude" | "codex" | "agy")) => (
             t,
             args.map(OsString::into_string)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|_| utf8())?,
         ),
-        Some("login") => {
+        Some(op @ ("login" | "usage")) => {
+            let syntax = if op == "login" {
+                "Usage: ccp login <profile-id> [--status]"
+            } else {
+                "Usage: ccp usage <antigravity-profile-id>"
+            };
             login_profile = args
                 .next()
                 .and_then(|s| s.to_str()?.parse::<i64>().ok())
                 .filter(|id| *id > 0);
             let Some(id) = login_profile else {
-                eprintln!("Usage: ccp login <profile-id> [--status]");
+                eprintln!("{syntax}");
                 return Ok(ExitCode::from(2));
             };
             let status = match args.next() {
                 None => false,
-                Some(s) if s == "--status" && args.next().is_none() => true,
+                Some(s) if op == "login" && s == "--status" && args.next().is_none() => true,
                 _ => {
-                    eprintln!("Usage: ccp login <profile-id> [--status]");
+                    eprintln!("{syntax}");
                     return Ok(ExitCode::from(2));
                 }
             };
             login_tool = request("/v2/profile-tool", id.to_string().as_bytes(), deadline).await?;
-            let native = profile_login_args(&login_tool, status).ok_or_else(invalid)?;
+            let native = if op == "usage" {
+                if login_tool != "agy" {
+                    return Err(Error::bad(
+                        "unsupported_tool",
+                        "Use the Dashboard quota meters for Claude and Codex.",
+                    ));
+                }
+                ccpd::agy::USAGE
+            } else {
+                profile_login_args(&login_tool, status).ok_or_else(invalid)?
+            };
             (
                 login_tool.as_str(),
                 native.iter().map(|s| s.to_string()).collect(),
@@ -283,7 +306,9 @@ async fn run() -> Result<ExitCode> {
     }
     let cwd = env::current_dir()?;
     cwd.to_str().ok_or_else(utf8)?;
-    let names = if tool == "claude" {
+    let names = if tool == "agy" {
+        ccpd::agy::OVERRIDES
+    } else if tool == "claude" {
         CLAUDE_OVERRIDES
     } else {
         CODEX_OVERRIDES
@@ -312,6 +337,13 @@ async fn run() -> Result<ExitCode> {
         .as_deref()
         .ok_or_else(|| Error::bad("binary", "Native executable not found on PATH."))?;
     eprintln!("ccp: {tool}/{} -> {home}", plan.label);
+    if tool == "agy" {
+        let result = acp::run(binary, Path::new(home), &req, &plan).await;
+        if result.is_err() {
+            record_failure(&req, libc::EIO).await;
+        }
+        return result;
+    }
     if let Some(i) = managed {
         match codex::run(binary, &req, &plan, &i).await {
             Ok(code) => return Ok(code),
