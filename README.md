@@ -75,7 +75,7 @@ Restart with `systemctl --user restart ccpd` after changing PATH or updating a n
 
 The **Routing mode** in Settings applies across providers. A new chat selects among eligible profiles of its own provider. **Round robin** cycles through them; **Most quota remaining** and **Least quota remaining** compare the smallest remaining percentage across the account's applicable limits. **Highest priority** uses the numeric priority set in Accounts (0 to 100; higher wins). Ties rotate rather than always selecting the first profile.
 
-In every mode, a fresh, matching quota reading of zero excludes that profile from new admissions. If all eligible profiles are known to be exhausted, the launch is refused. Missing, stale, or already-reset readings are unknown, not zero: usage-based modes prefer measured profiles but can still use an unmeasured one. Antigravity's text report is not used for ranking. Sticky resumes stay with their owner even if its quota is exhausted; the provider can still refuse the request.
+In every mode, a fresh, matching quota reading of zero excludes that profile from new admissions. If all eligible profiles are known to be exhausted, the launch is refused. Missing, stale, or already-reset readings are unknown, not zero: usage-based modes prefer measured profiles but can still use an unmeasured one. Codex profiles with keyring-only credentials also count as unknown because the router cannot verify which login produced the reading. Antigravity's text report is not used for ranking. Sticky resumes stay with their owner even if its quota is exhausted; the provider can still refuse the request.
 
 ### Antigravity ACP
 
