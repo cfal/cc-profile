@@ -46,7 +46,7 @@ The panel defaults to **http://127.0.0.1:8743**. In a container, run `ccpd --lis
 
 On the first visit, set a panel password; subsequent visits use **Sign in**. This is the same on every listen address. Anyone who can reach an unconfigured panel can claim it, so keep it on a trusted network during setup or optionally run `ccpd set-password` first. Use HTTPS at a reverse proxy or an SSH tunnel on untrusted networks: `ccpd` serves plain HTTP. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and startup log show the database path; use the same `XDG_STATE_HOME` in your shell and service.
 
-Sign-in survives reloads in the same tab. A separately opened tab signs in independently. In **Settings**, choose a light, dark, or system theme for this browser, or change the panel password using the current one. Changing it signs out all tabs; it does not stop running agents.
+Sign-in survives reloads in the same tab. A separately opened tab signs in independently. The theme button in the header cycles through system, light, and dark for this browser. In **Settings**, change the panel password using the current one. Changing it signs out all tabs; it does not stop running agents.
 
 `ccp` does not start a missing daemon or select a different one. To keep the configured daemon running without a separate terminal on Linux, install the user service:
 

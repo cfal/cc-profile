@@ -4,13 +4,27 @@ const main = $("#main"),
   form = $("#form");
 const names = { claude: "Claude", codex: "Codex", agy: "Antigravity" };
 const themeKey = "ccp_theme";
+const themeButton = $("#theme");
+const themeModes = {
+  system: {icon: "monitor", next: "light"},
+  light: {icon: "sun", next: "dark"},
+  dark: {icon: "moon", next: "system"},
+};
 function applyTheme(preference) {
-  const value = ["light", "dark"].includes(preference) ? preference : "system";
+  const value = Object.hasOwn(themeModes, preference) ? preference : "system";
   document.documentElement.dataset.theme = value;
-  const control = $('select[name="theme"]');
-  if (control) control.value = value;
+  const {icon, next} = themeModes[value];
+  $("use", themeButton).setAttribute("href", "/icons.svg#" + icon);
+  themeButton.title = "Theme: " + value + ". Switch to " + next + ".";
+  themeButton.setAttribute("aria-label", themeButton.title);
 }
 applyTheme(localStorage.getItem(themeKey));
+themeButton.onclick = () => {
+  const {next} = themeModes[document.documentElement.dataset.theme];
+  applyTheme(next);
+  if (next === "system") localStorage.removeItem(themeKey);
+  else localStorage.setItem(themeKey, next);
+};
 window.addEventListener("storage", (e) => {
   if (e.key === themeKey || e.key === null) applyTheme(localStorage.getItem(themeKey));
 });
@@ -152,15 +166,6 @@ function select(items, val, props = {}) {
   box.value = val;
   return box;
 }
-function themeField() {
-  return field("Theme", select([["system", "System default"], ["light", "Light"], ["dark", "Dark"]],
-    document.documentElement.dataset.theme, {name: "theme", onchange: (e) => {
-      const value = e.target.value;
-      applyTheme(value);
-      if (value === "system") localStorage.removeItem(themeKey);
-      else localStorage.setItem(themeKey, value);
-    }}));
-}
 function modal(heading, fields, submit, fn) {
   $(".dialog-head h2", form).textContent = heading;
   $(".fields", form).replaceChildren(...fields);
@@ -218,7 +223,6 @@ function passwordForm() {
     confirm && field("Confirm password", confirm),
     error,
     submit,
-    el("div", {class: "signin-theme"}, themeField()),
   );
   f.onsubmit = async (e) => {
     e.preventDefault();
@@ -311,7 +315,6 @@ async function loadRouting(container) {
 function settings() {
   const routing = el("div");
   main.replaceChildren(title("Settings"), el("div", {class: "settings"},
-    el("section", {}, el("h2", {}, "Appearance"), themeField()),
     el("section", {}, el("h2", {}, "New chats"), routing),
     el("section", {}, el("h2", {}, "Panel password"), changePasswordForm())));
   return loadRouting(routing);
