@@ -13,15 +13,22 @@ use ccpd::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashSet, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 pub struct Jobs {
-    active: Mutex<HashSet<i64>>,
+    active: Mutex<HashMap<i64, Uuid>>,
     slots: Semaphore,
     curl: Option<PathBuf>,
 }
 impl Jobs {
+    // Called under the store transaction: a superseded fetch cannot restore the old observation.
+    pub fn invalidate(&self, db: &Connection, id: i64) -> Result<()> {
+        db.execute("DELETE FROM quota_cache WHERE config_id=?", [id])?;
+        self.active.lock().unwrap().remove(&id);
+        Ok(())
+    }
     pub fn new() -> Self {
         Self {
             active: Mutex::default(),
@@ -58,7 +65,7 @@ fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {
     }
 }
 pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
-    let busy = j.active.lock().unwrap().contains(&c.id);
+    let busy = j.active.lock().unwrap().contains_key(&c.id);
     let Some(stamp) = inputs(c) else {
         return Ok(json!({"status":"unavailable","loading":busy}));
     };
@@ -88,27 +95,32 @@ fn fresh(success: i64) -> bool {
     (0..FRESH_MS).contains(&now().saturating_sub(success))
 }
 enum Scope {
-    Account(i64),
+    Account { id: i64, enabled_only: bool },
     Provider(String),
     All,
 }
 async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>> {
     let a = s.clone();
-    let enabled_only = !matches!(scope, Scope::Account(_));
+    let enabled_only = !matches!(
+        scope,
+        Scope::Account {
+            enabled_only: false,
+            ..
+        }
+    );
     let candidates = blocking(move || {
         let db = a.store.db()?;
         let cs = match &scope {
-            Scope::Account(id) => vec![config(&db, *id)?],
-            Scope::Provider(t) => configs(&db, t)?.into_iter().filter(|c| c.enabled).collect(),
+            Scope::Account { id, .. } => vec![config(&db, *id)?],
+            Scope::Provider(t) => configs(&db, t)?,
             Scope::All => configs(&db, "claude")?
                 .into_iter()
                 .chain(configs(&db, "codex")?)
                 .chain(configs(&db, "agy")?)
-                .filter(|c| c.enabled)
                 .collect(),
         };
         let mut jobs = Vec::new();
-        for c in cs {
+        for c in cs.into_iter().filter(|c| !enabled_only || c.enabled) {
             let Some(stamp) = inputs(&c) else { continue };
             let cache = cached(&db, c.id)?;
             if cache.as_ref().is_some_and(|r| {
@@ -120,23 +132,32 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
             }) {
                 continue;
             }
-            jobs.push((stamp, c, cache));
+            jobs.push((stamp, c, cache, Uuid::new_v4()));
         }
         // Do not mark any jobs active until candidate enumeration succeeds.
         let mut active = a.quotas.active.lock().unwrap();
-        jobs.retain(|(_, c, _)| active.insert(c.id));
+        jobs.retain(|(_, c, _, ticket)| {
+            if let std::collections::hash_map::Entry::Vacant(slot) = active.entry(c.id) {
+                slot.insert(*ticket);
+                true
+            } else {
+                false
+            }
+        });
         Ok(jobs)
     })
     .await?;
     let n = candidates.len();
-    for (stamp, c, prior) in candidates {
+    for (stamp, c, prior, ticket) in candidates {
         let a = s.clone();
         tokio::spawn(async move {
             let id = c.id;
             let _slot = a.quotas.slots.acquire().await.unwrap();
             let run = || -> Result<bool> {
                 let current = config(&*a.store.db()?, id)?;
-                Ok((!enabled_only || current.enabled) && inputs(&current).as_ref() == Some(&stamp))
+                Ok((!enabled_only || current.enabled)
+                    && inputs(&current).as_ref() == Some(&stamp)
+                    && a.quotas.active.lock().unwrap().get(&id) == Some(&ticket))
             };
             if run().unwrap_or(false) {
                 let result =
@@ -144,6 +165,9 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                         .await;
                 let a2 = a.clone();
                 let saved = blocking(move || a2.store.write(|db| {
+                    if a2.quotas.active.lock().unwrap().get(&id) != Some(&ticket) {
+                        return Ok(());
+                    }
                     let ms = now();
                     let (status, failures, retry, success, snapshot) = match result {
                         Ok(v) => ("fresh", 0, ms + 30000, Some(ms), Some(v.to_string())),
@@ -170,10 +194,24 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                     eprintln!("ccpd: could not persist quota observation for config {id}");
                 }
             }
-            a.quotas.active.lock().unwrap().remove(&id);
+            let mut active = a.quotas.active.lock().unwrap();
+            if active.get(&id) == Some(&ticket) {
+                active.remove(&id);
+            }
         });
     }
     Ok(Json(json!({"queued":n})))
+}
+pub async fn after_reset(s: Shared, selected: i64, affected: Vec<i64>) {
+    for id in affected {
+        let scope = Scope::Account {
+            id,
+            enabled_only: id != selected,
+        };
+        if queue(s.clone(), scope, false).await.is_err() {
+            eprintln!("ccpd: could not queue post-reset quota check for config {id}");
+        }
+    }
 }
 pub async fn refresh_provider(s: Shared, tool: String) {
     if queue(s, Scope::Provider(tool), true).await.is_err() {
@@ -203,6 +241,14 @@ pub async fn one(
     }
     Ok((
         StatusCode::ACCEPTED,
-        queue(s, Scope::Account(id), false).await?,
+        queue(
+            s,
+            Scope::Account {
+                id,
+                enabled_only: false,
+            },
+            false,
+        )
+        .await?,
     ))
 }

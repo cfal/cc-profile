@@ -3,6 +3,7 @@ mod device_login;
 mod identity;
 mod password;
 mod quotas;
+mod resets;
 mod service;
 use ccpd::{
     native::Build,
@@ -99,6 +100,7 @@ async fn run() -> Result<()> {
         quotas: quotas::Jobs::new(),
         logins: device_login::Logins::default(),
         identity_slots: tokio::sync::Semaphore::new(2),
+        reset_write: tokio::sync::Mutex::new(()),
     });
     let a = app.clone();
     tokio::spawn(async move {

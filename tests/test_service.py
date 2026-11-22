@@ -37,6 +37,7 @@ if sys.argv[1:2] == ["app-server"]:
             assert r["params"] == {"refreshToken":False}
             path = home / "fixture-identity.json"
             result = json.loads(path.read_text()) if path.exists() else {"account":None}
+            checked_identity = True
         if r["method"] in ("thread/start","thread/resume","unrelated"):
             uid = r.get("params",{}).get("threadId",str(uuid.uuid4()))
             result = {"thread":{"id":uid,"sessionId":uid,"ephemeral":r.get("params",{}).get("ephemeral",False),
@@ -63,11 +64,29 @@ if sys.argv[1:2] == ["app-server"]:
         if r["method"] == "account/login/cancel":
             assert r["params"]["loginId"] == login_id
             (home/"login-cancelled").touch()
-        if r["method"] == "account/rateLimits/read":
+        if r["method"] == "account/rateLimits/read" and r["params"] == {"excludeResetCreditDetails":False}:
+            checked_details = True
+            result = json.loads((home/"fixture-resets.json").read_text())
+        elif r["method"] == "account/rateLimits/read":
             assert r["params"] == {"excludeResetCreditDetails":True}
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":100 if (home/"empty-quota").exists() else 0,"resetsAt":2000000000}}}
             result["rateLimitResetCredits"] = {"availableCount":2,"credits":None}
+            if (home/"hold-old-quota").exists() and not (home/"held-old-pid").exists():
+                import time
+                (home/"held-old-pid").write_text(str(os.getpid()))
+                while (home/"hold-old-quota").exists(): time.sleep(.02)
+        if r["method"] == "account/rateLimitResetCredit/consume":
+            import time
+            assert checked_details and checked_identity
+            assert set(r["params"]) == {"creditId","idempotencyKey"} and r["params"]["creditId"]
+            assert str(uuid.UUID(r["params"]["idempotencyKey"])) == r["params"]["idempotencyKey"]
+            with (home/"reset-consumes.jsonl").open("a") as f:
+                print(json.dumps(dict(params=r["params"],home=str(home),cwd=os.getcwd(),pid=os.getpid(),proxy=os.getenv("HTTPS_PROXY"))),file=f)
+            while (home/"hold-reset").exists(): time.sleep(.02)
+            if (home/"lose-reset-reply").exists(): sys.exit()
+            setting = home/"reset-outcome"
+            result = {"outcome":setting.read_text() if setting.exists() else "reset"}
         if r["method"] == "config/read":
             import tomllib
             assert r["params"] == {"cwd":os.getcwd(),"includeLayers":False}
@@ -661,6 +680,194 @@ else:
         self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"quota_exhausted")
         uid = json.loads(first.stdout)["argv"][1]
         self.assertEqual(json.loads(self.cli("claude","--resume",uid).stdout)["home"],str(profiles[0]))
+
+    def reset_fixture(self, name="reset-profile"):
+        c = self.account("codex", name)
+        route = f"accounts/{c['id']}"
+        status,c,_ = self.api("PATCH",route,{"revision":c["revision"],"proxy_mode":"custom","proxy_url":"http://fixture.invalid:8111"})
+        self.assertEqual(status,200)
+        home = Path(c["home"])
+        (home/"fixture-identity.json").write_text(json.dumps({"account":{"type":"chatgpt"},"userId":"private-user","workspaceRouting":{"chatgptAccountId":"private-account"}}))
+        grants = [dict(id="opaque-credit-"+t,resetType="codexRateLimits",status="available",title=t,description="private detail",
+                       grantedAt=1700000000,expiresAt=None) for t in ("One","Two")]
+        summary = {"availableCount":4,"credits":grants}
+        def publish(account="private-account"):
+            (home/"fixture-resets.json").write_text(json.dumps({"accountId":account,"rateLimitResetCredits":summary}))
+        publish()
+        return c,home,route+"/resets/",summary,publish
+
+    def reset_list(self, route):
+        status,v,_ = self.api("POST",route+"list",{})
+        self.assertEqual(status,200,v)
+        return v
+
+    def test_reset_list_and_explicit_confirmation(self):
+        import sqlite3
+        c,h,r,summary,publish = self.reset_fixture()
+        def state():
+            with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db:
+                return [list(db.execute("SELECT * FROM "+table)) for table in ("configs","tools","settings","sessions","launches")]
+        before = state()
+        selected = summary["credits"][1]
+        selected["expiresAt"] = 4102444800
+        summary["credits"].extend(dict(selected,id="bad-"+str(i),**diff) for i,diff in enumerate([
+            {"status":"redeeming"},{"resetType":"unknown"},{"expiresAt":1},{"expiresAt":"bad"}]))
+        summary["credits"].extend([dict(selected,id="duplicate")]*2)
+        publish()
+        for endpoint in ("list","redeem"):
+            self.assertEqual(self.api("POST",r+endpoint,{},{"X-CCP-Session":""})[0],403)
+            self.assertEqual(self.api("POST",r+endpoint,{},{"Sec-Fetch-Site":"cross-site"})[0],403)
+            self.assertEqual(self.api("GET",r+endpoint)[0],405)
+        v = self.reset_list(r)
+        self.assertEqual((v["available_count"],v["details_available"]), (4,True))
+        self.assertEqual([g["title"] for g in v["grants"]], ["One","Two"])
+        self.assertEqual(v["grants"][1]["expires_at_ms"],4102444800000)
+        handle = v["grants"][1]["handle"]
+        for g in v["grants"]:
+            self.assertEqual(set(g), {"title","handle","expires_at_ms"})
+            uuid.UUID(g["handle"])
+        self.assertEqual(self.reset_list(r),v)
+        self.assertFalse((h/"reset-consumes.jsonl").exists())
+        for body in ({}, {"creditId":selected["id"]}, {"handle":handle,"idempotencyKey":"client-key"}):
+            status,data,_ = self.api("POST",r+"redeem",body)
+            self.assertEqual((status,data["error"]),(400,"bad_request"))
+        self.assertEqual(self.api("POST",r+"redeem",{"handle":handle})[:2], (200,{"outcome":"reset"}))
+        def mutations():
+            return [json.loads(row) for row in (h/"reset-consumes.jsonl").read_text().splitlines()]
+        [actual] = mutations()
+        self.assertEqual((actual["params"]["creditId"],actual["home"],actual["proxy"],actual["cwd"]),
+                          (selected["id"],str(h),"http://fixture.invalid:8111/",str(self.root/"state/cc-profile")))
+        self.assertEqual([g["title"] for g in self.reset_list(r)["grants"]],["One"])
+        summary["credits"] = None
+        publish()
+        self.assertEqual(self.reset_list(r),{"available_count":4,"details_available":False,"grants":[]})
+        self.assertEqual(self.api("POST",r+"redeem",{"handle":handle})[:2],(200,{"outcome":"reset"}))
+        summary.update(availableCount=0,credits=[])
+        publish()
+        self.assertEqual(self.reset_list(r),{"available_count":0,"details_available":True,"grants":[]})
+        (h/"fixture-resets.json").write_text('{"accountId":"private-account"}')
+        self.assertEqual(self.reset_list(r),{"available_count":None,"details_available":False,"grants":[]})
+        self.assertEqual(len(mutations()),1)
+        self.assertEqual(state(),before)
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db:
+            stored = str(list(db.execute("SELECT * FROM reset_grants")))
+            for raw in ("opaque-credit-","private-account","private detail","private-user"):
+                self.assertNotIn(raw,stored)
+
+    def test_reset_refuses_changed_identity_grant_profile_and_binary(self):
+        c,h,r,summary,publish = self.reset_fixture()
+        other,_,other_route,_,_ = self.reset_fixture("other")
+        handle = self.reset_list(r)["grants"][0]["handle"]
+        def error(code,route=r):
+            status,v,_ = self.api("POST",route+"redeem",{"handle":handle})
+            self.assertEqual((status,v["error"]),(409,code),v)
+        error("stale_config",other_route)
+        login = h/"fixture-identity.json"
+        original = login.read_text()
+        for who in [None,{"account":{"type":"apiKey"}},{"account":{"type":"chatgpt"},"userId":"different"}]:
+            login.write_text(json.dumps(who))
+            error("stale_config")
+        login.write_text(original)
+        publish("other-workspace")
+        error("stale_config")
+        login.write_text(json.dumps({"account":{"type":"chatgpt"},"userId":"private-user"}))
+        error("stale_config")
+        login.write_text(original)
+        publish(None)
+        error("stale_config")
+        grant = summary["credits"][0]
+        for field,val in [("title","changed"),("expiresAt",1),("status","redeemed"),("resetType","unknown")]:
+            old=grant[field]
+            grant[field]=val
+            publish()
+            error("stale_grant")
+            grant[field]=old
+        summary["credits"] = [summary["credits"][1]]
+        publish()
+        error("stale_grant")
+        self.assertEqual(self.api("PATCH",f"accounts/{c['id']}",{"revision":c["revision"],"label":"changed"})[0],200)
+        error("stale_config")
+        (self.root/"bin/codex").touch()
+        error("unsupported_build")
+        self.assertFalse((h/"reset-consumes.jsonl").exists())
+
+    def test_reset_retries_share_durable_keys_and_serialize_consumes(self):
+        from concurrent.futures import ThreadPoolExecutor
+        c,h,r,summary,publish = self.reset_fixture()
+        _,other,r2,_,_ = self.reset_fixture("shared")
+        a,b = self.reset_list(r)["grants"]
+        other_a = self.reset_list(r2)["grants"][0]
+        def redeem(route, grant):
+            return self.api("POST",route+"redeem",{"handle":grant["handle"]})[:2]
+        (h/"hold-reset").touch()
+        (h/"lose-reset-reply").touch()
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(redeem,r,a)
+            try:
+                for _ in range(150):
+                    if (h/"reset-consumes.jsonl").exists(): break
+                    time.sleep(.02)
+                self.assertTrue((h/"reset-consumes.jsonl").exists())
+                self.assertEqual(redeem(r,b)[1]["error"],"busy")
+                self.assertEqual(redeem(r2,other_a)[1]["error"],"busy")
+            finally:
+                (h/"hold-reset").unlink()
+            self.assertEqual(pending.result()[1]["error"],"outcome_unknown")
+        self.stop()
+        self.start()
+        self.session = self.api("POST","login",{"password":self.password})[1]["session"]
+        self.assertEqual(self.reset_list(r)["grants"][0],a)
+        grant=summary["credits"].pop(0)
+        publish()
+        self.assertEqual(redeem(r,a)[1]["error"],"stale_grant")
+        summary["credits"].insert(0,grant)
+        publish()
+        self.assertEqual(self.reset_list(r)["grants"][0],a)
+        self.assertEqual(self.reset_list(r2)["grants"][0],other_a)
+        (other/"reset-outcome").write_text("alreadyRedeemed")
+        self.assertEqual(redeem(r2,other_a),(200,{"outcome":"alreadyRedeemed"}))
+        self.assertEqual(json.loads((h/"reset-consumes.jsonl").read_text())["params"],
+                         json.loads((other/"reset-consumes.jsonl").read_text())["params"])
+        self.assertEqual(redeem(r,a),(200,{"outcome":"alreadyRedeemed"}))
+        for _ in range(150):
+            if all((p/"quota-count").exists() for p in [h,other]): break
+            time.sleep(.02)
+        self.assertTrue(all((p/"quota-count").exists() for p in [h,other]))
+        (h/"lose-reset-reply").unlink()
+        for outcome in ("nothingToReset","noCredit"):
+            (h/"reset-outcome").write_text(outcome)
+            b = self.reset_list(r)["grants"][0]
+            self.assertEqual(b["title"],"Two")
+            self.assertEqual(redeem(r,b),(200,{"outcome":outcome}))
+            self.assertEqual(redeem(r,b),(200,{"outcome":outcome}))
+        attempts=[json.loads(line)["params"] for line in (h/"reset-consumes.jsonl").read_text().splitlines()]
+        self.assertEqual([p["creditId"] for p in attempts],["opaque-credit-One","opaque-credit-Two","opaque-credit-Two"])
+        self.assertEqual(len({p["idempotencyKey"] for p in attempts}),3)
+
+    def test_reset_supersedes_in_flight_quota_fetch(self):
+        c,h,r,_,_ = self.reset_fixture()
+        (h/"empty-quota").touch()
+        (h/"hold-old-quota").touch()
+        self.assertEqual(self.api("POST",f"accounts/{c['id']}/quota/refresh",{})[1],{"queued":1})
+        def wait(check):
+            for _ in range(200):
+                if check(): return
+                time.sleep(.02)
+            self.fail("timed out waiting for quota observation")
+        def used():
+            q=self.api("GET","accounts?tool=codex")[1]["items"][0]["quota"]
+            return q["snapshot"]["windows"][0]["used_pct"] if q["status"]=="fresh" else None
+        try:
+            wait(lambda: (h/"held-old-pid").exists())
+            handle=self.reset_list(r)["grants"][1]["handle"]
+            (h/"empty-quota").unlink()
+            self.assertEqual(self.api("POST",r+"redeem",{"handle":handle})[0],200)
+            wait(lambda: used()==0)
+        finally:
+            (h/"hold-old-quota").unlink()
+        wait(lambda: not Path("/proc/"+(h/"held-old-pid").read_text()).exists())
+        self.assertEqual(used(),0)
+        self.assertEqual((h/"quota-count").read_text(),"fetch\nfetch\n")
 
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")
