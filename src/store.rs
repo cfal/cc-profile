@@ -1,4 +1,7 @@
-use crate::types::{Error, Result, now, tool};
+use crate::{
+    protocol::RoutingMode,
+    types::{Error, Result, now, tool},
+};
 use rusqlite::{
     Connection, OptionalExtension, Row, TransactionBehavior, params, params_from_iter,
     types::Value as SqlValue,
@@ -29,12 +32,13 @@ pub struct Config {
     birth_ns: Option<i64>,
     pub enabled: bool,
     pub current: bool,
+    pub priority: i64,
     pub revision: i64,
     pub mode: String,
     pub proxy_url: Option<String>,
 }
 const FIELDS: &str =
-    "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,proxy_url,birth_ns";
+    "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,proxy_url,birth_ns,priority";
 fn row(r: &Row) -> rusqlite::Result<Config> {
     Ok(Config {
         id: r.get(0)?,
@@ -49,6 +53,7 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
         mode: r.get(9)?,
         proxy_url: r.get(10)?,
         birth_ns: r.get(11)?,
+        priority: r.get(12)?,
     })
 }
 impl Config {
@@ -75,8 +80,23 @@ impl Config {
                 .unwrap_or(Value::Null)
         }
         json!({"id":self.id,"tool":self.tool,"label":self.label,"home":self.home,"enabled":self.enabled,
-            "current":self.current,"revision":self.revision,"present":self.present(),"proxy_mode":self.mode,
+            "current":self.current,"priority":self.priority,"revision":self.revision,"present":self.present(),"proxy_mode":self.mode,
             "proxy_url":redact(&self.proxy_url)})
+    }
+}
+pub fn routing_mode(db: &Connection) -> Result<RoutingMode> {
+    let s: String = db.query_row("SELECT routing_mode FROM settings WHERE id=1", [], |r| {
+        r.get(0)
+    })?;
+    RoutingMode::parse(&s)
+        .ok_or_else(|| Error::unavailable("schema", "Invalid stored routing mode."))
+}
+fn priority(v: &Value, default: i64) -> Result<i64> {
+    match v.get("priority") {
+        None => Ok(default),
+        Some(v) => v.as_i64().filter(|p| (0..=100).contains(p)).ok_or_else(|| {
+            Error::bad("bad_priority", "Priority must be an integer from 0 to 100.")
+        }),
     }
 }
 pub fn config(db: &Connection, id: i64) -> Result<Config> {
@@ -254,7 +274,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=7).contains(&v)
+        } else if !(1..=8).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -300,6 +320,9 @@ impl Store {
                     "Profile migration found inconsistent session references.",
                 ));
             }
+        }
+        if v < 8 {
+            tx.execute_batch(include_str!("admission.sql"))?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
@@ -347,6 +370,7 @@ impl Store {
             ));
         }
         label(v["label"].as_str().unwrap_or(""))?;
+        priority(&v, 0)?;
         proxy_settings(&v, None)?;
         let root = crate::paths::profile_root(v["tool"].as_str().unwrap_or(""))?;
         crate::paths::private_dir(&root)?;
@@ -359,6 +383,15 @@ impl Store {
         }
         result
     }
+    pub fn set_routing_mode(&self, mode: RoutingMode) -> Result<()> {
+        self.write(|db| {
+            db.execute(
+                "UPDATE settings SET routing_mode=? WHERE id=1",
+                [mode.name()],
+            )?;
+            Ok(())
+        })
+    }
     pub fn register(&self, v: &Value) -> Result<Config> {
         let t = tool(v["tool"].as_str().unwrap_or(""))?;
         let name = label(v["label"].as_str().unwrap_or(""))?;
@@ -370,6 +403,7 @@ impl Store {
         let normalized: PathBuf = requested.components().collect();
         let home = normalized.to_str().ok_or_else(Error::denied)?;
         let (mode, url) = proxy_settings(v, None)?;
+        let priority = priority(v, 0)?;
         self.write(|db|{
             let legacy: Option<String> = db.query_row(
                 "SELECT home FROM configs WHERE dev=? AND ino=? AND birth_ns IS NULL LIMIT 1",
@@ -385,8 +419,8 @@ impl Store {
                 )));
                 }
             }
-            db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns,proxy_mode,proxy_url) VALUES(?,?,?,?,?,?,?,?)",
-                params![t,name,home,dev as i64,ino as i64,birth,mode,url])?;
+            db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns,proxy_mode,proxy_url,priority) VALUES(?,?,?,?,?,?,?,?,?)",
+                params![t,name,home,dev as i64,ino as i64,birth,mode,url,priority])?;
             config(db,db.last_insert_rowid())
         })
     }
@@ -396,8 +430,9 @@ impl Store {
             let name=label(v.get("label").map(|s|s.as_str().unwrap_or("")).unwrap_or(&c.label))?;
             let enabled=match v.get("enabled"){Some(v)=>v.as_bool().ok_or_else(||Error::bad("bad_enabled","Expected a boolean."))?,None=>c.enabled};
             let (mode,url)=proxy_settings(v,Some(&c))?;
-            db.execute("UPDATE configs SET label=?,enabled=?,current=current AND ?,proxy_mode=?,proxy_url=?,revision=revision+1 WHERE id=?",
-                params![name,enabled,enabled,mode,url,id])?;
+            let priority=priority(v,c.priority)?;
+            db.execute("UPDATE configs SET label=?,enabled=?,current=current AND ?,proxy_mode=?,proxy_url=?,priority=?,revision=revision+1 WHERE id=?",
+                params![name,enabled,enabled,mode,url,priority,id])?;
             config(db,id)
         })
     }

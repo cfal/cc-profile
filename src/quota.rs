@@ -1,10 +1,12 @@
 use crate::{
-    native::{Build, clean_command, stamp},
+    native::{Build, PROXIES, clean_command, stamp},
     paths, rpc,
     store::Config,
     types::{Error, Result, now},
 };
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{path::Path, process::Stdio, time::Duration};
 use time::{
     OffsetDateTime,
@@ -12,12 +14,73 @@ use time::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub const FRESH_MS: i64 = 300_000;
+
 pub fn auth_stamp(c: &Config) -> String {
-    stamp(&c.home.join(if c.tool == "claude" {
-        ".credentials.json"
+    let path = match c.tool.as_str() {
+        "claude" => c.home.join(".credentials.json"),
+        "codex" => c.home.join("auth.json"),
+        _ => return String::new(),
+    };
+    stamp(&path)
+}
+// Bind numbers to the inputs used to fetch them, not to label, priority, Current or Enabled.
+fn input_stamp(c: &Config, auth: &str) -> String {
+    let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
+    // Older normalizers collapsed malformed reset timestamps into trustworthy-looking nulls.
+    let fields = json!([
+        "quota-v2",
+        c.dev,
+        c.ino,
+        auth,
+        c.mode,
+        c.proxy_url,
+        inherited
+    ]);
+    format!("{:x}", Sha256::digest(fields.to_string()))
+}
+pub fn inputs(c: &Config) -> Option<String> {
+    (c.tool != "agy" && c.present()).then(|| input_stamp(c, &auth_stamp(c)))
+}
+fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
+    let live =
+        |w: &Value| w["reset_at_ms"].is_null() || w["reset_at_ms"].as_i64().is_some_and(|t| t > ms);
+    let windows = snapshot["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| w["kind"] == "account" && live(w))
+        .filter_map(|w| percent(&w["used_pct"]).map(|used| 100. - used));
+    let spend = &snapshot["spend_control"];
+    let cap = if !live(spend) {
+        None
+    } else if spend["reached"] == true {
+        Some(0.)
     } else {
-        "auth.json"
-    }))
+        percent(&spend["remaining_pct"])
+    };
+    windows.chain(cap).reduce(f64::min)
+}
+
+// Only called for present profiles. Cache failures or unidentifiable logins cannot deny a launch.
+pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
+    if c.tool == "agy" {
+        return None; // Native text reports do not provide structured account-wide allowances.
+    }
+    let (stamp, snapshot): (String, String) = db
+        .prepare_cached(
+            "SELECT stamp,snapshot FROM quota_cache WHERE config_id=? AND status='fresh' AND failures=0
+             AND attempt_ms=success_ms
+             AND typeof(success_ms)='integer' AND success_ms>? AND success_ms<=?",
+        )
+        .ok()?
+        .query_row(params![c.id, ms.saturating_sub(FRESH_MS), ms], |r| Ok((r.get(0)?, r.get(1)?)))
+        .ok()?;
+    let auth = auth_stamp(c);
+    if auth.is_empty() || input_stamp(c, &auth) != stamp {
+        return None;
+    }
+    remaining(&serde_json::from_str(&snapshot).ok()?, ms)
 }
 fn unavailable() -> Error {
     Error::unavailable("unavailable", "Quota unavailable.")
@@ -73,7 +136,10 @@ pub fn claude_snapshot(v: &Value) -> Result<Value> {
         let reset = w["resets_at"]
             .as_str()
             .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
-            .map(|t| t.unix_timestamp() * 1000);
+            .and_then(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).ok());
+        if !w["resets_at"].is_null() && reset.is_none() {
+            continue;
+        }
         windows.push(json!({"kind":kind,"label":label,"used_pct":p,"reset_at_ms":reset}));
     }
     Ok(
@@ -90,14 +156,19 @@ pub fn codex_snapshot(v: &Value) -> Result<Value> {
             return Err(unavailable());
         }
         let fallback = &v["rateLimits"];
-        buckets.push((fallback["limitId"].as_str().unwrap_or("codex"), fallback));
+        let key = match &fallback["limitId"] {
+            Value::Null => "codex",
+            Value::String(key) => key,
+            _ => return Err(unavailable()),
+        };
+        buckets.push((key, fallback));
     }
     let mut windows = Vec::new();
     let mut plan = None;
     let mut credits = Value::Null;
     let mut spend = Value::Null;
     for (k, bucket) in buckets {
-        let account = k == "codex";
+        let account = k == "codex" && (bucket["limitId"].is_null() || bucket["limitId"] == "codex");
         plan = plan.or_else(|| display(&bucket["planType"]));
         if account {
             let c = &bucket["credits"];
@@ -105,7 +176,9 @@ pub fn codex_snapshot(v: &Value) -> Result<Value> {
                 credits = json!({"unlimited":c["unlimited"].as_bool(),"balance":display(&c["balance"]),"has_credits":c["hasCredits"].as_bool()});
             }
             let s = &bucket["individualLimit"];
-            if s.is_object() || bucket["spendControlReached"].is_boolean() {
+            if (s.is_object() || bucket["spendControlReached"].is_boolean())
+                && (s["resetsAt"].is_null() || seconds(&s["resetsAt"]).is_some())
+            {
                 spend = json!({"remaining_pct":percent(&s["remainingPercent"]),"reset_at_ms":seconds(&s["resetsAt"]),"limit":display(&s["limit"]),"used":display(&s["used"]),"reached":bucket["spendControlReached"].as_bool()});
             }
         }
@@ -114,6 +187,9 @@ pub fn codex_snapshot(v: &Value) -> Result<Value> {
             let Some(p) = used_percent(&w["usedPercent"]) else {
                 continue;
             };
+            if !w["resetsAt"].is_null() && seconds(&w["resetsAt"]).is_none() {
+                continue;
+            }
             let duration = length(w["windowDurationMins"].as_i64());
             let label = if account {
                 duration
@@ -296,5 +372,51 @@ mod tests {
         assert_eq!(c["windows"][0]["used_pct"], 100.);
         let c = codex_snapshot(&json!({"rateLimits":{"primary":{"usedPercent":104}}})).unwrap();
         assert_eq!(c["windows"][0]["used_pct"], 100.);
+    }
+    #[test]
+    fn only_live_account_allowances_bound_admission() {
+        let ms = 10_000;
+        let mut s = json!({"windows":[
+            {"kind":"model","used_pct":100},
+            {"kind":"account","used_pct":100,"reset_at_ms":ms},
+            {"kind":"account","used_pct":100,"reset_at_ms":"later"},
+            {"kind":"account","reset_at_ms":ms+1},
+            {"kind":"account","used_pct":-1},
+            {"kind":"account","used_pct":"100"}
+        ],"credits":{"balance":"0","has_credits":false}});
+        assert_eq!(remaining(&s, ms), None);
+        s["windows"].as_array_mut().unwrap().extend([
+            json!({"kind":"account","used_pct":20}),
+            json!({"kind":"account","used_pct":70.25,"reset_at_ms":ms+1}),
+        ]);
+        assert_eq!(remaining(&s, ms), Some(29.75));
+        assert_eq!(remaining(&s, ms + 1), Some(80.));
+        for (spend, expected) in [
+            (json!({"remaining_pct":10.5}), 10.5),
+            (json!({"remaining_pct":0}), 0.),
+            (json!({"reached":true}), 0.),
+            (json!({"reached":true,"reset_at_ms":ms}), 29.75),
+            (json!({"reached":true,"reset_at_ms":false}), 29.75),
+            (json!({"remaining_pct":-1,"reached":false}), 29.75),
+        ] {
+            s["spend_control"] = spend;
+            assert_eq!(remaining(&s, ms), Some(expected));
+        }
+    }
+    #[test]
+    fn providers_do_not_turn_malformed_resets_into_unbounded_exhaustion() {
+        let s=claude_snapshot(&json!({"five_hour":{"utilization":100,"resets_at":"bad"},"seven_day":{"utilization":20,"resets_at":null}})).unwrap();
+        assert_eq!(remaining(&s, 1000), Some(80.));
+        let s = codex_snapshot(&json!({"rateLimits":{
+            "primary":{"usedPercent":100,"resetsAt":"bad"},"secondary":{"usedPercent":25},
+            "individualLimit":{"remainingPercent":0,"resetsAt":false},"spendControlReached":true
+        }}))
+        .unwrap();
+        assert_eq!(remaining(&s, 1000), Some(75.));
+        let s = codex_snapshot(&json!({"rateLimitsByLimitId":{"codex":{
+            "limitId":"model-only","primary":{"usedPercent":100},"spendControlReached":true
+        }}}))
+        .unwrap();
+        assert_eq!(remaining(&s, 1000), None);
     }
 }

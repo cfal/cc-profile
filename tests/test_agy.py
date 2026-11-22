@@ -131,6 +131,19 @@ class Antigravity(unittest.TestCase):
         self.assertEqual((Path(c["home"])/"calls").read_text().splitlines(),["initialize"])
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
 
+    def test_acp_priority_pins_connection_and_native_reports_remain_unranked(self):
+        a,b = self.profile("a"),self.profile("b")
+        self.assertEqual(self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"priority":90})[0],200)
+        self.assertEqual(self.s.api("PUT","settings",{"routing_mode":"priority"})[0],200)
+        new = lambda n: (n,"session/new",{"fixtureId":str(n),"cwd":"/work"})
+        self.bridge([],new(1),new(2))
+        self.assertEqual([r["config_id"] for r in self.s.api("GET","sessions")[1]["items"]],[b["id"]]*2)
+        self.assertEqual(self.s.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
+        self.bridge([],new(3))
+        self.assertEqual(self.s.api("GET","sessions")[1]["items"][0]["config_id"],a["id"])
+        result, = self.bridge(["--for-session","1"],(1,"session/resume",{"sessionId":"1"}))
+        self.assertEqual(result["result"]["home"],b["home"])
+
     def test_conflicting_native_reply_is_not_released_or_rebound(self):
         a = self.profile("a")
         self.profile("b")
