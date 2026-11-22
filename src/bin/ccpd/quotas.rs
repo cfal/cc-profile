@@ -1,3 +1,5 @@
+mod agy_usage;
+
 use crate::service::{Shared, blocking};
 use axum::{
     Json,
@@ -216,9 +218,11 @@ pub async fn one(
     ))
 }
 
-// The pinned CLI handles /usage as a native text report, not an ACP method.
-// Only run on explicit demand; never store the free-form report in the quota cache.
-pub async fn report(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json<Value>> {
+// Model pools describe this explicit native lookup, not account-wide routing capacity.
+pub async fn report(
+    State(s): State<Shared>,
+    Path(id): Path<i64>,
+) -> Result<Json<agy_usage::Report>> {
     use ccpd::{
         agy,
         native::{clean_command, unsupported_build},
@@ -235,12 +239,12 @@ pub async fn report(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json
     if !c.present() || !s.agy.supported || !s.agy.unchanged() {
         return Err(unsupported_build());
     }
-    if !agy::has_login(&c.home)? {
+    let Some(login) = agy::login_stamp(&c.home)? else {
         return Err(Error::bad(
             "sign_in_required",
             "Sign in to this profile first.",
         ));
-    }
+    };
     let _slot = s.quotas.slots.try_acquire().map_err(|_| {
         Error::conflict("busy", "Another quota check is running. Try again shortly.")
     })?;
@@ -252,59 +256,38 @@ pub async fn report(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json
     };
     let rt = agy::Runtime::new()?;
     let mut cmd = clean_command(&s.agy.bin, &c.home, Some(&c));
-    rt.configure(
-        &mut cmd,
-        &c.home,
-        &agy::USAGE.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
-    );
+    rt.configure(&mut cmd, &c.home, &agy::usage_args(true));
     cmd.env("NO_COLOR", "1")
         .env("BROWSER", "/bin/false")
         .stdout(Stdio::piped());
     let mut child = cmd.spawn().map_err(|_| unavailable())?;
     let output = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut text = String::new();
+        const MAX_REPORT: usize = 64 * 1024;
+        let mut bytes = Vec::new();
         child
             .stdout
             .take()
             .unwrap()
-            .take(16385)
-            .read_to_string(&mut text)
-            .await?;
-        if text.len() > 16384 || !child.wait().await?.success() {
+            .take(MAX_REPORT as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| unavailable())?;
+        if bytes.len() > MAX_REPORT || !child.wait().await.map_err(|_| unavailable())?.success() {
             return Err(unavailable());
         }
-        let lower = text.to_ascii_lowercase();
-        if text.trim().is_empty()
-            || text
-                .chars()
-                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-            || !lower.contains("quota")
-            || [
-                "https://",
-                "http://",
-                "authentication required",
-                "authorization code",
-                "bearer ",
-                "ya29.",
-                "1//",
-                "refresh_token",
-                "access_token",
-            ]
-            .iter()
-            .any(|k| lower.contains(k))
-        {
-            return Err(unavailable());
-        }
-        Ok(text)
+        agy_usage::parse(&bytes).ok_or_else(unavailable)
     })
     .await
     .map_err(|_| unavailable())??;
     let current = config(&*s.store.db()?, id)?;
-    if current.revision != c.revision || !current.present() {
+    if current.revision != c.revision
+        || !current.present()
+        || agy::login_stamp(&current.home)? != Some(login)
+    {
         return Err(Error::conflict(
             "stale_config",
-            "Profile changed during quota lookup.",
+            "Profile or login changed during quota lookup.",
         ));
     }
-    Ok(Json(json!({"report":output})))
+    Ok(Json(output))
 }

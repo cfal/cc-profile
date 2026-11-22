@@ -46,7 +46,13 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(identity(), (200, {"state":"saved_login","email":None}))
         self.assertIn("validity not checked",self.s.cli("login",cid,"--status").stdout)
         self.assertEqual((home/".gemini/antigravity-cli/antigravity-oauth-token").stat().st_mode & 0o777,0o600)
-        self.assertEqual(self.s.cli("usage",cid).stdout.strip(),"Model quotas: weekly remaining 76%")
+        self.assertEqual(self.s.cli("usage",cid).stdout.strip(),
+                         "Gemini Models\tWeekly Limit Remaining\t76%\t2030-01-01T00:00:00Z")
+        self.assertNotEqual(self.s.cli("usage",cid,"--settings","{}").returncode,0)
+        for argv in (["profile-usage"], ["-p", "/usage"], ["--settings", "{}", "-p", "/usage"]):
+            self.assertNotEqual(self.s.cli("agy",*argv).returncode,0)
+        self.assertEqual((home/"usage-calls").read_text().splitlines(),
+                         [json.dumps(["--settings",'{"disableSlashCommands":false}',"-p","/usage"])])
         obs=json.loads((home/"last-run").read_text())
         self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
         self.assertFalse(Path(obs["runtime"]).exists())
@@ -210,18 +216,72 @@ class Antigravity(unittest.TestCase):
     def test_panel_report_needs_login_and_withholds_unexpected_output(self):
         c = self.profile("report", enable=False)
         cid, home = str(c["id"]), Path(c["home"])
-        self.assertEqual(self.s.api("POST","accounts/"+cid+"/quota/report",{})[0],400)
+        report = lambda: self.s.api("POST","accounts/"+cid+"/quota/report",{})[:2]
+        self.assertEqual(report()[1]["error"],"sign_in_required")
+        self.assertFalse((home/"usage-calls").exists())
         self.assertEqual(self.s.cli("login",cid).returncode,0)
-        self.assertEqual(self.s.api("POST","accounts/"+cid+"/quota/report",{})[:2],
-                         (200,{"report":"Model quotas: weekly remaining 76%\n"}))
+        before = self.s.api("GET","startups?tool=agy")[1]
+        self.assertEqual(report(), (200, {"windows":[
+            {"group":"Gemini Models","window":"Weekly","remaining_pct":76,"reset_at_ms":1893456000000},
+            {"group":"Gemini Models","window":"5 hours","remaining_pct":100,"reset_at_ms":None},
+            {"group":"Claude and GPT models","window":"Weekly","remaining_pct":0,"reset_at_ms":None},
+        ]}))
         obs = json.loads((home/"last-run").read_text())
         self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
         self.assertFalse(Path(obs["runtime"]).exists())
-        (home/"bad-report").touch()
-        status, response, _=self.s.api("POST","accounts/"+cid+"/quota/report",{})
-        self.assertNotEqual(status,200)
-        self.assertNotIn("sensitive",str(response))
+        command = {"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[
+            {"window":"weekly","remaining_fraction":0.5}]}]}}
+        valid = {"status":"SUCCESS","num_turns":0,"command":command}
+        invalid = ["Model quotas: fixture-private", json.dumps(dict(valid,unused="x"*65536)),
+                   json.dumps(dict(valid,status="ERROR")), json.dumps(dict(valid,num_turns=1)),
+                   json.dumps({"status":"SUCCESS","command":command}),
+                   json.dumps(dict(valid,command=dict(command,name="fixture-private"))),
+                   json.dumps(dict(valid,command={"name":"usage","data":{"groups":[]}})),
+                   json.dumps(dict(valid,command={"name":"usage","data":{"groups":"fixture-private"}}))]
+        for raw in invalid:
+            (home/"report.json").write_text(raw)
+            status, response = report()
+            self.assertEqual((status,response["error"]), (503,"report_unavailable"))
+            self.assertNotIn("fixture-private", str(response))
+        (home/"report.json").write_text(json.dumps(valid))
+        (home/"fail-report").touch()
+        self.assertEqual(report()[1]["error"],"report_unavailable")
+        calls = [json.loads(line) for line in (home/"usage-calls").read_text().splitlines()]
+        self.assertEqual(calls, [["--output-format","json","--settings",
+                                 '{"disableSlashCommands":false}',"-p","/usage"]] * (2 + len(invalid)))
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1],before)
         self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
+
+    def test_panel_usage_rechecks_profile_and_login_after_native_exit(self):
+        from concurrent.futures import ThreadPoolExecutor
+        c = self.profile("hold", enable=False)
+        cid, home = str(c["id"]), Path(c["home"])
+        self.assertEqual(self.s.cli("login",cid).returncode,0)
+        token = home/".gemini/antigravity-cli/antigravity-oauth-token"
+        hold = home/"hold-report"
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            for n in (1, 2):
+                hold.touch()
+                try:
+                    result = worker.submit(self.s.api,"POST",f"accounts/{cid}/quota/report",{})
+                    calls = home/"usage-calls"
+                    deadline = time.monotonic() + 5
+                    while not calls.exists() or len(calls.read_text().splitlines()) < n:
+                        self.assertLess(time.monotonic(),deadline)
+                        time.sleep(.02)
+                    if n == 1:
+                        status, _, _ = self.s.api("PATCH",f"accounts/{cid}",
+                                                  {"revision":c["revision"],"label":"changed"})
+                        self.assertEqual(status,200)
+                    else:
+                        replacement = token.with_suffix(".replacement")
+                        replacement.touch(mode=0o600)
+                        replacement.write_text("inert fixture marker")
+                        replacement.replace(token)
+                finally:
+                    hold.unlink()
+                status, body, _ = result.result()
+                self.assertEqual((status,body["error"]),(409,"stale_config"))
 
     def test_acp_correlates_opaque_ids_and_checks_owner_before_forwarding(self):
         a,b=self.profile("a"),self.profile("b")

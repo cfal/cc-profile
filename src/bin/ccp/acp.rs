@@ -272,7 +272,8 @@ pub(super) async fn run(
             ExitCode::FAILURE
         });
     }
-    if req.argv == agy::USAGE && !saved {
+    let profile_usage = req.login_profile.is_some() && req.argv == agy::PROFILE_USAGE;
+    if profile_usage && !saved {
         return Err(Error::bad(
             "login_required",
             "Sign in to this profile before checking quota.",
@@ -280,7 +281,11 @@ pub(super) async fn run(
     }
     let tui = managed.is_some_and(|i| i.agy_tui);
     let bridge = managed.is_some() && !tui;
-    let mut args = req.argv.clone();
+    let mut args = if profile_usage {
+        agy::usage_args(false)
+    } else {
+        req.argv.clone()
+    };
     if bridge && let Some(i) = args.iter().position(|s| s == "--for-session") {
         args.drain(i..i + 2);
     }
@@ -294,8 +299,10 @@ pub(super) async fn run(
     if bridge {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
     }
-    if req.argv == agy::USAGE {
-        cmd.current_dir(home);
+    if profile_usage {
+        cmd.current_dir(home)
+            .stdin(Stdio::null())
+            .env("BROWSER", "/bin/false");
     }
     let mut signals = Signals::new()?;
     let mut child = cmd.spawn()?;

@@ -19,7 +19,7 @@ fn check_req(r: &Request) -> Result<()> {
     tool(&r.tool)?;
     if let Some(id) = r.login_profile
         && (id <= 0
-            || !(r.tool == "agy" && r.argv == crate::agy::USAGE)
+            || !(r.tool == "agy" && r.argv == crate::agy::PROFILE_USAGE)
                 && ![false, true].into_iter().any(|status| {
                     profile_login_args(&r.tool, status)
                         .is_some_and(|args| r.argv.as_slice() == args)

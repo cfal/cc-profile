@@ -653,6 +653,22 @@ function quotaDetails(q) {
   }
   return details;
 }
+function modelPoolReport(windows) {
+  const groups = new Map();
+  for (const w of windows) {
+    if (!groups.has(w.group))
+      groups.set(w.group, el("section", {class: "quota-card"}, el("h3", {}, w.group)));
+    const reset = w.reset_at_ms == null ? null : new Date(w.reset_at_ms);
+    groups.get(w.group).append(el("div", {class: "quota"},
+      el("strong", {}, w.window),
+      el("div", {}, percent(w.remaining_pct) + " left",
+        el("progress", {value: w.remaining_pct, max: 100, "aria-label": w.group + ", " + w.window + " remaining"})),
+      reset ? el("time", {datetime: reset.toISOString()}, "Resets " + reset.toLocaleString(undefined, {
+        timeZone: "UTC", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+      }) + " UTC") : text("Reset unknown", "caption")));
+  }
+  return Array.from(groups.values());
+}
 function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   const link = showProfile && el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id});
   const badge = showProfile && pill("Disabled");
@@ -668,7 +684,7 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
       if (native) {
         const result = await api("accounts/" + c.id + "/quota/report", "POST", {});
         if (section.isConnected && !dialog.open)
-          modal("Quota: " + c.label, [el("pre", {class: "wrap"}, result.report)], "Close");
+          modal("Model-pool limits: " + c.label, modelPoolReport(result.windows), "Close");
         return;
       }
       await api("accounts/" + c.id + "/quota/refresh", "POST", {});

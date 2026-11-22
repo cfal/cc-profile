@@ -294,7 +294,7 @@ async fn run() -> Result<ExitCode> {
                         "Use the Dashboard quota meters for Claude and Codex.",
                     ));
                 }
-                ccpd::agy::USAGE
+                ccpd::agy::PROFILE_USAGE
             } else {
                 profile_login_args(&login_tool, status).ok_or_else(invalid)?
             };

@@ -149,7 +149,7 @@ Quota is a **best-effort snapshot**, not a reservation. Accounts shows percentag
 Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it. Databases with separate proxy columns are not upgraded by this version.
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
-- Antigravity: explicit native text report via the card or `ccp usage <id>`; not included in background polling.
+- Antigravity: **View native quota report** shows AgY's remaining percentages and UTC resets for recognized model pools. `ccp usage <id>` prints the CLI's human-readable report. Both are on demand; neither feeds account selection or background polling.
 - Claude: Linux file-backed OAuth token in the selected `CLAUDE_CONFIG_DIR`, read-only GET to the vendor usage endpoint. Expired credentials require native renewal; the dashboard does not rotate a refresh token behind an active session.
 - Opening Dashboard or Accounts refreshes stale enabled Claude and Codex profiles; a profile's own refresh button can also check it while disabled. Both views share the same five-minute cache, with at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. Usage-based routing also requests a stale-data refresh in the background when admitting a new launch. The launch uses already-cached observations; it never waits for a provider quota check. Inherit uses the service environment for quota, the caller's environment for launches.
 

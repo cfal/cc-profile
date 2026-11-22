@@ -19,7 +19,7 @@ assert home.is_absolute()
 obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],
        "runtime": str(rt), "home": str(home), "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
-if not args or (args[0].startswith("-") and args != ["-p", "/usage"]):
+if not args or (args[0].startswith("-") and args[0] not in ("--settings","--output-format","-p")):
     if (home/"interactive-test").exists():
         import signal
         def interrupted(*_):
@@ -37,10 +37,36 @@ if args == ["models"]:
         sys.exit("Error: Please sign in to view available models.")
     print("fixture-model\tFixture Model")
     sys.exit()
-if args == ["-p", "/usage"]:
+if "/usage" in args:
+    usage = ["--settings", '{"disableSlashCommands":false}', "-p", "/usage"]
+    with (home / "usage-calls").open("a") as f:
+        print(json.dumps(args), file=f)
     assert Path.cwd() == home
-    print("Model quotas: weekly remaining 76%" if not (home / "bad-report").exists()
-          else "Model quotas unavailable: Bearer sensitive-fixture-value")
+    if args == usage:
+        print("Gemini Models\tWeekly Limit Remaining\t76%\t2030-01-01T00:00:00Z")
+        sys.exit()
+    assert args == ["--output-format", "json", *usage], args
+    assert not sys.stdin.read()
+    if (home / "report.json").exists():
+        sys.stdout.buffer.write((home / "report.json").read_bytes())
+        sys.exit(1 if (home / "fail-report").exists() else 0)
+    import time
+    while (home / "hold-report").exists():
+        time.sleep(.02)
+    print(json.dumps({"status":"SUCCESS","num_turns":0,"conversation_id":"","result":"fixture-private",
+                      "command":{
+        "name":"usage","data":{"description":"fixture-private","groups":[
+            {"name":"Gemini Models","buckets":[
+                {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly",
+                 "remaining_fraction":0.76,"reset_time":"2030-01-01T01:00:00+01:00"},
+                {"id":"gemini-5h","name":"Five Hour Limit Remaining","remaining_fraction":1,
+                 "reset_time":"1970-01-01T00:00:00Z"},
+                {"window":"weekly","disabled":True,"remaining_fraction":0.25},
+                {"window":"weekly","remaining_amount":99},
+                {"window":"weekly","remaining_fraction":1.2},
+                {"window":"fixture-private","remaining_fraction":0.25}]},
+            {"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","remaining_fraction":0}]},
+            {"name":"fixture-private","buckets":[{"window":"weekly","remaining_fraction":1}]}]}}}))
     sys.exit()
 assert args[0] == "acp" and args[-4:] == ["--gemini-dir",str(home/".gemini"),"--app-data-dir","antigravity-cli"], args
 assert "--for-session" not in args

@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 pub const APP_DIR: &str = "antigravity-cli";
 pub const STATUS: &[&str] = &["profile-status"];
-pub const USAGE: &[&str] = &["-p", "/usage"];
+pub const PROFILE_USAGE: &[&str] = &["profile-usage"];
 pub const OVERRIDES: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -27,6 +27,20 @@ pub const OVERRIDES: &[&str] = &[
     "ANTIGRAVITY_APP_DATA_DIR",
     "ANTIGRAVITY_CONFIG_REL_DIR",
 ];
+
+pub fn usage_args(json: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if json {
+        args.extend(["--output-format", "json"]);
+    }
+    args.extend([
+        "--settings",
+        r#"{"disableSlashCommands":false}"#,
+        "-p",
+        "/usage",
+    ]);
+    args.into_iter().map(String::from).collect()
+}
 
 pub fn session_id(id: &str) -> Result<&str> {
     if id.is_empty() || id.len() > 512 || id.trim() != id || id.chars().any(char::is_control) {
@@ -66,6 +80,13 @@ pub fn has_conversation(home: &Path, id: uuid::Uuid) -> Result<bool> {
 }
 
 pub fn has_login(home: &Path) -> Result<bool> {
+    Ok(login_stamp(home)?.is_some())
+}
+
+#[derive(PartialEq, Eq)]
+pub struct LoginStamp(u64, u64, u64, i64, i64);
+
+pub fn login_stamp(home: &Path) -> Result<Option<LoginStamp>> {
     let unsafe_home = || {
         Error::bad(
             "unsafe_agy_home",
@@ -100,9 +121,10 @@ pub fn has_login(home: &Path) -> Result<bool> {
                 && m.uid() == paths::uid()
                 && m.mode() & 0o077 == 0 =>
         {
-            Ok(m.len() != 0)
+            Ok((m.len() != 0)
+                .then(|| LoginStamp(m.dev(), m.ino(), m.len(), m.ctime(), m.ctime_nsec())))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         _ => Err(unsafe_home()),
     }
 }
