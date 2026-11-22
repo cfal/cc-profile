@@ -32,7 +32,10 @@ fn req(f: &Fixture, t: &str, args: &[&str], b: &Build) -> Request {
     }
 }
 
-fn cache(f: &Fixture, c: &Config, snapshot: Value, ms: i64) {
+fn cache(f: &Fixture, c: &Config, mut snapshot: Value, ms: i64) {
+    if c.tool == "codex" {
+        snapshot["file_auth_verified"] = true.into();
+    }
     f.store.db().unwrap().execute(
         "INSERT OR REPLACE INTO quota_cache(config_id,revision,attempt_ms,success_ms,retry_ms,failures,status,stamp,snapshot)
         VALUES(?,?,?3,?3,0,0,'fresh',?,?)",

@@ -25,10 +25,10 @@ pub fn auth_stamp(c: &Config) -> String {
     stamp(&path)
 }
 // Bind numbers to the inputs used to fetch them, not to label, priority, Current or Enabled.
-fn input_stamp(c: &Config, auth: &str) -> String {
+fn input_stamp(c: &Config, auth: &str) -> (String, bool) {
     let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
     // Older normalizers collapsed malformed reset timestamps into trustworthy-looking nulls.
-    let fields = json!([
+    let mut fields = json!([
         "quota-v2",
         c.dev,
         c.ino,
@@ -37,10 +37,52 @@ fn input_stamp(c: &Config, auth: &str) -> String {
         c.proxy_url,
         inherited
     ]);
-    format!("{:x}", Sha256::digest(fields.to_string()))
+    let identifiable = !auth.is_empty() && (c.tool != "codex" || unmanaged_file(c));
+    if c.tool == "codex" {
+        fields
+            .as_array_mut()
+            .unwrap()
+            .push(json!([stamp(&c.home.join("config.toml")), identifiable]));
+    }
+    (
+        format!("{:x}", Sha256::digest(fields.to_string())),
+        identifiable,
+    )
 }
 pub fn inputs(c: &Config) -> Option<String> {
-    (c.tool != "agy" && c.present()).then(|| input_stamp(c, &auth_stamp(c)))
+    (c.tool != "agy" && c.present()).then(|| input_stamp(c, &auth_stamp(c)).0)
+}
+fn absent(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+// With default project-root markers, Codex looks from cwd to the nearest .git (or cwd alone).
+// Don't assume the quota worker and a new launch resolved the same project overrides.
+pub fn no_codex_project_config(cwd: &Path) -> bool {
+    let mut root = cwd;
+    for p in cwd.ancestors() {
+        match p.join(".git").try_exists() {
+            Ok(true) => {
+                root = p;
+                break;
+            }
+            Ok(false) => {}
+            Err(_) => return false,
+        }
+    }
+    cwd.ancestors()
+        .take_while(|p| p.starts_with(root))
+        .all(|p| absent(&p.join(".codex/config.toml")))
+}
+fn unmanaged_file(c: &Config) -> bool {
+    c.home
+        .join("auth.json")
+        .symlink_metadata()
+        .is_ok_and(|m| m.is_file())
+        && absent(&c.home.join("cloud-config-bundle-cache.json"))
+        && ["config.toml", "managed_config.toml", "requirements.toml"]
+            .iter()
+            .all(|name| absent(&Path::new("/etc/codex").join(name)))
 }
 fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
     let live =
@@ -76,11 +118,15 @@ pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
         .ok()?
         .query_row(params![c.id, ms.saturating_sub(FRESH_MS), ms], |r| Ok((r.get(0)?, r.get(1)?)))
         .ok()?;
-    let auth = auth_stamp(c);
-    if auth.is_empty() || input_stamp(c, &auth) != stamp {
+    let (current, identifiable) = input_stamp(c, &auth_stamp(c));
+    if !identifiable || current != stamp {
         return None;
     }
-    remaining(&serde_json::from_str(&snapshot).ok()?, ms)
+    let snapshot: Value = serde_json::from_str(&snapshot).ok()?;
+    if c.tool == "codex" && snapshot["file_auth_verified"] != true {
+        return None;
+    }
+    remaining(&snapshot, ms)
 }
 fn unavailable() -> Error {
     Error::unavailable("unavailable", "Quota unavailable.")
@@ -328,15 +374,33 @@ pub async fn fetch(c: &Config, build: &Build, curl: Option<&Path>, cwd: &Path) -
         return Err(unavailable().into());
     }
     if c.tool == "codex" {
-        let v = rpc::codex(
-            build,
-            c,
-            cwd,
-            "account/rateLimits/read",
-            json!({"excludeResetCreditDetails":true}),
-        )
-        .await?;
-        Ok(codex_snapshot(&v)?)
+        let (mut client, quota) = tokio::time::timeout(Duration::from_secs(12), async {
+            let mut client = rpc::Codex::open(build, c, cwd).await?;
+            let quota = client
+                .call(
+                    2,
+                    "account/rateLimits/read",
+                    json!({"excludeResetCreditDetails":true}),
+                )
+                .await
+                .and_then(|v| codex_snapshot(&v));
+            Ok::<_, Error>((client, quota))
+        })
+        .await
+        .map_err(|_| unavailable())??;
+        // A failed/unsupported probe does not hide otherwise valid display data.
+        let bound = quota.is_ok()
+            && build.supported
+            && unmanaged_file(c)
+            && no_codex_project_config(cwd)
+            && matches!(
+                tokio::time::timeout(Duration::from_secs(2), client.file_auth(cwd)).await,
+                Ok(Ok(true))
+            );
+        client.close().await;
+        let mut snapshot = quota?;
+        snapshot["file_auth_verified"] = bound.into();
+        Ok(snapshot)
     } else {
         claude(c, curl.ok_or_else(unavailable)?, cwd).await
     }

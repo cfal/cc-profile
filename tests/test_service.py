@@ -57,7 +57,14 @@ if sys.argv[1:2] == ["app-server"]:
             (home/"login-cancelled").touch()
         if r["method"] == "account/rateLimits/read":
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
-            result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":0,"resetsAt":2000000000}}}
+            result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":100 if (home/"empty-quota").exists() else 0,"resetsAt":2000000000}}}
+        if r["method"] == "config/read":
+            import tomllib
+            assert r["params"] == {"cwd":os.getcwd(),"includeLayers":False}
+            config = home / "config.toml"
+            parsed = tomllib.loads(config.read_text()) if config.exists() else {}
+            result = {"config":dict({"cli_auth_credentials_store":"file","profile":None,"project_root_markers":[".git"]},**parsed)}
+            if (home/"incomplete-config-reply").exists(): del result["config"]["cli_auth_credentials_store"]
         print(json.dumps({"id": r["id"], "result": result}), flush=True)
     sys.exit()
 print(json.dumps({"argv":sys.argv[1:],"home":str(home),"id":None,"proxy":os.getenv("HTTPS_PROXY")}))
@@ -665,6 +672,93 @@ else:
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         (Path(c["home"])/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
         self.assertEqual(refresh("fresh")["snapshot"]["windows"][0]["used_pct"],25)
+
+    def test_codex_quota_follows_verified_store_not_a_leftover_auth_file(self):
+        import sqlite3
+        c = self.account("codex","bound")
+        home = Path(c["home"])
+        (home/"auth.json").write_text("{}")
+        (home/"empty-quota").touch()
+        config = home/"config.toml"
+        def refresh():
+            with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
+                db.execute("UPDATE quota_cache SET retry_ms=0")
+            route = f"accounts/{c['id']}/quota/refresh"
+            self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+            for _ in range(150):
+                q = self.api("GET","accounts?tool=codex")[1]["items"][0]["quota"]
+                if q["status"]=="fresh" and not q["loading"]: break
+                time.sleep(.02)
+            else:
+                self.fail("no fresh quota")
+            self.assertEqual(q["snapshot"]["windows"][0]["used_pct"],100)
+            self.assertNotIn("file_auth_verified",q["snapshot"])
+        def launch(exhausted):
+            p = self.cli("codex","app-server")
+            if exhausted:
+                self.assertNotEqual(p.returncode,0)
+                self.assertIn("exhausted",p.stderr)
+            else:
+                self.assertEqual(p.returncode,0,p.stderr)
+        refresh()
+        launch(True)
+        for mode in ["keyring","auto","ephemeral"]:
+            config.write_text(f'cli_auth_credentials_store = "{mode}"\n')
+            launch(False)
+            refresh()
+            launch(False)
+        config.write_text('model = "gpt-5"\n[projects."/work"]\ntrust_level = "trusted"\n')
+        launch(False)  # The keyring/ephemeral observation cannot become file-bound.
+        refresh()
+        launch(True)
+        project = self.root/".codex"
+        project.mkdir()
+        (project/"config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
+        launch(False)
+        (project/"config.toml").unlink()
+        (home/"incomplete-config-reply").touch()
+        refresh()
+        launch(False)  # Missing proof isn't the native "file" default.
+
+    def test_automatic_job_rechecks_enabled_after_waiting_for_a_slot(self):
+        def profile(name):
+            c = self.account("claude",name)
+            (Path(c["home"])/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
+            return c
+        held = [profile(n) for n in ("busy-one","busy-two")]
+        for c in held:
+            (Path(c["home"])/"hold-fetch").touch()
+        def wait(check):
+            for _ in range(150):
+                if check(): return
+                time.sleep(.02)
+            self.fail("timed out waiting for quota job")
+        try:
+            self.assertEqual(self.api("POST","quota/refresh",{})[1]["queued"],2)
+            wait(lambda: all((Path(c["home"])/"quota-count").exists() for c in held))
+            c = profile("queued")
+            def quota():
+                return next(row["quota"] for row in self.api("GET","accounts?tool=claude")[1]["items"] if row["id"]==c["id"])
+            self.assertEqual(self.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
+            self.assertEqual(self.cli("claude","test").returncode,0)
+            wait(lambda: quota()["loading"])
+            route = f"accounts/{c['id']}"
+            self.assertEqual(self.api("PATCH",route,{"revision":c["revision"],"enabled":False})[0],200)
+            busy = held[0]
+            self.assertEqual(self.api("PATCH",f"accounts/{busy['id']}",{"revision":busy["revision"],"enabled":False})[0],200)
+        finally:
+            for busy in held: (Path(busy["home"])/"hold-fetch").unlink()
+        wait(lambda: not quota()["loading"])
+        count = Path(c["home"])/"quota-count"
+        self.assertFalse(count.exists())
+        self.assertEqual(quota()["status"],"not_checked")
+        def busy_finished():
+            q = next(row["quota"] for row in self.api("GET","accounts?tool=claude")[1]["items"] if row["id"]==held[0]["id"])
+            return not q["loading"] and q["status"]=="fresh"
+        wait(busy_finished)
+        self.assertEqual(self.api("POST",route+"/quota/refresh",{})[1]["queued"],1)
+        wait(lambda: quota()["status"]=="fresh" and not quota()["loading"])
+        self.assertEqual(count.read_text(),"fetch\n")
 
 
 @unittest.skipUnless(DAEMON.is_file(), "build ccpd first")

@@ -3,6 +3,7 @@ use crate::{
     store::Config,
     types::{Error, Result},
 };
+use serde::{Deserialize, de::IgnoredAny};
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -83,6 +84,41 @@ impl Codex {
     pub async fn close(mut self) {
         let _ = self.child.start_kill();
         let _ = self.child.wait().await;
+    }
+
+    // Read only the auth selectors, not the rest of the native config (which may contain secrets).
+    pub(crate) async fn file_auth(&mut self, cwd: &Path) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct Selectors {
+            cli_auth_credentials_store: String,
+            profile: Option<IgnoredAny>,
+            project_root_markers: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct ConfigRead {
+            config: Selectors,
+        }
+        #[derive(Deserialize)]
+        struct Reply {
+            id: Option<u64>,
+            result: Option<ConfigRead>,
+        }
+        self.send(
+            json!({"id":3,"method":"config/read","params":{"cwd":cwd,"includeLayers":false}}),
+        )
+        .await?;
+        loop {
+            let line = self.lines.next_line().await?.ok_or_else(failed)?;
+            let r: Reply = serde_json::from_str(&line).map_err(|_| failed())?;
+            if r.id == Some(3) {
+                return Ok(r.result.is_some_and(|r| {
+                    let c = r.config;
+                    c.cli_auth_credentials_store == "file"
+                        && c.profile.is_none()
+                        && c.project_root_markers == [".git"]
+                }));
+            }
+        }
     }
 }
 pub async fn codex(
