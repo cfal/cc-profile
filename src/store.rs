@@ -31,10 +31,10 @@ pub struct Config {
     pub current: bool,
     pub revision: i64,
     pub mode: String,
-    pub http: Option<String>,
-    pub https: Option<String>,
+    pub proxy_url: Option<String>,
 }
-const FIELDS: &str = "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,http_proxy,https_proxy,birth_ns";
+const FIELDS: &str =
+    "id,tool,label,home,dev,ino,enabled,current,revision,proxy_mode,proxy_url,birth_ns";
 fn row(r: &Row) -> rusqlite::Result<Config> {
     Ok(Config {
         id: r.get(0)?,
@@ -47,9 +47,8 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
         current: r.get(7)?,
         revision: r.get(8)?,
         mode: r.get(9)?,
-        http: r.get(10)?,
-        https: r.get(11)?,
-        birth_ns: r.get(12)?,
+        proxy_url: r.get(10)?,
+        birth_ns: r.get(11)?,
     })
 }
 impl Config {
@@ -75,7 +74,7 @@ impl Config {
         }
         json!({"id":self.id,"tool":self.tool,"label":self.label,"home":self.home,"enabled":self.enabled,
             "current":self.current,"revision":self.revision,"present":self.present(),"proxy_mode":self.mode,
-            "http_proxy":redact(&self.http),"https_proxy":redact(&self.https)})
+            "proxy_url":redact(&self.proxy_url)})
     }
 }
 pub fn config(db: &Connection, id: i64) -> Result<Config> {
@@ -134,10 +133,13 @@ fn proxy(raw: &Value) -> Result<Option<String>> {
     }
     Ok(Some(u.to_string()))
 }
-fn proxy_settings(
-    v: &Value,
-    c: Option<&Config>,
-) -> Result<(String, Option<String>, Option<String>)> {
+fn proxy_settings(v: &Value, c: Option<&Config>) -> Result<(String, Option<String>)> {
+    if v.get("http_proxy").is_some() || v.get("https_proxy").is_some() {
+        return Err(Error::bad(
+            "bad_proxy",
+            "Use proxy_url for both HTTP and HTTPS.",
+        ));
+    }
     let mode = match v.get("proxy_mode") {
         Some(v) => v.as_str().unwrap_or(""),
         None => c.map(|c| c.mode.as_str()).unwrap_or("inherit"),
@@ -145,27 +147,15 @@ fn proxy_settings(
     if !matches!(mode, "inherit" | "custom" | "direct") {
         return Err(Error::bad("bad_proxy", "Unknown proxy mode."));
     }
-    let http = v
-        .get("http_proxy")
+    let url = v
+        .get("proxy_url")
         .map(proxy)
         .transpose()?
-        .unwrap_or_else(|| c.and_then(|c| c.http.clone()));
-    let https = v
-        .get("https_proxy")
-        .map(proxy)
-        .transpose()?
-        .unwrap_or_else(|| c.and_then(|c| c.https.clone()));
-    if mode == "custom" && http.is_none() && https.is_none() {
-        return Err(Error::bad(
-            "bad_proxy",
-            "Set an HTTP or HTTPS proxy for Custom mode.",
-        ));
+        .unwrap_or_else(|| c.and_then(|c| c.proxy_url.clone()));
+    if mode == "custom" && url.is_none() {
+        return Err(Error::bad("bad_proxy", "Set a proxy URL for Custom mode."));
     }
-    Ok(if mode == "custom" {
-        (mode.to_owned(), http, https)
-    } else {
-        (mode.to_owned(), None, None)
-    })
+    Ok((mode.to_owned(), if mode == "custom" { url } else { None }))
 }
 pub fn revision(v: &Value, c: &Config) -> Result<()> {
     if v.get("revision").and_then(Value::as_i64) != Some(c.revision) {
@@ -276,7 +266,7 @@ impl Store {
             tx.execute_batch(
                 "ALTER TABLE configs ADD COLUMN birth_ns INTEGER; PRAGMA user_version=3;",
             )?;
-        } else if !(3..=5).contains(&v) {
+        } else if !(3..=6).contains(&v) {
             return Err(Error::unavailable(
                 "schema",
                 "Unsupported router database version.",
@@ -300,6 +290,16 @@ impl Store {
                 UPDATE launches SET state='unobserved',reason='router_upgraded'
                 WHERE tool='codex' AND state='pending';
                 PRAGMA user_version=5;",
+            )?;
+        }
+        if v < 6 {
+            // Keep the route previously used for HTTPS provider traffic.
+            tx.execute_batch(
+                "UPDATE configs SET http_proxy=COALESCE(https_proxy,http_proxy),
+                    revision=revision+1 WHERE proxy_mode='custom';
+                 ALTER TABLE configs RENAME COLUMN http_proxy TO proxy_url;
+                 ALTER TABLE configs DROP COLUMN https_proxy;
+                 PRAGMA user_version=6;",
             )?;
         }
         // Older databases know only the device and inode. Pin creation time once,
@@ -367,7 +367,7 @@ impl Store {
         let (dev, ino, birth) = directory(requested, &self.state_dir)?;
         let normalized: PathBuf = requested.components().collect();
         let home = normalized.to_str().ok_or_else(Error::denied)?;
-        let (mode, http, https) = proxy_settings(v, None)?;
+        let (mode, url) = proxy_settings(v, None)?;
         self.write(|db|{
             let legacy: Option<String> = db.query_row(
                 "SELECT home FROM configs WHERE dev=? AND ino=? AND birth_ns IS NULL LIMIT 1",
@@ -383,8 +383,8 @@ impl Store {
                 )));
                 }
             }
-            db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns,proxy_mode,http_proxy,https_proxy) VALUES(?,?,?,?,?,?,?,?,?)",
-                params![t,name,home,dev as i64,ino as i64,birth,mode,http,https])?;
+            db.execute("INSERT INTO configs(tool,label,home,dev,ino,birth_ns,proxy_mode,proxy_url) VALUES(?,?,?,?,?,?,?,?)",
+                params![t,name,home,dev as i64,ino as i64,birth,mode,url])?;
             config(db,db.last_insert_rowid())
         })
     }
@@ -393,9 +393,9 @@ impl Store {
             let c=config(db,id)?; revision(v,&c)?;
             let name=label(v.get("label").map(|s|s.as_str().unwrap_or("")).unwrap_or(&c.label))?;
             let enabled=match v.get("enabled"){Some(v)=>v.as_bool().ok_or_else(||Error::bad("bad_enabled","Expected a boolean."))?,None=>c.enabled};
-            let (mode,http,https)=proxy_settings(v,Some(&c))?;
-            db.execute("UPDATE configs SET label=?,enabled=?,current=current AND ?,proxy_mode=?,http_proxy=?,https_proxy=?,revision=revision+1 WHERE id=?",
-                params![name,enabled,enabled,mode,http,https,id])?;
+            let (mode,url)=proxy_settings(v,Some(&c))?;
+            db.execute("UPDATE configs SET label=?,enabled=?,current=current AND ?,proxy_mode=?,proxy_url=?,revision=revision+1 WHERE id=?",
+                params![name,enabled,enabled,mode,url,id])?;
             config(db,id)
         })
     }

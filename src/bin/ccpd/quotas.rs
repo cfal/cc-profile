@@ -56,15 +56,7 @@ fn inputs(c: &Config) -> Option<String> {
         return None;
     }
     let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
-    let fields = json!([
-        c.dev,
-        c.ino,
-        auth_stamp(c),
-        c.mode,
-        c.http,
-        c.https,
-        inherited
-    ]);
+    let fields = json!([c.dev, c.ino, auth_stamp(c), c.mode, c.proxy_url, inherited]);
     Some(format!("{:x}", Sha256::digest(fields.to_string())))
 }
 fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {

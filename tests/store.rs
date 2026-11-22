@@ -38,7 +38,8 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
     f.store
         .db()
         .unwrap()
-        .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; ALTER TABLE configs ADD COLUMN observer_stamp TEXT; PRAGMA user_version=2;")
+        .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
+            ALTER TABLE configs RENAME COLUMN proxy_url TO http_proxy; ALTER TABLE configs ADD COLUMN https_proxy TEXT; PRAGMA user_version=2;")
         .unwrap();
     let open = || ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     let upgraded = open();
@@ -141,6 +142,56 @@ fn a_reused_inode_at_a_new_path_can_be_registered_without_inheriting_the_owner()
 }
 
 #[test]
+fn v5_custom_proxies_keep_the_previous_https_route_and_credentials() {
+    let f = Fixture::new();
+    let profiles = [
+        f.add("codex", "https"),
+        f.add("claude", "http"),
+        f.add("codex", "both"),
+    ];
+    let http = "http://h:old@first.invalid:3128/";
+    let https = "https://s:secret@second.invalid:8443/";
+    {
+        let db = f.store.db().unwrap();
+        db.execute_batch(
+            "ALTER TABLE configs RENAME COLUMN proxy_url TO http_proxy;
+            ALTER TABLE configs ADD COLUMN https_proxy TEXT; PRAGMA user_version=5;",
+        )
+        .unwrap();
+        for (c, (h, s)) in profiles.iter().zip([
+            (None, Some(https)),
+            (Some(http), None),
+            (Some(http), Some(https)),
+        ]) {
+            db.execute(
+                "UPDATE configs SET proxy_mode='custom',http_proxy=?,https_proxy=? WHERE id=?",
+                rusqlite::params![h, s, c.id],
+            )
+            .unwrap();
+        }
+    }
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    for (c, expected) in profiles.iter().zip([https, http, https]) {
+        let cfg = config(&upgraded.db().unwrap(), c.id).unwrap();
+        assert_eq!(cfg.revision, c.revision + 1);
+        let (set, unset) = ccpd::native::env_patch(&cfg);
+        for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+            assert_eq!(set[name], expected);
+        }
+        assert!(unset.contains(&"ALL_PROXY".to_owned()));
+        let public = cfg.public();
+        assert!(public.get("http_proxy").is_none() && public.get("https_proxy").is_none());
+        assert!(!public["proxy_url"]["url"].as_str().unwrap().contains('@'));
+        assert_eq!(public["proxy_url"]["credentials_saved"], true);
+        assert!(
+            upgraded
+                .edit(c.id, &json!({"revision":cfg.revision,"http_proxy":http}))
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn proxy_secrets_are_write_only_and_canonical_aliases_are_rejected() {
     let f = Fixture::new();
     let a = f.add("claude", "work");
@@ -155,14 +206,14 @@ fn proxy_secrets_are_write_only_and_canonical_aliases_are_rejected() {
         ccpd::native::env_patch(&read).0["CLAUDE_CONFIG_DIR"],
         a.home.to_str().unwrap()
     );
-    let v=f.store.edit(a.id,&json!({"revision":a.revision,"proxy_mode":"custom","https_proxy":"http://user:secret@proxy:8080"})).unwrap();
+    let v=f.store.edit(a.id,&json!({"revision":a.revision,"proxy_mode":"custom","proxy_url":"http://user:secret@proxy:8080"})).unwrap();
     assert!(!v.public().to_string().contains("secret"));
-    assert_eq!(v.public()["https_proxy"]["credentials_saved"], true);
+    assert_eq!(v.public()["proxy_url"]["credentials_saved"], true);
     assert!(
         f.store
             .edit(
                 a.id,
-                &json!({"revision":v.revision,"https_proxy":"socks5://proxy"})
+                &json!({"revision":v.revision,"proxy_url":"socks5://proxy"})
             )
             .is_err()
     );

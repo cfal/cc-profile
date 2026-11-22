@@ -153,7 +153,7 @@ else:
         work = self.account("claude", "work")
         self.assertEqual(self.api("PUT", "current/claude", {"config_id": work["id"]})[0], 200)
         create = {"tool":"claude","label":"Personal","create": True,
-                  "proxy_mode":"custom","https_proxy":"http://fixture.invalid:3128"}
+                  "proxy_mode":"custom","proxy_url":"http://fixture.invalid:3128"}
         status, personal, _ = self.api("POST", "accounts", create)
         self.assertEqual(status, 201, personal)
         home = Path(personal["home"])
@@ -179,7 +179,7 @@ else:
     def test_hook_free_stdio_rotates_per_server_and_resumes_by_owner(self):
         a,b = [self.account("codex",label) for label in ("first","second")]
         self.api("PATCH", "accounts/"+str(a["id"]), {"revision":a["revision"],
-                 "proxy_mode":"custom", "https_proxy":"http://proxy.invalid:8888"})
+                 "proxy_mode":"custom", "proxy_url":"http://proxy.invalid:8888"})
         self.env["CCP_LAUNCH_ID"] = self.env["CCP_OBSERVE_TICKET"] = "inherited"
         def server(args, calls):
             wire = "".join(json.dumps({"id":i,"method":method,"params":params})+"\n"
@@ -243,7 +243,7 @@ else:
     def test_profile_device_sign_in_lifecycle(self):
         def create(label):
             status, c, _ = self.api("POST", "accounts", {"tool":"codex","label":label,"create":True,
-                                      "proxy_mode":"custom","https_proxy":"http://fixture.invalid:3128"})
+                                      "proxy_mode":"custom","proxy_url":"http://fixture.invalid:3128"})
             self.assertEqual(status, 201)
             return c, "accounts/%s/device-login" % c["id"]
         def wait(path, state):
@@ -292,7 +292,7 @@ else:
         self.env["HTTPS_PROXY"] = "http://from-shell.invalid:8888"
         for mode, expected in [("custom","http://profile.invalid:3128/"), ("inherit",self.env["HTTPS_PROXY"]), ("direct",None)]:
             data = {"create":True,"tool":"codex","label":mode,"proxy_mode":mode}
-            if mode == "custom": data["http_proxy"] = "http://profile.invalid:3128"
+            if mode == "custom": data["proxy_url"] = "http://profile.invalid:3128"
             status, c, _ = self.api("POST", "accounts", data)
             self.assertEqual(status, 201, c)
             self.assertFalse(c["enabled"] or c["current"])
@@ -393,7 +393,7 @@ else:
         cl = self.account("claude", "one")
         cx = self.account("codex", "two")
         self.assertEqual(self.api("PATCH", "accounts/%d"%cl["id"], {"revision":cl["revision"],
-            "proxy_mode":"custom","http_proxy":"http://fixture.invalid:3128"})[0],200)
+            "proxy_mode":"custom","proxy_url":"http://fixture.invalid:3128"})[0],200)
         (Path(cl["home"]) / ".credentials.json").write_text(json.dumps({"claudeAiOauth":{"accessToken":"private-test-token"}}))
         for _ in range(2):
             status, _, _ = self.api("POST", "quota/refresh", {"stale_only":True})

@@ -38,8 +38,7 @@ pub fn env_patch(c: &Config) -> (BTreeMap<String, String>, Vec<String>) {
     if c.mode != "inherit" {
         for key in PROXIES {
             let val = match key.to_ascii_uppercase().as_str() {
-                "HTTP_PROXY" if c.mode == "custom" => c.http.as_deref(),
-                "HTTPS_PROXY" if c.mode == "custom" => c.https.as_deref().or(c.http.as_deref()),
+                "HTTP_PROXY" | "HTTPS_PROXY" if c.mode == "custom" => c.proxy_url.as_deref(),
                 "NO_PROXY" => Some(if c.mode == "direct" {
                     "*"
                 } else {

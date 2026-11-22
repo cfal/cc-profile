@@ -106,7 +106,7 @@ Proxy URLs are visible as you type. The panel API and copied commands omit saved
 
 Quota is **informational**. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
 
-When Custom has only an HTTP proxy, that address is used for HTTPS requests too. Set an explicit HTTPS proxy to override it. Launches and quota checks use this same rule.
+Custom uses one proxy URL for both HTTP and HTTPS. Upgrading preserves the old HTTPS proxy if one was set, otherwise the old HTTP proxy. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it.
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
 - Claude: Linux file-backed OAuth token in the selected `CLAUDE_CONFIG_DIR`, read-only GET to the vendor usage endpoint. Expired credentials require native renewal; the dashboard does not rotate a refresh token behind an active session.

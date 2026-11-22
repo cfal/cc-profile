@@ -446,37 +446,19 @@ function accountForm(t, c) {
     ],
     c?.proxy_mode || "inherit",
   );
-  const http = el("input", {
+  const proxy = el("input", {
     type: "text",
     autocomplete: "off",
     spellcheck: "false",
-    placeholder: c?.http_proxy?.url || "http://proxy:3128",
-  });
-  const https = el("input", {
-    type: "text",
-    autocomplete: "off",
-    spellcheck: "false",
-    placeholder: c?.https_proxy?.url || "http://proxy:3128",
+    placeholder: c?.proxy_url?.url || "http://proxy:3128",
   });
   const fields = el(
     "div",
     {},
-    (c?.http_proxy || c?.https_proxy) &&
-      el("p", { id: "proxy-hint", class: "caption" }, "Leave a proxy blank to keep its saved value."),
-    ...[
-      ["HTTP_PROXY", http, c?.http_proxy],
-      ["HTTPS_PROXY", https, c?.https_proxy],
-    ].map(([k, input, saved]) => {
-      const clear = el("input", { type: "checkbox", "data-clear": k });
-      if (saved) input.setAttribute("aria-describedby", "proxy-hint");
-      return el(
-        "div",
-        {},
-        field(k, input),
-        saved && el("label", { class: "switch" }, clear, "Clear saved " + k),
-      );
-    }),
+    field("Proxy URL", proxy),
+    c?.proxy_url && el("p", { id: "proxy-hint", class: "caption" }, "Leave blank to keep the saved proxy. Switch to Direct or Inherit to clear it."),
   );
+  if (c?.proxy_url) proxy.setAttribute("aria-describedby", "proxy-hint");
   const toggle = () => (fields.hidden = mode.value !== "custom");
   mode.onchange = toggle;
   toggle();
@@ -491,14 +473,7 @@ function accountForm(t, c) {
     c ? "Save changes" : "Add profile",
     async () => {
       const v = { label: label.value.trim(), proxy_mode: mode.value };
-      if (mode.value === "custom")
-        for (const [k, input] of [
-          ["http_proxy", http],
-          ["https_proxy", https],
-        ]) {
-          if (input.value) v[k] = input.value;
-          else if ($('[data-clear="' + k.toUpperCase() + '"]', fields)?.checked) v[k] = null;
-        }
+      if (mode.value === "custom" && proxy.value) v.proxy_url = proxy.value;
       const saved = c
         ? await api("accounts/" + c.id, "PATCH", { revision: c.revision, ...v })
         : await api("accounts", "POST", { tool: t, ...(source.value === "new" ? {create: true} : {home: home.value.trim()}), ...v });
@@ -910,7 +885,7 @@ async function accounts(params, ver, enter) {
         datum("Maintenance commands", current),
         datum("Directory", code(c.home)),
         datum("Proxy", c.proxy_mode === "custom"
-          ? [c.http_proxy?.url, c.https_proxy?.url].filter(Boolean).join(" · ")
+          ? c.proxy_url?.url
           : simple(c.proxy_mode)))), quotaCard(c).section);
   }
   const compat = data.compatibility;

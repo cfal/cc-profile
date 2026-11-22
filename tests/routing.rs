@@ -94,7 +94,9 @@ fn upgrading_v4_keeps_the_codex_owner_and_cursor_without_touching_native_hooks()
     {
         let db = f.store.db().unwrap();
         db.execute_batch(
-            "ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
+            "ALTER TABLE configs RENAME COLUMN proxy_url TO http_proxy;
+            ALTER TABLE configs ADD COLUMN https_proxy TEXT;
+            ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
             CREATE TABLE installed_observers(config_id INTEGER PRIMARY KEY, command TEXT);
             PRAGMA user_version=4;",
         )
