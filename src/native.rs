@@ -107,7 +107,6 @@ fn running_exe() -> Option<PathBuf> {
     env::current_exe().ok()
 }
 fn launcher_files() -> Result<Vec<FileId>> {
-    const NAMES: [&str; 2] = ["ccp", "cc-profile"];
     let exe = running_exe();
     let own = exe.as_deref().and_then(file_id).ok_or_else(|| {
         Error::bad(
@@ -116,27 +115,11 @@ fn launcher_files() -> Result<Vec<FileId>> {
         )
     })?;
     let mut ids = vec![own];
-    let installed = exe
-        .and_then(|p| p.canonicalize().ok())
-        .filter(|p| {
-            matches!(
-                p.file_name().and_then(|s| s.to_str()),
-                Some("ccp" | "cc-profile" | "ccpd")
-            )
-        })
-        .or_else(|| {
-            // A hardlink records the alias path, not the installation directory.
-            NAMES
-                .into_iter()
-                .flat_map(executable_paths)
-                .find(|p| file_id(p) == Some(own))
-        });
-    if let Some(path) = installed {
-        ids.extend(
-            NAMES
-                .iter()
-                .filter_map(|n| file_id(&path.with_file_name(n))),
-        );
+    if let Some(path) = exe.and_then(|p| p.canonicalize().ok())
+        && path.file_name().is_some_and(|n| n == "ccpd")
+        && let Some(launcher) = file_id(&path.with_file_name("ccp"))
+    {
+        ids.push(launcher);
     }
     Ok(ids)
 }

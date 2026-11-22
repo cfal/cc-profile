@@ -186,7 +186,7 @@ else:
         codex.symlink_to(entry)
         aliases = self.root / "aliases"
         aliases.mkdir()
-        (aliases / "codex").symlink_to(LAUNCHER.with_name("cc-profile"))
+        (aliases / "codex").symlink_to(LAUNCHER)
         (aliases / "claude").symlink_to(LAUNCHER)
         (self.root / "bin/ccp").symlink_to(LAUNCHER)
         path = self.env["PATH"]

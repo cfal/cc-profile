@@ -96,9 +96,8 @@ sys.exit(17)
         install.mkdir()
         symlinks.mkdir()
         hardlinks.mkdir()
-        for name in ("ccp", "cc-profile"):
-            shutil.copy2(LAUNCHER.with_name(name), install / name)
-        (symlinks / "claude").symlink_to(install / "cc-profile")
+        shutil.copy2(LAUNCHER, install / "ccp")
+        (symlinks / "claude").symlink_to(install / "ccp")
         os.link(install / "ccp", hardlinks / "claude")
         self.env["PATH"] = os.pathsep.join(map(str, [symlinks, hardlinks, self.root, install]))
         for exe, prefix in [(symlinks / "claude", []), (hardlinks / "claude", []),

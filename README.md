@@ -12,7 +12,7 @@ ccp --version
 ccpd
 ```
 
-`ccp` remains the launcher; `cc-profile` is its compatibility alias. If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries.
+If upgrading from the Python tool, run `uv tool uninstall cc-profile` before the Cargo install so the old entry points do not shadow the binaries.
 
 For distribution, build stripped, static Linux executables from the repository root:
 
@@ -20,7 +20,7 @@ For distribution, build stripped, static Linux executables from the repository r
 ./docker-build.sh --bins
 ```
 
-On x86-64 the outputs are `target/x86_64-unknown-linux-musl/release/{ccp,ccpd,cc-profile}`. Ship `ccp` and `ccpd` to a Linux machine of the same architecture; the alias is optional. The panel assets are embedded in `ccpd`.
+On x86-64 the outputs are `target/x86_64-unknown-linux-musl/release/{ccp,ccpd}`. Ship both binaries to a Linux machine of the same architecture. The panel assets are embedded in `ccpd`.
 
 Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path --agy-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
 
@@ -40,7 +40,7 @@ ln -s "$HOME/.local/bin/ccp" "$HOME/.local/ccp-bin/claude"
 export PATH="$HOME/.local/ccp-bin:$PATH"
 ```
 
-Link to the same `ccp` or `cc-profile` installation you use for direct commands. Keep the real native tools later on PATH; do not replace them with the links. The launcher and daemon must resolve the same native executable. A daemon `--*-bin` override must identify the native entrypoint, not a launcher link. Native npm and shell entrypoints work normally; scripts that call back into `ccp` are not supported as aliases.
+Link to the same `ccp` installation you use for direct commands. Keep the real native tools later on PATH; do not replace them with the links. The launcher and daemon must resolve the same native executable. A daemon `--*-bin` override must identify the native entrypoint, not a launcher link. Native npm and shell entrypoints work normally; scripts that call back into `ccp` are not supported as aliases.
 
 The panel defaults to **http://127.0.0.1:8743**. In a container, run `ccpd --listen 0.0.0.0` and publish the port with Docker's `-p 127.0.0.1:8743:8743` for host-only access. Open the published address in your browser. `--listen IP` accepts an IPv4 or IPv6 address; `--port PORT` changes the internal port. Mapped ports, custom hostnames, and HTTPS reverse proxies need no panel configuration. Only the panel listens on TCP; launches still use the private Unix socket.
 
