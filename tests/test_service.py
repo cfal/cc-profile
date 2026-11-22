@@ -113,8 +113,10 @@ else:
             self.assertNotIn("set-cookie",headers)
             self.session = data["session"]
 
-    def start(self):
-        self.p = subprocess.Popen([str(getattr(self, "binary", DAEMON)), "--port", "0"], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
+    def start(self, *args, warning=None):
+        self.p = subprocess.Popen([str(getattr(self, "binary", DAEMON)), "--port", "0", *args], env=self.env, cwd=self.root, stderr=subprocess.PIPE, text=True)
+        if warning is not None:
+            self.assertIn(warning, self.p.stderr.readline())
         line = self.p.stderr.readline()
         self.assertIn("http://127.0.0.1:", line, line)
         self.port = int(re.search(r":(\d+)$", line.strip())[1])
@@ -151,6 +153,94 @@ else:
         return subprocess.run([str(LAUNCHER), *args], env=self.env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, cwd=self.root,
                               timeout=30 if getattr(self,"native",False) else 8)
+
+    def test_provider_aliases_route_with_distinct_daemon_and_shell_paths(self):
+        for tool in ("codex", "claude"):
+            c = self.account(tool, tool + "-work")
+            self.api("PATCH", "accounts/"+str(c["id"]), {"revision":c["revision"],
+                     "proxy_mode":"custom", "proxy_url":"http://proxy.invalid:8888"})
+            self.assertEqual(self.api("PUT", "current/"+tool, {"config_id":c["id"]})[0], 200)
+        self.stop()
+        libexec = self.root / "libexec"
+        libexec.mkdir()
+        self.binary = shutil.copy2(DAEMON, libexec / "ccpd")
+        package = self.root / "package"
+        package.mkdir()
+        codex = self.root / "bin/codex"
+        codex.rename(package / "codex")
+        entry = package / "entry.sh"
+        entry.write_text('#!/bin/sh\nexec "${0%/*}/codex" "$@"\n')
+        entry.chmod(0o700)
+        codex.symlink_to(entry)
+        aliases = self.root / "aliases"
+        aliases.mkdir()
+        (aliases / "codex").symlink_to(LAUNCHER.with_name("cc-profile"))
+        (aliases / "claude").symlink_to(LAUNCHER)
+        (self.root / "bin/ccp").symlink_to(LAUNCHER)
+        path = self.env["PATH"]
+        self.env["PATH"] = f"{aliases}:{path}"
+        self.start()
+        def run(args, tool, expected):
+            p = subprocess.run(args, env=self.env, cwd=self.root, capture_output=True, text=True, timeout=5)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            result = json.loads(p.stdout)
+            self.assertEqual((result["argv"],result["proxy"],result["home"]),
+                             (expected, "http://proxy.invalid:8888/", str(self.root/(tool+"-work"))))
+        run(["codex", "login", "status"], "codex", ["login", "status"])
+        self.env["PATH"] = path
+        run(["/bin/sh", "-c", "alias claude='ccp claude'\nclaude auth status"], "claude", ["auth", "status"])
+
+    def test_explicit_native_binary_never_searches_past_a_mismatch(self):
+        c = self.account("codex", "work")
+        self.api("PUT", "current/codex", {"config_id":c["id"]})
+        self.stop()
+        self.binary = shutil.copy2(DAEMON, self.root / "ccpd")
+        front = self.root / "front"
+        front.mkdir()
+        candidate = front / "codex"
+        candidate.write_text('#!/bin/sh\ntouch "$HOME/first-candidate-ran"\necho "codex-cli older"\n')
+        candidate.chmod(0o700)
+        native = self.root / "bin/codex"
+        path = self.env["PATH"]
+        self.env["PATH"] = f"{front}:{path}"
+        self.start("--codex-bin", native)
+        self.assertIn("Native tool", self.cli("codex","login","status").stderr)
+        self.assertFalse((self.root / "first-candidate-ran").exists())
+        self.env["PATH"] = path
+        self.assertEqual(self.cli("codex","login","status").returncode, 0)
+        self.stop()
+        self.env["PATH"] = f"{front}:{path}"
+        self.start()
+        self.assertTrue((self.root / "first-candidate-ran").exists())
+        self.env["PATH"] = path
+        self.assertIn("Native tool", self.cli("codex","login","status").stderr)
+        candidate.unlink()
+        candidate.symlink_to(LAUNCHER)
+        self.env["PATH"] = f"{front}:{path}"
+        not_executable = self.root / "not-executable"
+        not_executable.touch(mode=0o600)
+        for binary, warning in [(candidate, "launcher alias"), ("codex", "launcher alias"),
+                                (front/"missing", None), (not_executable, None)]:
+            with self.subTest(binary=binary):
+                self.stop()
+                self.start("--codex-bin", binary, warning=warning)
+                self.assertIn("Native tool", self.cli("codex","login","status").stderr)
+
+    def test_forwarding_script_version_probe_cannot_register_the_launcher(self):
+        c = self.account("claude", "work")
+        self.api("PUT", "current/claude", {"config_id":c["id"]})
+        self.stop()
+        front = self.root / "front"
+        front.mkdir()
+        wrapper = front / "claude"
+        wrapper.write_text('#!/bin/sh\nexec ccp claude "$@"\n')
+        wrapper.chmod(0o700)
+        (front / "ccp").symlink_to(LAUNCHER)
+        self.env["PATH"] = f"{front}:{self.env['PATH']}"
+        self.start(warning="invokes the launcher")
+        p = self.cli("claude","auth","status")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Native tool", p.stderr)
 
     def test_creating_and_signing_in_a_second_claude_profile(self):
         work = self.account("claude", "work")

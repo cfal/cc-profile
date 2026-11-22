@@ -77,11 +77,40 @@ sys.exit(17)
         p=self.run_ccp("claude")
         self.assertEqual(p.returncode,17,p.stderr)
 
+    def test_version_probe_environment_cannot_short_circuit_an_ordinary_launch(self):
+        self.env["CCP_NATIVE_VERSION_PROBE"] = "1"
+        p = self.run_ccp("claude", "-p", "hello")
+        self.assertEqual(p.returncode, 17, p.stderr)
+        self.assertEqual(json.loads(p.stdout)[0], ["-p", "hello"])
+
     def test_empty_path_does_not_pick_a_program_in_the_working_directory(self):
-        self.env["PATH"]=""
-        p=self.run_ccp("claude")
-        self.assertIsNone(json.loads(self.calls[0][1])["binary"])
-        self.assertEqual((p.returncode,p.stdout),(1,""))
+        for path in ["", ":/nonexistent:"]:
+            with self.subTest(path=path):
+                self.env["PATH"]=path
+                p=self.run_ccp("claude")
+                self.assertIsNone(json.loads(self.calls[-1][1])["binary"])
+                self.assertEqual((p.returncode,p.stdout),(1,""))
+
+    def test_launcher_links_dispatch_by_invoked_name_and_skip_aliases_on_path(self):
+        install, symlinks, hardlinks = [self.root / d for d in ("install", "symlinks", "hardlinks")]
+        install.mkdir()
+        symlinks.mkdir()
+        hardlinks.mkdir()
+        for name in ("ccp", "cc-profile"):
+            shutil.copy2(LAUNCHER.with_name(name), install / name)
+        (symlinks / "claude").symlink_to(install / "cc-profile")
+        os.link(install / "ccp", hardlinks / "claude")
+        self.env["PATH"] = os.pathsep.join(map(str, [symlinks, hardlinks, self.root, install]))
+        for exe, prefix in [(symlinks / "claude", []), (hardlinks / "claude", []),
+                            (install / "ccp", ["claude"])]:
+            for argv in [[], ["--version"], ["--help"], ["login", "with spaces", ""]]:
+                with self.subTest(exe=exe, argv=argv):
+                    p = subprocess.run([exe, *prefix, *argv], env=self.env, cwd=self.root,
+                                       input="", capture_output=True, text=True, timeout=3)
+                    self.assertEqual(p.returncode, 17, p.stderr)
+                    self.assertEqual(json.loads(p.stdout)[0], argv)
+                    request = json.loads(self.calls[-1][1])
+                    self.assertEqual((request["tool"], request["binary"]), ("claude", str(self.native)))
 
     def test_launch_survives_replacement_of_the_launcher_binary(self):
         retired=self.root/"retired"
@@ -197,5 +226,7 @@ sys.exit(17)
         self.assertIn("UTF-8",self.run_ccp("claude",b"\xff").stderr)
         self.native.unlink()
         self.native.symlink_to(LAUNCHER)
-        self.assertEqual(self.run_ccp("claude").returncode,2)
+        p = self.run_ccp("claude")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("not a native claude executable", p.stderr)
         self.assertFalse(self.calls)

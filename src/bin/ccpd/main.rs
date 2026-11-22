@@ -28,9 +28,9 @@ async fn run() -> Result<()> {
     unsafe { libc::umask(0o077) };
     let mut args = env::args().skip(1);
     let mut port = 8743;
-    let mut claude = "claude".to_owned();
-    let mut agy = "agy".to_owned();
-    let mut codex = "codex".to_owned();
+    let mut claude = None;
+    let mut agy = None;
+    let mut codex = None;
     let bad = || {
         Error::bad(
             "arguments",
@@ -49,9 +49,9 @@ async fn run() -> Result<()> {
                 return Ok(());
             }
             "--port" => port = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,
-            "--claude-bin" => claude = args.next().ok_or_else(bad)?,
-            "--agy-bin" => agy = args.next().ok_or_else(bad)?,
-            "--codex-bin" => codex = args.next().ok_or_else(bad)?,
+            "--claude-bin" => claude = Some(args.next().ok_or_else(bad)?),
+            "--agy-bin" => agy = Some(args.next().ok_or_else(bad)?),
+            "--codex-bin" => codex = Some(args.next().ok_or_else(bad)?),
             _ => return Err(bad()),
         }
     }
@@ -86,9 +86,9 @@ async fn run() -> Result<()> {
     }
     let unix = UnixListener::bind(&sock)?;
     fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
-    let claude = Build::detect("claude", &claude, &state).await;
-    let codex = Build::detect("codex", &codex, &state).await;
-    let agy = Build::detect("agy", &agy, &state).await;
+    let claude = Build::detect("claude", claude.as_deref(), &state).await;
+    let codex = Build::detect("codex", codex.as_deref(), &state).await;
+    let agy = Build::detect("agy", agy.as_deref(), &state).await;
     let app = Arc::new(service::App {
         store,
         claude,
