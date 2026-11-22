@@ -254,7 +254,12 @@ pub fn codex_snapshot(v: &Value) -> Result<Value> {
             windows.push(json!({"kind":if account{"account"}else{"model"},"label":label,"used_pct":p,"reset_at_ms":seconds(&w["resetsAt"])}));
         }
     }
-    Ok(json!({"plan":plan,"windows":windows,"credits":credits,"spend_control":spend}))
+    let resets = v["rateLimitResetCredits"]["availableCount"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok());
+    Ok(
+        json!({"plan":plan,"windows":windows,"credits":credits,"spend_control":spend,"earned_resets":resets}),
+    )
 }
 pub struct FetchError {
     pub status: &'static str,
@@ -427,6 +432,23 @@ mod tests {
         assert_eq!(s["windows"][0]["reset_at_ms"], 10000);
         assert_eq!(s["spend_control"]["remaining_pct"], 0.0);
         assert_eq!(s["credits"]["unlimited"], true);
+    }
+    #[test]
+    fn earned_resets_are_an_explicit_count_not_quota_or_credits() {
+        let mut report = json!({"rateLimits":{"credits":{"hasCredits":true}}});
+        for (count, expected) in [
+            (Value::Null, Value::Null),
+            (json!(-1), Value::Null),
+            (json!(0), json!(0)),
+            (json!(3), json!(3)),
+        ] {
+            report["rateLimitResetCredits"] =
+                json!({"availableCount":count,"credits":[{"id":"private"}]});
+            let s = codex_snapshot(&report).unwrap();
+            assert_eq!(s["earned_resets"], expected);
+            assert!(!s.to_string().contains("private"));
+            assert_eq!(remaining(&s, 0), None);
+        }
     }
     #[test]
     fn over_limit_usage_shows_an_exhausted_window() {

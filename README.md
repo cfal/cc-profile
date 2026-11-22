@@ -144,7 +144,7 @@ Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per dire
 
 Proxy URLs are visible as you type. The panel API and copied commands omit saved credentials. The native process receives the full proxy URL, including credentials, in its environment. Tools that inherit that environment can read it too.
 
-Quota is a **best-effort snapshot**, not a reservation. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
+Quota is a **best-effort snapshot**, not a reservation. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. For Codex, **Earned resets available** is the provider-reported count, separate from the next automatic reset or a spending balance. Redeem a grant in the intended account's native Codex TUI under `/usage`; the panel does not spend grants and the router does not count them as usable quota.
 
 Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it. Databases with separate proxy columns are not upgraded by this version.
 

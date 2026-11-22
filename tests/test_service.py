@@ -64,8 +64,10 @@ if sys.argv[1:2] == ["app-server"]:
             assert r["params"]["loginId"] == login_id
             (home/"login-cancelled").touch()
         if r["method"] == "account/rateLimits/read":
+            assert r["params"] == {"excludeResetCreditDetails":True}
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":100 if (home/"empty-quota").exists() else 0,"resetsAt":2000000000}}}
+            result["rateLimitResetCredits"] = {"availableCount":2,"credits":None}
         if r["method"] == "config/read":
             import tomllib
             assert r["params"] == {"cwd":os.getcwd(),"includeLayers":False}

@@ -324,6 +324,7 @@ class Panel(unittest.TestCase):
             expect(disabled).to_contain_text("Not checked")
             disabled.get_by_role("button",name="Refresh quota",exact=True).click()
             expect(disabled).to_contain_text("100% left")
+            expect(disabled).to_contain_text("Earned resets available: 2")
             self.assertLess(overview.bounding_box()["y"] + overview.bounding_box()["height"], logs.bounding_box()["y"])
             countdown = disabled.get_by_text("· in 3d", exact=True)
             for width in [1240, 780, 320]:

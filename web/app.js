@@ -629,6 +629,8 @@ function quotaDetails(q) {
     );
   }
   if (s && !s.windows.length) details.append(el("p", {}, "No windows reported"));
+  if (s?.earned_resets != null)
+    details.append(el("p", {}, "Earned resets available: " + s.earned_resets));
   if (s?.credits)
     details.append(
       el(
