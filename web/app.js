@@ -808,7 +808,13 @@ function openResetGrants(c) {
       } catch (err) {
         if (uncertain && (err.code === "stale_grant" || err.code === "stale_config"))
           return {message: "The original grant can no longer be retried. The earlier redemption is unconfirmed. Check this profile in Codex."};
-        if (!uncertain && Object.hasOwn(resetErrors, err.code)) return {message: resetErrors[err.code]};
+        if (!uncertain) {
+          if (err.code === "native_rpc")
+            return {message: "Redemption was not submitted. Codex could not check this grant."};
+          if (err.code === "rate_limited")
+            return {message: "Redemption was not submitted. The grant check was rate limited. Try again later."};
+          if (Object.hasOwn(resetErrors, err.code)) return {message: resetErrors[err.code]};
+        }
       }
       if (typeof outcome !== "string" || !Object.hasOwn(resetOutcomes, outcome)) return {unknown: true};
       // The daemon queues reconciliation; the visible view polls it without another POST.

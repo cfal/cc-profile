@@ -562,10 +562,15 @@ class Panel(unittest.TestCase):
             page.clock.set_fixed_time("2030-01-01T00:00:00Z")
             endpoint = f"**/accounts/{c['id']}/resets/"
             redeems = []
-            def stale(route):
+            def reject(route):
                 redeems.append(route.request.post_data_json)
-                route.fulfill(status=409, json={"error":"stale_grant","message":"/private/provider/path"})
-            page.route(endpoint+"redeem", stale)
+                if error:
+                    route.fulfill(status=409 if error == "stale_grant" else 503,
+                                  json={"error":error,"message":"/private/provider/path"})
+                else:
+                    route.abort("timedout")
+            error = "stale_grant"
+            page.route(endpoint+"redeem", reject)
             self.open_grant_page(page, service, f"accounts?tool=codex&id={c['id']}")
             action = page.get_by_role("button", name="List reset grants")
             dlg = page.get_by_role("dialog")
@@ -592,12 +597,18 @@ class Panel(unittest.TestCase):
             expect(dlg).to_contain_text("expired or is no longer available")
             self.assertEqual(redeems, [])
             dlg.get_by_role("button", name="Close").click()
-            listed(grant(None))
-            dlg.get_by_role("button", name="Review grant 1: One reset").click()
-            dlg.get_by_role("button", name="Redeem this grant").click()
-            expect(dlg).to_contain_text("expired or is no longer available")
-            expect(dlg).not_to_contain_text("/private")
-            self.assertEqual(redeems, [{"handle":"selected"}])
+            for error, message in [("stale_grant", "expired or is no longer available"),
+                                   ("native_rpc", "Redemption was not submitted"),
+                                   ("rate_limited", "Redemption was not submitted"),
+                                   (None, "earlier attempt may have used this grant")]:
+                listed(grant(None))
+                dlg.get_by_role("button", name="Review grant 1: One reset").click()
+                dlg.get_by_role("button", name="Redeem this grant").click()
+                expect(dlg).to_contain_text(message)
+                expect(dlg).not_to_contain_text("/private")
+                expect(dlg.get_by_role("button", name="Retry same grant")).to_have_count(int(error is None))
+                dlg.get_by_role("button", name="Close").click()
+            self.assertEqual(redeems, [{"handle":"selected"}]*4)
 
     def test_uncertain_reset_retries_only_the_same_profile_and_handle(self):
         service = self.start_service()
@@ -635,14 +646,19 @@ class Panel(unittest.TestCase):
             expect(dlg).to_have_accessible_name("Unconfirmed redemption")
             expect(dlg).not_to_contain_text("/private")
             retry = dlg.get_by_role("button", name="Retry same grant")
-            for i in (1, 2):
+            for i, error in enumerate(("native_rpc", "rate_limited", "timeout", None), start=1):
                 with page.expect_request("**/resets/redeem"):
                     retry.press("Enter")
                 self.assertEqual(len(pending), i+1)
                 self.assertTrue(pending[i].request.url.endswith(f"/accounts/{a['id']}/resets/redeem"))
                 self.assertEqual(pending[i].request.post_data_json, {"handle":"original-1"})
-                if i == 1:
-                    pending[i].abort("timedout")
+                if error:
+                    if error == "timeout":
+                        pending[i].abort("timedout")
+                    else:
+                        pending[i].fulfill(status=503, json={"error":error})
+                    expect(dlg).to_have_accessible_name("Unconfirmed redemption")
+                    expect(dlg).not_to_contain_text("Redemption was not submitted")
                     expect(retry).to_be_visible()
                 else:
                     pending[i].fulfill(json={"outcome":"alreadyRedeemed"})
