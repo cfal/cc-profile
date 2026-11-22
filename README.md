@@ -110,7 +110,7 @@ Proxy URLs are visible as you type. The panel API and copied commands omit saved
 
 Quota is **informational**. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. No spending or redeeming reset credits.
 
-Custom uses one proxy URL for both HTTP and HTTPS. Upgrading preserves the old HTTPS proxy if one was set, otherwise the old HTTP proxy. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it.
+Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it. Databases with separate proxy columns are not upgraded by this version.
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
 - Antigravity: explicit native text report via the card or `ccp usage <id>`; not included in background polling.

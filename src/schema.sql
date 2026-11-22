@@ -6,7 +6,7 @@ CREATE TABLE configs (
   current INTEGER NOT NULL DEFAULT 0 CHECK(current IN (0,1) AND current <= enabled),
   revision INTEGER NOT NULL DEFAULT 1,
   proxy_mode TEXT NOT NULL DEFAULT 'inherit' CHECK(proxy_mode IN ('inherit','direct','custom')),
-  http_proxy TEXT, https_proxy TEXT,
+  proxy_url TEXT,
   observer_stamp TEXT,
   UNIQUE(tool,label), UNIQUE(tool,id), UNIQUE(dev,ino)
 );

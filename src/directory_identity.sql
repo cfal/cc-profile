@@ -7,11 +7,11 @@ CREATE TABLE configs_v4 (
   current INTEGER NOT NULL DEFAULT 0 CHECK(current IN (0,1) AND current <= enabled),
   revision INTEGER NOT NULL DEFAULT 1,
   proxy_mode TEXT NOT NULL DEFAULT 'inherit' CHECK(proxy_mode IN ('inherit','direct','custom')),
-  http_proxy TEXT, https_proxy TEXT, observer_stamp TEXT, birth_ns INTEGER,
+  proxy_url TEXT, observer_stamp TEXT, birth_ns INTEGER,
   UNIQUE(tool,label), UNIQUE(tool,id)
 );
 INSERT INTO configs_v4 SELECT id,tool,label,home,dev,ino,enabled,current,revision,
-  proxy_mode,http_proxy,https_proxy,observer_stamp,birth_ns FROM configs;
+  proxy_mode,proxy_url,observer_stamp,birth_ns FROM configs;
 DROP TABLE configs;
 ALTER TABLE configs_v4 RENAME TO configs;
 CREATE UNIQUE INDEX config_identity ON configs(dev,ino,birth_ns);

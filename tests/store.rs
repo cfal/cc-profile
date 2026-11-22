@@ -39,7 +39,7 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
         .db()
         .unwrap()
         .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
-            ALTER TABLE configs RENAME COLUMN proxy_url TO http_proxy; ALTER TABLE configs ADD COLUMN https_proxy TEXT; PRAGMA user_version=2;")
+            PRAGMA user_version=2;")
         .unwrap();
     let open = || ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     let upgraded = open();
@@ -154,10 +154,9 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     db.execute_batch(include_str!("../src/directory_identity.sql"))
         .unwrap();
     db.execute_batch("ALTER TABLE configs DROP COLUMN observer_stamp;
-        ALTER TABLE configs DROP COLUMN https_proxy; ALTER TABLE configs RENAME COLUMN http_proxy TO proxy_url;
         PRAGMA user_version=6;
-        INSERT INTO configs(id, tool,label,home,dev,ino,birth_ns,enabled,current,revision)
-            VALUES(42,'codex','existing','/offline/home',1,2,3,1,1,4);
+        INSERT INTO configs(id,tool,label,home,dev,ino,birth_ns,enabled,current,revision,proxy_mode,proxy_url)
+            VALUES(42,'codex','existing','/offline/home',1,2,3,1,1,4,'custom','http://saved:3128/');
         UPDATE sqlite_sequence SET seq=50 WHERE name='configs';
         UPDATE tools SET cursor=42 WHERE tool='codex';
         INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
@@ -170,6 +169,7 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     let c = config(&db, 42).unwrap();
     assert!(c.enabled && c.current);
     assert_eq!(c.revision, 4);
+    assert_eq!(c.proxy_url.as_deref(), Some("http://saved:3128/"));
     assert!(
         db.prepare(
             "SELECT 1 FROM sessions s JOIN quota_cache q ON s.owner=q.config_id
@@ -195,53 +195,29 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
 }
 
 #[test]
-fn v5_custom_proxies_keep_the_previous_https_route_and_credentials() {
+fn unsupported_config_schema_is_not_rewritten() {
     let f = Fixture::new();
-    let profiles = [
-        f.add("codex", "https"),
-        f.add("claude", "http"),
-        f.add("codex", "both"),
-    ];
-    let http = "http://h:old@first.invalid:3128/";
-    let https = "https://s:secret@second.invalid:8443/";
-    {
-        let db = f.store.db().unwrap();
-        db.execute_batch(
-            "ALTER TABLE configs RENAME COLUMN proxy_url TO http_proxy;
-            ALTER TABLE configs ADD COLUMN https_proxy TEXT; PRAGMA user_version=5;",
+    let path = f.root.join("state/unsupported.sqlite3");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE configs(http_proxy TEXT, https_proxy TEXT);
+        INSERT INTO configs VALUES('http://one','http://two'); PRAGMA user_version=5;",
+    )
+    .unwrap();
+    assert_eq!(ccpd::store::Store::open(&path).err().unwrap().1, "schema");
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert!(
+        db.prepare(
+            "SELECT 1 FROM configs WHERE http_proxy='http://one' AND https_proxy='http://two'"
         )
-        .unwrap();
-        for (c, (h, s)) in profiles.iter().zip([
-            (None, Some(https)),
-            (Some(http), None),
-            (Some(http), Some(https)),
-        ]) {
-            db.execute(
-                "UPDATE configs SET proxy_mode='custom',http_proxy=?,https_proxy=? WHERE id=?",
-                rusqlite::params![h, s, c.id],
-            )
-            .unwrap();
-        }
-    }
-    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
-    for (c, expected) in profiles.iter().zip([https, http, https]) {
-        let cfg = config(&upgraded.db().unwrap(), c.id).unwrap();
-        assert_eq!(cfg.revision, c.revision + 1);
-        let (set, unset) = ccpd::native::env_patch(&cfg);
-        for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
-            assert_eq!(set[name], expected);
-        }
-        assert!(unset.contains(&"ALL_PROXY".to_owned()));
-        let public = cfg.public();
-        assert!(public.get("http_proxy").is_none() && public.get("https_proxy").is_none());
-        assert!(!public["proxy_url"]["url"].as_str().unwrap().contains('@'));
-        assert_eq!(public["proxy_url"]["credentials_saved"], true);
-        assert!(
-            upgraded
-                .edit(c.id, &json!({"revision":cfg.revision,"http_proxy":http}))
-                .is_err()
-        );
-    }
+        .unwrap()
+        .exists([])
+        .unwrap()
+    );
 }
 
 #[test]
@@ -260,6 +236,11 @@ fn proxy_secrets_are_write_only_and_canonical_aliases_are_rejected() {
         a.home.to_str().unwrap()
     );
     let v=f.store.edit(a.id,&json!({"revision":a.revision,"proxy_mode":"custom","proxy_url":"http://user:secret@proxy:8080"})).unwrap();
+    let (set, unset) = ccpd::native::env_patch(&v);
+    for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+        assert_eq!(set[name], "http://user:secret@proxy:8080/");
+    }
+    assert!(unset.contains(&"ALL_PROXY".to_owned()));
     assert!(!v.public().to_string().contains("secret"));
     assert_eq!(v.public()["proxy_url"]["credentials_saved"], true);
     assert!(

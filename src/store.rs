@@ -136,12 +136,6 @@ fn proxy(raw: &Value) -> Result<Option<String>> {
     Ok(Some(u.to_string()))
 }
 fn proxy_settings(v: &Value, c: Option<&Config>) -> Result<(String, Option<String>)> {
-    if v.get("http_proxy").is_some() || v.get("https_proxy").is_some() {
-        return Err(Error::bad(
-            "bad_proxy",
-            "Use proxy_url for both HTTP and HTTPS.",
-        ));
-    }
     let mode = match v.get("proxy_mode") {
         Some(v) => v.as_str().unwrap_or(""),
         None => c.map(|c| c.mode.as_str()).unwrap_or("inherit"),
@@ -260,6 +254,15 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
+        } else if !(1..=7).contains(&v)
+            || !tx
+                .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
+                .exists([])?
+        {
+            return Err(Error::unavailable(
+                "schema",
+                "Unsupported router database schema.",
+            ));
         }
         if v == 0 || v == 1 {
             tx.execute_batch(include_str!("panel_password.sql"))?;
@@ -268,11 +271,6 @@ impl Store {
             tx.execute_batch(
                 "ALTER TABLE configs ADD COLUMN birth_ns INTEGER; PRAGMA user_version=3;",
             )?;
-        } else if !(3..=7).contains(&v) {
-            return Err(Error::unavailable(
-                "schema",
-                "Unsupported router database version.",
-            ));
         }
         if v < 4 {
             tx.execute_batch(include_str!("directory_identity.sql"))?;
@@ -292,16 +290,6 @@ impl Store {
                 UPDATE launches SET state='unobserved',reason='router_upgraded'
                 WHERE tool='codex' AND state='pending';
                 PRAGMA user_version=5;",
-            )?;
-        }
-        if v < 6 {
-            // Keep the route previously used for HTTPS provider traffic.
-            tx.execute_batch(
-                "UPDATE configs SET http_proxy=COALESCE(https_proxy,http_proxy),
-                    revision=revision+1 WHERE proxy_mode='custom';
-                 ALTER TABLE configs RENAME COLUMN http_proxy TO proxy_url;
-                 ALTER TABLE configs DROP COLUMN https_proxy;
-                 PRAGMA user_version=6;",
             )?;
         }
         if v < 7 {
