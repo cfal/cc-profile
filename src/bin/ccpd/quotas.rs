@@ -94,8 +94,23 @@ pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
 fn fresh(success: i64) -> bool {
     (0..FRESH_MS).contains(&now().saturating_sub(success))
 }
+pub fn verified_alias(db: &Connection, id: i64, stamp: &str) -> Result<bool> {
+    Ok(cached(db, id)?.is_some_and(|q| {
+        q.stamp == stamp
+            && q.status == "fresh"
+            && q.success.is_some_and(fresh)
+            && q.snapshot
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .is_some_and(|v| v["file_auth_verified"] == true)
+    }))
+}
 enum Scope {
-    Account { id: i64, enabled_only: bool },
+    Account {
+        id: i64,
+        enabled_only: bool,
+        expected: Option<String>,
+    },
     Provider(String),
     All,
 }
@@ -122,6 +137,9 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
         let mut jobs = Vec::new();
         for c in cs.into_iter().filter(|c| !enabled_only || c.enabled) {
             let Some(stamp) = inputs(&c) else { continue };
+            if matches!(&scope, Scope::Account { expected: Some(expected), .. } if *expected != stamp) {
+                continue;
+            }
             let cache = cached(&db, c.id)?;
             if cache.as_ref().is_some_and(|r| {
                 now() < r.retry_for(&stamp)
@@ -202,11 +220,12 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
     }
     Ok(Json(json!({"queued":n})))
 }
-pub async fn after_reset(s: Shared, selected: i64, affected: Vec<i64>) {
-    for id in affected {
+pub async fn after_reset(s: Shared, selected: i64, refresh: Vec<(i64, String)>) {
+    for (id, stamp) in refresh {
         let scope = Scope::Account {
             id,
             enabled_only: id != selected,
+            expected: Some(stamp),
         };
         if queue(s.clone(), scope, false).await.is_err() {
             eprintln!("ccpd: could not queue post-reset quota check for config {id}");
@@ -246,6 +265,7 @@ pub async fn one(
             Scope::Account {
                 id,
                 enabled_only: false,
+                expected: None,
             },
             false,
         )
