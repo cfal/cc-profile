@@ -1,5 +1,6 @@
 """Optional browser acceptance suite. See README for the isolated command."""
 from contextlib import closing
+import json
 import os
 from pathlib import Path
 import re
@@ -468,6 +469,34 @@ class Panel(unittest.TestCase):
             self.check_layout(page, "profile-mobile")
             self.assertEqual(fonts, [])
             self.assertEqual(page.evaluate("document.fonts.size"), 0)
+
+    def test_confirmed_reset_reaches_only_the_selected_native_grant(self):
+        service = self.start_service()
+        c, home, _, _, _ = service.reset_fixture()
+        calls = home / "reset-consumes.jsonl"
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={c['id']}")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            list_grants = page.get_by_role("button", name="List reset grants")
+            list_grants.click()
+            dialog = page.get_by_role("dialog")
+            dialog.get_by_role("button", name="Review grant 1: One").click()
+            dialog.get_by_role("button", name="Close", exact=True).click()
+            self.assertFalse(calls.exists())
+            list_grants.click()
+            dialog.get_by_role("button", name="Review grant 2: Two").click()
+            expect(dialog).to_contain_text(c["label"])
+            expect(dialog).to_contain_text("Grant 2: Two")
+            self.assertFalse(calls.exists())
+            dialog.get_by_role("button", name="Redeem this grant").click()
+            expect(dialog).to_contain_text("Grant redeemed")
+            sent, = [json.loads(line) for line in calls.read_text().splitlines()]
+            self.assertEqual(sent["params"]["creditId"], "opaque-credit-Two")
+            self.assertEqual(sent["home"], str(home))
+            self.assertEqual(sent["proxy"], "http://fixture.invalid:8111/")
+            self.assertFalse(service.api("GET", "startups")[1]["items"])
 
     def check_layout(self,page,name):
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"),page.viewport_size["width"],name)
