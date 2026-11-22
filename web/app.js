@@ -130,11 +130,12 @@ function guard(fn) {
     }
   };
 }
-async function api(path, method = "GET", body) {
+async function api(path, method = "GET", body, signal) {
   const token = sessionToken;
   const opts = {
     method,
     credentials: "omit",
+    signal,
     headers: { "Content-Type": "application/json", "X-CCP-Session": token },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
@@ -201,6 +202,9 @@ const passwordInput = (name, autocomplete, props = {}) => el("input", {
   type: "password", name, required: true, maxlength: 1024, autocomplete, spellcheck: "false", ...props,
 });
 function passwordForm() {
+  resetDialog?.close();
+  resetAttempts.clear();
+  readDashboardQuotas = null;
   selectedIdentity = null;
   clearTimeout(timer);
   version++;
@@ -662,7 +666,180 @@ function quotaDetails(q, tool) {
   }
   return details;
 }
+
+const resetErrors = {
+  stale_grant: "This grant expired or is no longer available. List grants again for current details.",
+  stale_config: "This profile or its sign-in changed. Reopen its grant list.",
+  busy: "Another request is in progress. Try again shortly.",
+  sign_in_required: "Sign in to this Codex profile first.",
+  unsupported_build: "The installed Codex version does not support this action.",
+  unavailable: "Grant details are unavailable right now.",
+};
+const resetOutcomes = {
+  reset: "Grant redeemed. The usage limit was reset.",
+  alreadyRedeemed: "This grant was already redeemed.",
+  nothingToReset: "There was no usage limit to reset.",
+  noCredit: "No earned reset was available.",
+};
+// Never persist grant handles. Keep an in-flight or uncertain attempt bound to its
+// original profile so reopening the dialog cannot silently substitute a new grant.
+const resetAttempts = new Map();
+let resetDialog, readDashboardQuotas;
+function checkResetProfile(profiles) {
+  if (resetDialog && !profiles.some(c => c.id === resetDialog.id && c.revision === resetDialog.revision))
+    resetDialog.close();
+}
+function openResetGrants(c) {
+  if (resetDialog) return;
+  const token = sessionToken, route = location.hash, base = "accounts/" + c.id;
+  const heading = el("h2", {id: "reset-title"}, "Earned resets"),
+    body = el("div", {"aria-live": "polite"}), footer = el("footer"),
+    box = el("dialog", {class: "grant-dialog", "aria-labelledby": "reset-title", "aria-describedby":"reset-profile"},
+      el("div", {class: "dialog-head"}, heading),
+      el("div", {class: "fields"}, el("p", {id: "reset-profile"}, "Codex / " + c.label + " (#" + c.id + ")"), body), footer);
+  const close = () => { if (box.open) box.close(); },
+    cancel = btn("Close", close);
+  const view = {id: c.id, revision: c.revision, close};
+  const current = () => resetDialog === view && box.open && route === location.hash && token === sessionToken;
+  resetDialog = view;
+  box.addEventListener("close", () => {
+    if (resetDialog === view) resetDialog = null;
+    box.remove();
+  }, {once: true});
+  document.body.append(box);
+  footer.append(cancel);
+  box.showModal();
+
+  function message(s, action) {
+    body.replaceChildren(el("p", {}, s));
+    footer.replaceChildren(cancel, ...(action ? [action] : []));
+  }
+  const expired = (g) => g.expires_at_ms !== null && g.expires_at_ms <= Date.now();
+  const expiry = (g) => g.expires_at_ms === null ? "No expiration"
+    : (expired(g) ? "Expired " : "Expires ") + new Date(g.expires_at_ms).toLocaleString();
+  async function list() {
+    if (!current()) return;
+    message("Loading grants…");
+    let data;
+    try {
+      data = await api(base + "/resets/list", "POST", {}, AbortSignal.timeout(30000));
+      if (!Array.isArray(data.grants) || typeof data.details_available !== "boolean") throw new Error();
+      if (!current()) return;
+      // A long-open card can still have the old label when the daemon issues new handles.
+      const registry = await api("accounts?tool=codex", "GET", undefined, AbortSignal.timeout(30000));
+      if (!current()) return;
+      if (!registry.items.some(row => row.id === c.id && row.revision === c.revision)) {
+        close();
+        notice(resetErrors.stale_config);
+        await readQuotas();
+        return;
+      }
+    } catch (err) {
+      if (current()) message(Object.hasOwn(resetErrors, err.code) ? resetErrors[err.code] : "Could not list grants.",
+        err.code !== "stale_config" && btn("List again", list));
+      return;
+    }
+    if (!current()) return;
+    const count = Number.isSafeInteger(data.available_count) && data.available_count >= 0 ? data.available_count : null;
+    const rows = el("ol", {class: "grant-list"});
+    for (const g of data.grants) {
+      if (!g || typeof g.handle !== "string" || !g.handle || typeof g.title !== "string" || !g.title ||
+          !(g.expires_at_ms === null || Number.isSafeInteger(g.expires_at_ms) && Number.isFinite(new Date(g.expires_at_ms).getTime()))) continue;
+      const grant = {...g, number: rows.childElementCount + 1};
+      const review = btn("Review", () => confirmGrant(grant));
+      review.disabled = expired(grant);
+      review.setAttribute("aria-label", "Review grant " + grant.number + ": " + grant.title);
+      rows.append(el("li", {}, el("div", {class: "grant-row"},
+        el("div", {}, el("strong", {}, grant.title), el("p", {class: "caption"}, expiry(grant))), review)));
+    }
+    const n = rows.childElementCount;
+    body.replaceChildren(el("p", {}, count === null ? "Available count unknown." : "Earned resets available: " + count));
+    if (!data.details_available || (count !== null && n < count) || (!n && count !== 0))
+      body.append(el("p", {}, n ? "Only some grants are listed." : "No grant details available."));
+    if (n) body.append(rows);
+    else if (count === 0 && data.details_available) body.append(el("p", {}, "No available grants."));
+  }
+  function confirmGrant(grant, uncertain = false) {
+    if (!current()) return;
+    heading.textContent = uncertain ? "Unconfirmed redemption" : "Confirm redemption";
+    const action = btn(uncertain ? "Retry same grant" : "Redeem this grant", () => submit(grant, uncertain), null, "primary");
+    message(uncertain ? "The earlier attempt may have used this grant. Retrying can redeem it if it was not used."
+      : "Use this one earned reset for the Codex profile above?", action);
+    body.append(el("strong", {}, "Grant " + grant.number + ": " + grant.title), el("p", {class: "caption"}, expiry(grant)));
+    action.disabled = !uncertain && expired(grant);
+    cancel.focus();
+  }
+  async function readQuotas() {
+    if (token !== sessionToken) return false;
+    try {
+      const {view} = locationState();
+      if (view === "accounts") await render();
+      if (view === "dashboard") await (readDashboardQuotas || render)();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async function observe(attempt) {
+    if (!attempt.pending) return confirmGrant(attempt.grant, true);
+    message("Waiting for Codex…");
+    const result = await attempt.pending;
+    if (!current()) return;
+    if (result.unknown) confirmGrant(attempt.grant, true);
+    else {
+      heading.textContent = "Earned resets";
+      message(result.message);
+      cancel.focus();
+      if (result.refresh && !(await result.refresh) && current())
+        body.append(el("p", {class: "caption"}, "Could not refresh quota. Use Refresh quota to check again."));
+    }
+  }
+  function submit(grant, uncertain) {
+    if (!current()) return;
+    const prior = resetAttempts.get(c.id);
+    if (prior?.pending || (prior && prior.grant !== grant)) return;
+    if (!uncertain && expired(grant)) return message(resetErrors.stale_grant);
+    const attempt = {revision: c.revision, grant};
+    resetAttempts.set(c.id, attempt);
+    async function redeem() {
+      let outcome;
+      try {
+        ({outcome} = await api(base + "/resets/redeem", "POST", {handle: grant.handle}, AbortSignal.timeout(30000)));
+      } catch (err) {
+        if (uncertain && (err.code === "stale_grant" || err.code === "stale_config"))
+          return {message: "The original grant can no longer be retried. The earlier redemption is unconfirmed. Check this profile in Codex."};
+        if (!uncertain && Object.hasOwn(resetErrors, err.code)) return {message: resetErrors[err.code]};
+      }
+      if (typeof outcome !== "string" || !Object.hasOwn(resetOutcomes, outcome)) return {unknown: true};
+      // The daemon queues reconciliation; the visible view polls it without another POST.
+      return {message: resetOutcomes[outcome], refresh: readQuotas()};
+    }
+    attempt.pending = redeem().then(result => {
+      if (resetAttempts.get(c.id) === attempt) {
+        if (result.unknown) attempt.pending = null;
+        else resetAttempts.delete(c.id);
+      }
+      return result;
+    });
+    observe(attempt);
+  }
+  const attempt = resetAttempts.get(c.id);
+  if (!attempt) list();
+  else if (attempt.revision === c.revision) observe(attempt);
+  else {
+    const changed = "This profile changed after the previous attempt. Check the original account in Codex before listing new grants.";
+    message(changed);
+    Promise.resolve(attempt.pending).then(() => {
+      if (current()) message(changed, btn("List current grants", () => {
+        if (!current()) return;
+        if (resetAttempts.get(c.id) === attempt) resetAttempts.delete(c.id);
+        list();
+      }));
+    });
+  }
+}
 function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
+  const route = location.hash;
   const link = showProfile && el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id});
   const badge = showProfile && pill("Disabled");
   let submitting = false, loading = false;
@@ -682,7 +859,11 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   });
   const body = el("div");
   const section = el("section", {class: "quota-card"}, el("div", {class: "sectionhead"},
-    el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body);
+    el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body,
+    c.tool === "codex" && btn("List reset grants", () => {
+      if (section.isConnected && (showProfile ? locationState().view === "dashboard" : location.hash === route))
+        openResetGrants(c);
+    }, "layers"));
   function update(profile) {
     c = profile;
     if (link) {
@@ -721,6 +902,7 @@ function openDashboard(profiles) {
     if (current === seq && overview.isConnected) draw(rows);
   }
   function draw(rows) {
+    checkResetProfile(rows);
     all.disabled = !rows.some((c) => c.enabled);
     empty.hidden = rows.length > 0;
     const ids = new Set(rows.map((c) => c.id));
@@ -741,6 +923,7 @@ function openDashboard(profiles) {
     });
     if (rows.some((c) => c.quota.loading)) poll = setTimeout(guard(read), 1000);
   }
+  readDashboardQuotas = read;
   draw(profiles);
   if (profiles.some((c) => c.enabled)) guard(() => refresh(true))();
   return log;
@@ -874,6 +1057,7 @@ async function accounts(params, ver, enter) {
     data = await api("accounts?tool=" + t);
   if (ver !== version) return;
   const c = data.items.find((c) => String(c.id) === params.get("id")) || data.items[0];
+  checkResetProfile(c ? [c] : []);
   if (!c) selectedIdentity = null;
   const login = c && t === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
   if (ver !== version) return;
@@ -1033,6 +1217,7 @@ async function render() {
     { view, params } = locationState(),
     enter = lastView !== view;
   if (view !== "accounts") selectedIdentity = null;
+  if (view !== "dashboard") readDashboardQuotas = null;
   lastView = view;
   $("nav").hidden = false;
   $(".logout").hidden = false;
@@ -1046,6 +1231,7 @@ async function render() {
   else await logs(view, params, ver, enter);
 }
 window.onhashchange = guard(async () => {
+  resetDialog?.close();
   cursors = [null];
   expanded = null;
   await render();

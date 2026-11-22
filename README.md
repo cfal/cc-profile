@@ -144,7 +144,9 @@ Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per dire
 
 Proxy URLs are visible as you type. The panel API and copied commands omit saved credentials. The native process receives the full proxy URL, including credentials, in its environment. Tools that inherit that environment can read it too.
 
-Quota is a **best-effort snapshot**, not a reservation. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported. For Codex, **Earned resets available** is the provider-reported count, separate from the next automatic reset or a spending balance. Redeem a grant in the intended account's native Codex TUI under `/usage`; the panel does not spend grants and the router does not count them as usable quota.
+Quota is a **best-effort snapshot**, not a reservation. Accounts shows percentage left, absolute/local reset times, and freshness. Missing business windows are unknown, not exhausted or unlimited. Explicit credits and spend controls are shown when reported.
+
+For Codex, **Earned resets available** is a count, separate from spending credits and the next automatic window reset. In Dashboard or Accounts, choose **List reset grants** on the intended profile to get current grant details. The provider may report a count without listing every grant. Choose **Review**, check the profile, grant and expiry, then **Redeem this grant**. Neither opening the panel nor refreshing quota spends a grant, and the router does not count grants as usable quota. If a redemption cannot be confirmed, **Retry same grant** sends only the original selection; it never switches to another grant. The retry is kept in this tab until you reload or sign out. You can also check the profile in native Codex under `/usage`.
 
 Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while editing keeps its saved credentials; switching to Direct or Inherit clears it. Databases with separate proxy columns are not upgraded by this version.
 
