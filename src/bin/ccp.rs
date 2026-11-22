@@ -2,7 +2,7 @@ use ccpd::{
     invocation::{Intent, Invocation, classify},
     native::{PROXIES, executable},
     paths,
-    protocol::{Failure, Plan, Request, VERSION, profile_login_args},
+    protocol::{Failure, Plan, Request, RoutingMode, VERSION, profile_login_args},
     socket,
     types::{Error, Result},
 };
@@ -37,7 +37,7 @@ const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
   ccp login <profile-id> [--status]
   ccp usage <antigravity-profile-id>
 
-New chats rotate; exact resumes use their original config. No transfers,
+New chats follow the routing policy; exact resumes use their original config. No transfers,
 pickers or --last. Manage accounts and Current in the ccpd web panel
 (default http://127.0.0.1:8743).";
 const CLAUDE_OVERRIDES: &[&str] = &[
@@ -102,12 +102,12 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
     let mut managed = None;
     if matches!(req.tool.as_str(), "codex" | "agy") && req.login_profile.is_none() {
         let i = classify(&req.tool, &req.argv, &req.cwd)?;
-        let reason = match i.intent {
-            Intent::New => "round_robin",
-            Intent::Resume(_) => "sticky",
-            Intent::Misc => "current",
+        let valid_decision = match i.intent {
+            Intent::New => RoutingMode::parse(&plan.decision).is_some(),
+            Intent::Resume(_) => plan.decision == "sticky",
+            Intent::Misc => plan.decision == "current",
         };
-        if plan.argv != req.argv || plan.decision != reason || plan.config_id <= 0 {
+        if plan.argv != req.argv || !valid_decision || plan.config_id <= 0 {
             return Err(invalid());
         }
         if i.intent != Intent::Misc {

@@ -83,6 +83,8 @@ class PanelPassword(unittest.TestCase):
         s=self.s
         s.stop()
         with closing(sqlite3.connect(s.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("DROP TABLE settings")
+            db.execute("ALTER TABLE configs DROP COLUMN priority")
             db.execute("DROP TABLE panel_password")
             db.execute("DROP INDEX config_identity")
             db.execute("ALTER TABLE configs DROP COLUMN birth_ns")

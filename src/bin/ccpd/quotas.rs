@@ -5,15 +5,14 @@ use axum::{
     http::StatusCode,
 };
 use ccpd::{
-    native::{PROXIES, executable},
-    quota::{self, auth_stamp},
+    native::executable,
+    quota::{self, FRESH_MS, inputs},
     store::{Config, config, configs},
     types::{Error, Result, now},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{collections::HashSet, path::PathBuf, sync::Mutex};
 use tokio::sync::Semaphore;
 
@@ -50,18 +49,13 @@ impl Cache {
         }
     }
 }
-// Bind numbers to the inputs used to fetch them, not to label, Current or Enabled.
-fn inputs(c: &Config) -> Option<String> {
-    if !c.present() {
-        return None;
-    }
-    let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
-    let fields = json!([c.dev, c.ino, auth_stamp(c), c.mode, c.proxy_url, inherited]);
-    Some(format!("{:x}", Sha256::digest(fields.to_string())))
-}
 fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {
-    Ok(db.query_row("SELECT status,attempt_ms,success_ms,retry_ms,failures,snapshot,stamp FROM quota_cache WHERE config_id=?",
-        [id],|r|Ok(Cache{status:r.get(0)?,attempt:r.get(1)?,success:r.get(2)?,retry:r.get(3)?,fails:r.get(4)?,snapshot:r.get(5)?,stamp:r.get(6)?})).optional()?)
+    let row = db.query_row("SELECT status,attempt_ms,success_ms,retry_ms,failures,snapshot,stamp FROM quota_cache WHERE config_id=?",
+        [id],|r|Ok(Cache{status:r.get(0)?,attempt:r.get(1)?,success:r.get(2)?,retry:r.get(3)?,fails:r.get(4)?,snapshot:r.get(5)?,stamp:r.get(6)?})).optional();
+    match row {
+        Err(rusqlite::Error::InvalidColumnType(..)) => Ok(None),
+        result => Ok(result?),
+    }
 }
 pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
     if c.tool == "agy" {
@@ -87,16 +81,25 @@ pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
     Ok(
         json!({"status":cache.status,"loading":busy,"attempt_ms":cache.attempt,"success_ms":cache.success,
-        "retry_ms":cache.retry,"stale":snapshot.is_some()&&(cache.status!="fresh"||cache.success.is_none_or(|t|now()-t>=300000)),"snapshot":snapshot}),
+        "retry_ms":cache.retry,"stale":snapshot.is_some()&&(cache.status!="fresh"||cache.success.is_none_or(|t|!fresh(t))),"snapshot":snapshot}),
     )
 }
-pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<Value>> {
+fn fresh(success: i64) -> bool {
+    (0..FRESH_MS).contains(&now().saturating_sub(success))
+}
+enum Scope {
+    Account(i64),
+    Provider(String),
+    All,
+}
+async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>> {
     let a = s.clone();
     let candidates = blocking(move || {
         let db = a.store.db()?;
-        let cs = match id {
-            Some(id) => vec![config(&db, id)?],
-            None => configs(&db, "claude")?
+        let cs = match &scope {
+            Scope::Account(id) => vec![config(&db, *id)?],
+            Scope::Provider(t) => configs(&db, t)?.into_iter().filter(|c| c.enabled).collect(),
+            Scope::All => configs(&db, "claude")?
                 .into_iter()
                 .chain(configs(&db, "codex")?)
                 .filter(|c| c.enabled)
@@ -105,7 +108,7 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
         let mut jobs = Vec::new();
         for c in cs {
             if c.tool == "agy" {
-                if id.is_some() {
+                if matches!(scope, Scope::Account(_)) {
                     return Err(Error::bad(
                         "native_report",
                         "Request the native quota report instead.",
@@ -120,14 +123,15 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
                     || (stale_only
                         && r.stamp == stamp
                         && r.status == "fresh"
-                        && r.success.is_some_and(|t| now() - t < 300000))
+                        && r.success.is_some_and(fresh))
             }) {
                 continue;
             }
-            if a.quotas.active.lock().unwrap().insert(c.id) {
-                jobs.push((stamp, c, cache));
-            }
+            jobs.push((stamp, c, cache));
         }
+        // Do not mark any jobs active until candidate enumeration succeeds.
+        let mut active = a.quotas.active.lock().unwrap();
+        jobs.retain(|(_, c, _)| active.insert(c.id));
         Ok(jobs)
     })
     .await?;
@@ -151,7 +155,7 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
                     let (status, failures, retry, success, snapshot) = match result {
                         Ok(v) => ("fresh", 0, ms + 30000, Some(ms), Some(v.to_string())),
                         Err(e) => {
-                            let fails = prior.as_ref().filter(|q| q.stamp==stamp || q.status=="rate_limited").map_or(1, |q| q.fails + 1);
+                            let fails = prior.as_ref().filter(|q| q.stamp==stamp || q.status=="rate_limited").map_or(1, |q| q.fails.max(0).saturating_add(1));
                             let delay = (30000_i64 << (fails-1).min(6)).max(e.retry_after_ms.unwrap_or(0));
                             let last = prior.filter(|q| q.stamp == stamp);
                             (e.status, fails, ms.saturating_add(delay), last.as_ref().and_then(|q| q.success), last.and_then(|q| q.snapshot))
@@ -176,6 +180,11 @@ pub async fn queue(s: Shared, id: Option<i64>, stale_only: bool) -> Result<Json<
     }
     Ok(Json(json!({"queued":n})))
 }
+pub async fn refresh_provider(s: Shared, tool: String) {
+    if queue(s, Scope::Provider(tool), true).await.is_err() {
+        eprintln!("ccpd: could not queue stale routing quota checks");
+    }
+}
 #[derive(Deserialize)]
 pub struct Options {
     #[serde(default)]
@@ -185,7 +194,10 @@ pub async fn bulk(
     State(s): State<Shared>,
     Json(v): Json<Options>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    Ok((StatusCode::ACCEPTED, queue(s, None, v.stale_only).await?))
+    Ok((
+        StatusCode::ACCEPTED,
+        queue(s, Scope::All, v.stale_only).await?,
+    ))
 }
 pub async fn one(
     State(s): State<Shared>,
@@ -194,7 +206,10 @@ pub async fn one(
     if id <= 0 {
         return Err(Error::bad("config", "Expected config ID."));
     }
-    Ok((StatusCode::ACCEPTED, queue(s, Some(id), false).await?))
+    Ok((
+        StatusCode::ACCEPTED,
+        queue(s, Scope::Account(id), false).await?,
+    ))
 }
 
 // The pinned CLI handles /usage as a native text report, not an ACP method.

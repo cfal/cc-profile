@@ -1,8 +1,9 @@
 use crate::{
     invocation::{Intent, Invocation, classify, native_id},
     native::{Build, env_patch, validate_binary},
-    protocol::{Plan, VERSION, profile_login_args},
-    store::{Config, Store, config, configs},
+    protocol::{Plan, RoutingMode, VERSION, profile_login_args},
+    quota::cached_remaining,
+    store::{Config, Store, config, configs, routing_mode},
     types::{Error, Result, now, tool},
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -93,6 +94,10 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "no_ready_config",
             "No enabled config is ready. Check the profile directories in Accounts.",
         ),
+        "quota_exhausted" => Error::conflict(
+            "quota_exhausted",
+            "All eligible accounts have exhausted their account-wide quota. Wait for a reset or refresh quotas in the Dashboard.",
+        ),
         "unsupported_build" => crate::native::unsupported_build(),
         "identity_override" => Error::bad(
             "identity_override",
@@ -142,7 +147,13 @@ enum Selection {
     Refuse(Option<Config>, Error),
 }
 
-fn choose(db: &Connection, build: &Build, req: &Request, i: &Invocation) -> Result<Selection> {
+fn choose(
+    db: &Connection,
+    build: &Build,
+    req: &Request,
+    i: &Invocation,
+    mode: RoutingMode,
+) -> Result<Selection> {
     let reject = |code| Selection::Refuse(None, denial(code, None, i.intent.id()));
     if !req.override_names.is_empty() {
         return Ok(Selection::Refuse(None, override_error(req)));
@@ -174,13 +185,37 @@ fn choose(db: &Connection, build: &Build, req: &Request, i: &Invocation) -> Resu
                 db.query_row("SELECT cursor FROM tools WHERE tool=?", [&req.tool], |r| {
                     r.get(0)
                 })?;
+            let ms = now();
+            let mut exhausted = false;
             let next = all
                 .into_iter()
                 .filter(|c| c.enabled && c.present())
-                .min_by_key(|c| (c.id <= cursor, c.id));
-            Ok(next
-                .map(|c| Selection::Allow(c, "round_robin"))
-                .unwrap_or_else(|| reject("no_ready_config")))
+                .filter_map(|c| {
+                    let remaining = cached_remaining(db, &c, ms);
+                    if remaining == Some(0.) {
+                        exhausted = true;
+                        return None;
+                    }
+                    // Lower sorts first. Unknown is behind any measured nonzero score.
+                    let rank = match mode {
+                        RoutingMode::RoundRobin => 0.,
+                        RoutingMode::Priority => -(c.priority as f64),
+                        RoutingMode::MostRemaining => {
+                            remaining.map(|r| -r).unwrap_or(f64::INFINITY)
+                        }
+                        RoutingMode::LeastRemaining => remaining.unwrap_or(f64::INFINITY),
+                    };
+                    Some((c, rank))
+                })
+                .min_by(|(a, x), (b, y)| {
+                    x.total_cmp(y)
+                        .then_with(|| (a.id <= cursor, a.id).cmp(&(b.id <= cursor, b.id)))
+                });
+            Ok(match next {
+                Some((c, _)) => Selection::Allow(c, mode.name()),
+                None if exhausted => reject("quota_exhausted"),
+                None => reject("no_ready_config"),
+            })
         }
         Intent::Resume(uid) => {
             let owner = db
@@ -314,7 +349,14 @@ impl Prior {
     }
 }
 
+pub struct Admission {
+    pub plan: Result<Plan>,
+    pub refresh_quota: bool,
+}
 pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
+    admit(store, build, req)?.plan
+}
+pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
     check_req(req)?;
     let fingerprint =
         digest(serde_json::to_vec(req).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
@@ -329,7 +371,10 @@ pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
     };
     store.write(|db| {
         if let Some(prior) = Prior::find(db, &req.request_id)? {
-            return Ok(prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone)));
+            return Ok(Admission {
+                plan: prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone)),
+                refresh_quota: false,
+            });
         }
         let invocation = parsed.as_ref().ok();
         let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
@@ -337,8 +382,13 @@ pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
             && invocation.is_some_and(|i| i.intent != Intent::Misc);
         let intent = invocation.map(|i| if server && req.tool=="agy" {"acp"} else if server {"app_server"} else {i.intent.name()}).unwrap_or("unsupported");
         let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);
+        let mode = if invocation.is_some_and(|i| i.intent == Intent::New) {
+            routing_mode(db)?
+        } else {
+            RoutingMode::RoundRobin
+        };
         let selection = match &parsed {
-            Ok(i) => choose(db, build, req, i)?,
+            Ok(i) => choose(db, build, req, i, mode)?,
             Err(e) => Selection::Refuse(None, e.clone()),
         };
         let ms = now();
@@ -367,8 +417,12 @@ pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             params![req.request_id,req.tool,intent,state,reason,id,config_id,revision,workspace,fingerprint,digest(&req.ticket),ms],
         )?;
-        Ok(response)
-    })?
+        Ok(Admission {
+            refresh_quota: req.tool != "agy" && mode.uses_remaining()
+                && (response.is_ok() || reason == "quota_exhausted"),
+            plan: response,
+        })
+    })
 }
 #[derive(Deserialize)]
 pub struct Observation {

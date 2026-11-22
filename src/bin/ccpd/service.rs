@@ -14,8 +14,9 @@ use ccpd::{
     links,
     native::Build,
     paths,
+    protocol::RoutingMode,
     routing::{self, Failure, Observation},
-    store::{Page, Store, config, configs},
+    store::{Page, Store, config, configs, routing_mode},
     types::{Error, Result, tool},
 };
 use serde::Deserialize;
@@ -83,9 +84,15 @@ pub fn private(s: Shared) -> Router {
             "/v2/launch",
             post(
                 |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
-                    blocking(move || routing::launch(&s.store, s.build(&r.tool), &r))
-                        .await
-                        .map(Json)
+                    let app = s.clone();
+                    let tool = r.tool.clone();
+                    let admission =
+                        blocking(move || routing::admit(&app.store, app.build(&r.tool), &r))
+                            .await?;
+                    if admission.refresh_quota {
+                        tokio::spawn(super::quotas::refresh_provider(s, tool));
+                    }
+                    admission.plan.map(Json)
                 },
             ),
         )
@@ -148,6 +155,25 @@ async fn edit(
             out["link_warning"] = "Compatibility link needs repair.".into();
         }
         Ok(Json(out))
+    })
+    .await
+}
+async fn settings(State(s): State<Shared>) -> Result<Json<Value>> {
+    blocking(move || {
+        Ok(Json(
+            json!({"routing_mode":routing_mode(&*s.store.db()?)?.name()}),
+        ))
+    })
+    .await
+}
+async fn set_settings(State(s): State<Shared>, Json(v): Json<Value>) -> Result<Json<Value>> {
+    let mode = v["routing_mode"]
+        .as_str()
+        .and_then(RoutingMode::parse)
+        .ok_or_else(|| Error::bad("bad_routing_mode", "Expected a supported routing_mode."))?;
+    blocking(move || {
+        s.store.set_routing_mode(mode)?;
+        Ok(Json(json!({"routing_mode": mode.name()})))
     })
     .await
 }
@@ -232,6 +258,7 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/login", post(auth::login))
         .route("/api/v1/session", get(auth::session))
         .route("/api/v1/logout", post(auth::logout))
+        .route("/api/v1/settings", get(settings).put(set_settings))
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
         .route(

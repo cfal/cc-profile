@@ -38,7 +38,8 @@ fn upgrades_pin_creation_time_without_rebinding_a_missing_home() {
     f.store
         .db()
         .unwrap()
-        .execute_batch("DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
+        .execute_batch("DROP TABLE settings; ALTER TABLE configs DROP COLUMN priority;
+            DROP INDEX config_identity; ALTER TABLE configs DROP COLUMN birth_ns; ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
             PRAGMA user_version=2;")
         .unwrap();
     let open = || ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
@@ -169,6 +170,11 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     let c = config(&db, 42).unwrap();
     assert!(c.enabled && c.current);
     assert_eq!(c.revision, 4);
+    assert_eq!(c.priority, 0);
+    assert_eq!(
+        ccpd::store::routing_mode(&db).unwrap().name(),
+        "round_robin"
+    );
     assert_eq!(c.proxy_url.as_deref(), Some("http://saved:3128/"));
     assert!(
         db.prepare(
@@ -324,4 +330,29 @@ fn routing_state_cannot_be_registered_as_a_vendor_home() {
             .register(&json!({"tool":"claude","label":"wrong","home":f.root.join("state")}))
             .is_err()
     );
+}
+
+#[test]
+fn admission_settings_and_priority_are_constrained_in_sql() {
+    let f = Fixture::new();
+    let c = f.add("codex", "one");
+    let db = f.store.db().unwrap();
+    for priority in ["-1", "101", "0.5", "'bad'", "NULL"] {
+        assert!(
+            db.execute(
+                &format!("UPDATE configs SET priority={priority} WHERE id=?"),
+                [c.id]
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        db.execute("UPDATE settings SET routing_mode='unsupported'", [])
+            .is_err()
+    );
+    assert!(
+        db.execute("INSERT INTO settings VALUES(2,'priority')", [])
+            .is_err()
+    );
+    assert_eq!(config(&db, c.id).unwrap().priority, 0);
 }

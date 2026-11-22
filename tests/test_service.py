@@ -94,7 +94,9 @@ while (home / "hold-fetch").exists(): time.sleep(.02)
 if (home / "throttled").exists():
     print('{"error":"fixture"}\n429\n600',end="")
 else:
-    print('{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}\n200\n', end="")
+    fixture = home / "usage.json"
+    usage = fixture.read_text() if fixture.exists() else '{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}'
+    print(usage+'\n200\n', end="")
 ''')
         curl.chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
@@ -391,6 +393,99 @@ else:
             with self.subTest(extra=extra):
                 status, _, _ = self.api("POST", "accounts", {}, extra)
                 self.assertEqual(status, 403)
+
+    def test_routing_settings_and_account_priorities_survive_restart(self):
+        for method in ["GET", "PUT"]:
+            self.assertEqual(self.api(method,"settings",{"routing_mode":"priority"},{"X-CCP-Session":""})[0],403)
+        self.assertEqual(self.api("GET","settings")[:2],(200,{"routing_mode":"round_robin"}))
+        for mode in ["most_remaining","least_remaining","round_robin","priority"]:
+            body = {"routing_mode":mode}
+            self.assertEqual(self.api("PUT","settings",body)[:2],(200,body))
+        for body in [{},{"routing_mode":None},{"routing_mode":"invalid"}]:
+            self.assertEqual(self.api("PUT","settings",body)[0],400)
+        first = self.account("codex","first")
+        self.assertEqual(first["priority"],0)
+        create = {"tool":"codex","label":"high","create":True,"priority":100}
+        for bad in [-1,101,0.5,"10",True,None]:
+            self.assertEqual(self.api("POST","accounts",dict(create,priority=bad))[0],400)
+        status, high, _ = self.api("POST","accounts",create)
+        self.assertEqual((status,high["priority"]),(201,100))
+        route = f"accounts/{high['id']}"
+        self.assertEqual(self.api("PATCH",route,{"revision":high["revision"],"priority":101})[0],400)
+        status, high, _ = self.api("PATCH",route,{"revision":high["revision"],"enabled":True,"priority":99})
+        self.assertEqual((status,high["priority"]),(200,99))
+        self.stop()
+        self.start()
+        status, login, _ = self.api("POST","login",{"password":self.password})
+        self.assertEqual(status,200)
+        self.session = login["session"]
+        self.assertEqual(self.api("GET","settings")[1],{"routing_mode":"priority"})
+        self.assertEqual([c["priority"] for c in self.api("GET","accounts?tool=codex")[1]["items"]],[0,99])
+        # Exercise the real client's validation of the new-session decision.
+        p = self.cli("codex","app-server")
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertIn(high["home"],p.stderr)
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"priority")
+
+    def test_remaining_modes_warm_only_this_provider_without_waiting_for_quota(self):
+        profiles = [Path(self.account("claude",name)["home"]) for name in ("nearly-empty","roomy")]
+        codex = Path(self.account("codex","other-provider")["home"])
+        for home, used in zip(profiles, [99.9,20]):
+            (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
+            (home/"usage.json").write_text(json.dumps({"five_hour":{"utilization":used}}))
+            (home/"hold-fetch").touch()
+        self.assertEqual(self.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
+        try:
+            # First admission (unknown quota) must complete while both fetches are held.
+            first = self.cli("claude","chat")
+            self.assertEqual(first.returncode,0,first.stderr)
+            self.assertEqual(json.loads(first.stdout)["home"],str(profiles[0]))
+            for _ in range(200):
+                if all((home/"quota-count").exists() for home in profiles): break
+                time.sleep(.02)
+            self.assertTrue(all((home/"quota-count").exists() for home in profiles))
+            self.assertEqual(self.cli("claude","second").returncode,0)
+        finally:
+            for home in profiles: (home/"hold-fetch").unlink()
+        for _ in range(200):
+            if all(c["quota"]["status"]=="fresh" for c in self.api("GET","accounts?tool=claude")[1]["items"]): break
+            time.sleep(.02)
+        else:
+            self.fail("background quota refresh did not finish")
+        for mode, index in [("most_remaining",1),("least_remaining",0)]:
+            self.assertEqual(self.api("PUT","settings",{"routing_mode":mode})[0],200)
+            for _ in range(2):
+                p = self.cli("claude","chat")
+                self.assertEqual(p.returncode,0,p.stderr)
+                self.assertEqual(json.loads(p.stdout)["home"],str(profiles[index]))
+            self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],mode)
+        for home in profiles:
+            self.assertEqual((home/"quota-count").read_text(),"fetch\n")
+        self.assertFalse((codex/"quota-count").exists())
+
+        import sqlite3
+        for home in profiles:
+            (home/"usage.json").write_text('{"seven_day":{"utilization":100}}')
+            (home/"hold-fetch").touch()
+        try:
+            with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
+                db.execute("UPDATE quota_cache SET success_ms=0,attempt_ms=0,retry_ms=0")
+            self.assertEqual(self.cli("claude","stale").returncode,0)
+        finally:
+            for home in profiles: (home/"hold-fetch").unlink()
+        for _ in range(200):
+            quotas = [c["quota"] for c in self.api("GET","accounts?tool=claude")[1]["items"]]
+            if all(not q["stale"] and q["snapshot"]["windows"][0]["used_pct"]==100 for q in quotas): break
+            time.sleep(.02)
+        else:
+            self.fail("new admission did not replace stale quota")
+        self.assertEqual(self.api("PUT","settings",{"routing_mode":"round_robin"})[0],200)
+        refused = self.cli("claude","new")
+        self.assertNotEqual(refused.returncode,0)
+        self.assertIn("exhausted",refused.stderr)
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"quota_exhausted")
+        uid = json.loads(first.stdout)["argv"][1]
+        self.assertEqual(json.loads(self.cli("claude","--resume",uid).stdout)["home"],str(profiles[0]))
 
     def test_quota_is_cached_without_consuming_a_rotation_or_starting_a_chat(self):
         cl = self.account("claude", "one")

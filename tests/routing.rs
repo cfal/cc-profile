@@ -1,11 +1,14 @@
 mod common;
 use ccpd::{
     native::{Build, stamp},
-    routing::{Observation, Request, launch, observe},
-    store::{Page, config},
+    protocol::RoutingMode::*,
+    quota::{FRESH_MS, cached_remaining, inputs},
+    routing::{Observation, Request, admit, launch, observe},
+    store::{Config, Page, config},
+    types::now,
 };
 use common::Fixture;
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 fn build() -> Build {
     let bin = std::env::current_exe().unwrap();
@@ -28,6 +31,154 @@ fn req(f: &Fixture, t: &str, args: &[&str], b: &Build) -> Request {
         override_names: vec![],
     }
 }
+
+fn cache(f: &Fixture, c: &Config, snapshot: Value, ms: i64) {
+    f.store.db().unwrap().execute(
+        "INSERT OR REPLACE INTO quota_cache(config_id,revision,attempt_ms,success_ms,retry_ms,failures,status,stamp,snapshot)
+        VALUES(?,?,?3,?3,0,0,'fresh',?,?)",
+        rusqlite::params![c.id,c.revision,ms,inputs(c).unwrap(),snapshot.to_string()]
+    ).unwrap();
+}
+fn window(used: f64) -> Value {
+    json!({"windows":[{"kind":"account","used_pct":used}]})
+}
+#[test]
+fn modes_skip_exhaustion_and_round_robin_among_equal_ranks() {
+    let f = Fixture::new();
+    let exe = build();
+    let cs = ["empty", "unknown", "nearly-empty", "roomy-a", "roomy-b"]
+        .map(|name| f.add("claude", name));
+    for (c, s) in cs.iter().zip([
+        window(100.),
+        json!({"windows":[{"kind":"model","used_pct":100}]}),
+        json!({"windows":[{"kind":"account","used_pct":10},{"kind":"account","used_pct":99.9}]}),
+        window(25.),
+        window(25.),
+    ]) {
+        std::fs::write(c.home.join(".credentials.json"), "{}").unwrap();
+        cache(&f, c, s, now());
+    }
+    for (mode, picks) in [
+        (RoundRobin, vec![1, 2, 3, 4, 1]),
+        (MostRemaining, vec![3, 4, 3]),
+        (LeastRemaining, vec![2, 2]),
+    ] {
+        f.store.set_routing_mode(mode).unwrap();
+        for n in picks {
+            let p = launch(&f.store, &exe, &req(&f, "claude", &[], &exe)).unwrap();
+            assert_eq!((p.config_id, p.decision.as_str()), (cs[n].id, mode.name()));
+        }
+    }
+    f.store.set_routing_mode(Priority).unwrap();
+    for c in &cs[..=2] {
+        f.store
+            .edit(c.id, &json!({"priority":100,"revision":c.revision}))
+            .unwrap();
+    }
+    for n in [1, 2, 1] {
+        let p = launch(&f.store, &exe, &req(&f, "claude", &[], &exe)).unwrap();
+        assert_eq!((p.config_id, p.decision.as_str()), (cs[n].id, "priority"));
+    }
+    for c in &cs[2..] {
+        cache(&f, c, window(100.), now());
+    }
+    for mode in [MostRemaining, LeastRemaining] {
+        f.store.set_routing_mode(mode).unwrap();
+        assert_eq!(
+            launch(&f.store, &exe, &req(&f, "claude", &[], &exe))
+                .unwrap()
+                .config_id,
+            cs[1].id
+        );
+    }
+}
+
+#[test]
+fn only_new_admissions_consult_quota_or_request_background_refresh() {
+    let f = Fixture::new();
+    let exe = build();
+    let c = f.add("claude", "one");
+    f.store.current("claude", Some(c.id)).unwrap();
+    std::fs::write(c.home.join(".credentials.json"), "{}").unwrap();
+    f.store.set_routing_mode(MostRemaining).unwrap();
+    let new = req(&f, "claude", &[], &exe);
+    let first = admit(&f.store, &exe, &new).unwrap();
+    assert!(first.refresh_quota);
+    let plan = first.plan.unwrap();
+    cache(&f, &c, window(100.), now());
+    let replay = admit(&f.store, &exe, &new).unwrap();
+    assert!(!replay.refresh_quota);
+    assert_eq!(replay.plan.unwrap(), plan);
+    let mut setup = req(&f, "claude", &["auth", "login"], &exe);
+    setup.login_profile = Some(c.id);
+    for (request, reason) in [
+        (
+            req(&f, "claude", &["--resume", &plan.argv[1]], &exe),
+            "sticky",
+        ),
+        (req(&f, "claude", &["--version"], &exe), "current"),
+        (setup, "profile_login"),
+    ] {
+        let admission = admit(&f.store, &exe, &request).unwrap();
+        assert!(!admission.refresh_quota);
+        assert_eq!(admission.plan.unwrap().decision, reason);
+    }
+    for mode in [RoundRobin, Priority, MostRemaining, LeastRemaining] {
+        f.store.set_routing_mode(mode).unwrap();
+        let request = req(&f, "claude", &[], &exe);
+        for refresh in [mode.uses_remaining(), false] {
+            let admission = admit(&f.store, &exe, &request).unwrap();
+            assert_eq!(admission.plan.unwrap_err().1, "quota_exhausted");
+            assert_eq!(admission.refresh_quota, refresh);
+        }
+        let row = &f.store.page(false, &Page::default()).unwrap()["items"][0];
+        assert_eq!(row["state"], "denied");
+        assert_eq!(row["reason"], "quota_exhausted");
+    }
+}
+
+#[test]
+fn only_recent_successful_identifiable_quota_is_trusted() {
+    let f = Fixture::new();
+    let c = f.add("codex", "one");
+    let auth = c.home.join("auth.json");
+    let ms = 999_999;
+    let score = |at| cached_remaining(&f.store.db().unwrap(), &c, at);
+    cache(&f, &c, window(100.), ms);
+    assert_eq!(score(ms), None); // No local login identity.
+    std::fs::write(&auth, "{}").unwrap();
+    cache(&f, &c, window(100.), ms);
+    assert_eq!(score(ms - 1), None);
+    assert_eq!(score(ms + FRESH_MS - 1), Some(0.));
+    assert_eq!(score(ms + FRESH_MS), None);
+    for change in [
+        "status='rate_limited'",
+        "failures=1",
+        "attempt_ms=1",
+        "success_ms=NULL",
+        "success_ms='invalid'",
+        "snapshot='not JSON'",
+        "snapshot=NULL",
+        "stamp='different'",
+    ] {
+        f.store
+            .db()
+            .unwrap()
+            .execute(&format!("UPDATE quota_cache SET {change}"), [])
+            .unwrap();
+        assert_eq!(score(ms), None, "{change}");
+        cache(&f, &c, window(100.), ms);
+    }
+    std::fs::write(&auth, "changed login").unwrap();
+    assert_eq!(score(ms), None);
+    cache(&f, &c, window(100.), ms);
+    let edited = f
+        .store
+        .edit(c.id, &json!({"revision":c.revision,"proxy_mode":"direct"}))
+        .unwrap();
+    assert_eq!(cached_remaining(&f.store.db().unwrap(), &edited, ms), None);
+}
+
 #[test]
 fn codex_admission_and_tickets_are_scoped_to_the_launch_mode() {
     let f = Fixture::new();
@@ -94,7 +245,8 @@ fn upgrading_v4_keeps_the_codex_owner_and_cursor_without_touching_native_hooks()
     {
         let db = f.store.db().unwrap();
         db.execute_batch(
-            "ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
+            "DROP TABLE settings; ALTER TABLE configs DROP COLUMN priority;
+            ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
             CREATE TABLE installed_observers(config_id INTEGER PRIMARY KEY, command TEXT);
             PRAGMA user_version=4;",
         )
