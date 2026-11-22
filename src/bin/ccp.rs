@@ -34,6 +34,7 @@ const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
   ccp codex resume <session-uuid>
   ccp codex app-server [--for-session <uuid>]
   ccp agy
+  ccp agy models
   ccp agy --conversation <session-uuid>
   ccp agy acp [--for-session <session-id>]
   ccp login <profile-id> [--status]

@@ -121,7 +121,7 @@ fn claude_command(word: &str) -> bool {
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     if tool == "agy" {
         let mut intent = Intent::New;
-        if matches!(args, [a] if a=="--version" || a=="--help")
+        if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
             || matches!(args, [a,b] if a=="acp" && b=="--help")
         {
             intent = Intent::Misc;

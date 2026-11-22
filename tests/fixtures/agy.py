@@ -22,6 +22,12 @@ obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy",
 if not args:
     print("fixture Antigravity TUI")
     sys.exit()
+if args == ["models"]:
+    print("Fetching available models...", file=sys.stderr)
+    if not (home/".gemini/antigravity-cli/antigravity-oauth-token").exists():
+        sys.exit("Error: Please sign in to view available models.")
+    print("fixture-model\tFixture Model")
+    sys.exit()
 if args[0].split("=")[0] == "--conversation":
     print(json.dumps({"home": str(home), "args": args}))
     sys.exit()

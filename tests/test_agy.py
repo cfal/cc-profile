@@ -80,6 +80,31 @@ class Antigravity(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(expected, result.stdout)
 
+    def test_model_discovery_requires_current_and_preserves_native_streams_and_rotation(self):
+        a, b = self.profile("first"), self.profile("catalog")
+        alias = self.s.root / "agy"
+        alias.symlink_to(svc.LAUNCHER)
+        def models(*extra):
+            return subprocess.run([alias,"models",*extra], stdin=subprocess.DEVNULL, text=True,
+                                  capture_output=True, cwd=self.s.root, env=self.s.env, timeout=8)
+        self.assertIn("Set current", models().stderr)
+        self.s.api("PUT", "current/agy", {"config_id":b["id"]})
+        failed = models()
+        self.assertEqual((failed.returncode, failed.stdout), (1, ""))
+        self.assertIn("Please sign in", failed.stderr)
+        self.assertEqual(self.s.cli("login",str(b["id"])).returncode,0)
+        result = models()
+        self.assertEqual((result.returncode, result.stdout), (0, "fixture-model\tFixture Model\n"))
+        self.assertIn("Fetching available models", result.stderr)
+        row = self.s.api("GET","startups?tool=agy")[1]["items"][0]
+        self.assertEqual((row["config_id"],row["intent"],row["reason"]), (b["id"],"misc","current"))
+        self.s.api("PUT", "current/agy", {"config_id":a["id"]})
+        self.assertIn("Please sign in", models().stderr)
+        self.assertNotEqual(models("--extra").returncode, 0)
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"], [])
+        self.assertEqual(self.s.cli("agy").returncode, 0)
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], a["id"])
+
     def test_tui_resume_uses_the_unique_saved_file_not_rotation(self):
         a, b = self.profile("first"), self.profile("owner")
         uid = str(uuid.uuid4())
