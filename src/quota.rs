@@ -56,17 +56,19 @@ fn absent(path: &Path) -> bool {
     path.symlink_metadata()
         .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
-// With default project-root markers, Codex looks from cwd to the nearest .git (or cwd alone).
+// Codex searches up to a .git file or a .git directory with HEAD (or cwd alone).
 // Don't assume the quota worker and a new launch resolved the same project overrides.
 pub fn no_codex_project_config(cwd: &Path) -> bool {
     let mut root = cwd;
     for p in cwd.ancestors() {
-        match p.join(".git").try_exists() {
-            Ok(true) => {
+        let git = p.join(".git");
+        match git.metadata() {
+            Ok(m) if m.is_dir() && git.join("HEAD").metadata().is_err() => continue,
+            Ok(_) => {
                 root = p;
                 break;
             }
-            Ok(false) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return false,
         }
     }

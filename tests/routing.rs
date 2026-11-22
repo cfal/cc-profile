@@ -45,6 +45,34 @@ fn cache(f: &Fixture, c: &Config, mut snapshot: Value, ms: i64) {
 fn window(used: f64) -> Value {
     json!({"windows":[{"kind":"account","used_pct":used}]})
 }
+
+#[test]
+fn an_empty_nested_git_directory_does_not_hide_outer_codex_settings() {
+    use ccpd::quota::no_codex_project_config;
+    use std::fs;
+    let f = Fixture::new();
+    fs::create_dir(f.root.join(".git")).unwrap();
+    fs::write(f.root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::create_dir(f.root.join(".codex")).unwrap();
+    fs::write(
+        f.root.join(".codex/config.toml"),
+        "cli_auth_credentials_store='keyring'\n",
+    )
+    .unwrap();
+    let nested = f.root.join("nested");
+    fs::create_dir_all(nested.join(".git")).unwrap();
+    assert!(!no_codex_project_config(&nested));
+    fs::write(nested.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    assert!(no_codex_project_config(&nested));
+    let worktree = f.root.join("worktree");
+    fs::create_dir(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        "gitdir: ../.git/worktrees/worktree\n",
+    )
+    .unwrap();
+    assert!(no_codex_project_config(&worktree));
+}
 #[test]
 fn modes_skip_exhaustion_and_round_robin_among_equal_ranks() {
     let f = Fixture::new();
