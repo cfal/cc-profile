@@ -76,9 +76,12 @@ pub fn view(db: &Connection, c: &Config, j: &Jobs) -> Result<Value> {
         };
         return Ok(json!({"status":status,"loading":busy,"retry_ms":cache.retry_for(&stamp)}));
     }
-    let snapshot = cache
+    let mut snapshot = cache
         .snapshot
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    if let Some(obj) = snapshot.as_mut().and_then(Value::as_object_mut) {
+        obj.remove("file_auth_verified");
+    }
     Ok(
         json!({"status":cache.status,"loading":busy,"attempt_ms":cache.attempt,"success_ms":cache.success,
         "retry_ms":cache.retry,"stale":snapshot.is_some()&&(cache.status!="fresh"||cache.success.is_none_or(|t|!fresh(t))),"snapshot":snapshot}),
@@ -94,6 +97,7 @@ enum Scope {
 }
 async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>> {
     let a = s.clone();
+    let enabled_only = !matches!(scope, Scope::Account(_));
     let candidates = blocking(move || {
         let db = a.store.db()?;
         let cs = match &scope {
@@ -143,7 +147,7 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
             let _slot = a.quotas.slots.acquire().await.unwrap();
             let run = || -> Result<bool> {
                 let current = config(&*a.store.db()?, id)?;
-                Ok(inputs(&current).as_ref() == Some(&stamp))
+                Ok((!enabled_only || current.enabled) && inputs(&current).as_ref() == Some(&stamp))
             };
             if run().unwrap_or(false) {
                 let result =

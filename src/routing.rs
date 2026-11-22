@@ -186,12 +186,18 @@ fn choose(
                     r.get(0)
                 })?;
             let ms = now();
+            let check_quota =
+                req.tool != "codex" || crate::quota::no_codex_project_config(&i.workspace);
             let mut exhausted = false;
             let next = all
                 .into_iter()
                 .filter(|c| c.enabled && c.present())
                 .filter_map(|c| {
-                    let remaining = cached_remaining(db, &c, ms);
+                    let remaining = if check_quota {
+                        cached_remaining(db, &c, ms)
+                    } else {
+                        None
+                    };
                     if remaining == Some(0.) {
                         exhausted = true;
                         return None;
