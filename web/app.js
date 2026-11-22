@@ -769,11 +769,12 @@ async function readLogin(path) {
   }
 }
 let selectedIdentity;
-function identityView(c) {
+function identityView(c, login) {
   if (selectedIdentity?.id === c.id && selectedIdentity.revision === c.revision) return selectedIdentity;
   const summary = el("span", {class: "wrap", role: "status"}, "Checking sign-in…");
   const button = ib("Refresh sign-in status", "refresh-cw", refresh);
-  const view = {id: c.id, tool: c.tool, revision: c.revision, node: el("div", {class: "row"}, summary, button), refresh};
+  const view = {id: c.id, tool: c.tool, revision: c.revision, node: el("div", {class: "row"}, summary, button),
+    completed: login?.state === "completed" ? login.attempt : null, refresh};
   selectedIdentity = view;
   let seq = 0;
   async function refresh() {
@@ -785,8 +786,9 @@ function identityView(c) {
       const labels = {signed_in: "Signed in", signed_out: "Not signed in",
         saved_login: "Saved login found (validity not checked)", no_saved_login: "No saved login"};
       summary.textContent = (labels[v.state] || "Sign-in status unavailable") + (v.email ? ": " + v.email : "");
-    } catch {
-      if (attempt === seq) summary.textContent = "Sign-in status unavailable";
+    } catch (err) {
+      if (attempt === seq) summary.textContent = err.code === "busy"
+        ? "Other sign-in checks are running. Refresh to try again." : "Sign-in status unavailable";
     } finally { if (attempt === seq) button.disabled = false; }
   }
   refresh();
@@ -796,7 +798,7 @@ window.addEventListener("focus", () => {
   if (selectedIdentity?.tool === "agy" && selectedIdentity.node.isConnected) selectedIdentity.refresh();
 });
 function signInPanel(c, initial, supported) {
-  const identity = identityView(c);
+  const identity = identityView(c, initial);
   const section = el("section", {}, el("h3", {}, "Sign-in status"), identity.node);
   const cmd = "ccp login " + c.id;
   const terminal = el("div", {class: "row"}, code(cmd),

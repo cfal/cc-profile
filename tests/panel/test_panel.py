@@ -254,6 +254,13 @@ class Panel(unittest.TestCase):
                 held[0].fulfill(json={"state":"signed_in","email":"late@example.test"})
             expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
             expect(page.get_by_text("late@example.test",exact=False)).to_have_count(0)
+            page.route(f"**/accounts/{b['id']}/identity", lambda route:
+                       route.fulfill(status=409,json={"error":"busy"}), times=1)
+            refresh = page.get_by_role("button",name="Refresh sign-in status")
+            refresh.click()
+            expect(page.get_by_text("Other sign-in checks are running. Refresh to try again.")).to_be_visible()
+            refresh.click()
+            expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
 
     def test_dashboard_quotas_above_independent_startup_filters(self):
         service = self.start_service()
