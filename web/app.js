@@ -574,44 +574,6 @@ function accountForm(t, c) {
     },
   );
 }
-function compatibility(t, compat) {
-  const root = el("input", {
-      value: compat?.root || "",
-      placeholder: "/home/user/.config/cc-profile",
-    }),
-    outer = el("input", { value: compat?.outer || "", placeholder: "/home/user/." + t });
-  const active = el("input", { type: "checkbox", checked: !!compat }),
-    preview = el("p", { class: "wrap mono" });
-  function show() {
-    root.disabled = outer.disabled = !active.checked;
-    root.required = outer.required = active.checked;
-    preview.hidden = !active.checked;
-    preview.textContent = (outer.value || "Native path") + " → " +
-      (root.value || "Profile root") + "/" + t + "/current/config";
-  }
-  active.onchange = root.oninput = outer.oninput = show;
-  show();
-  const fields = [
-    el("label", { class: "switch" }, active, "Link native path to Current"),
-    field("Existing profile root", root),
-    field("Outer symlink path", outer),
-    preview,
-  ];
-  if (compat)
-    fields.push(
-      el(
-        "p",
-        { class: "wrap mono" },
-        "Observed: " + compat.current + " → " + (compat.observed_current || "not linked"),
-      ),
-    );
-  modal("Compatibility links", fields, "Apply links", async () => {
-    await api("compatibility/" + t, "PUT", {
-      root: active.checked ? root.value : null,
-      outer: active.checked ? outer.value : null,
-    });
-  });
-}
 const quotaText = (q) =>
   q.loading ? "Checking quota" : q.stale ? "Stale" : quotaStates[q.status] || "Unavailable";
 function resetTime(ms) {
@@ -996,7 +958,6 @@ async function accounts(params, ver, enter) {
           ? c.proxy_url?.url
           : simple(c.proxy_mode)))), quotaCard(c).section);
   }
-  const compat = data.compatibility;
   main.replaceChildren(
     title(
       "Accounts",
@@ -1018,20 +979,6 @@ async function accounts(params, ver, enter) {
           "No " + names[t] + " profiles",
           "Create a profile or use an existing directory.",
         ),
-    el(
-      "div",
-      { class: "actions compatibility" },
-      btn("Compatibility links", () => compatibility(t, compat), "link"),
-      text(
-        compat ? (compat.needs_repair ? "Needs repair" : "Configured") : "Off",
-        compat?.needs_repair ? "warn" : "caption",
-      ),
-      compat?.needs_repair &&
-        btn("Repair", async () => {
-          await api("current/" + t + "/repair", "POST", {});
-          await render();
-        }),
-    ),
   );
   if (enter && t !== "agy") {
     await api("quota/refresh", "POST", { stale_only: true });

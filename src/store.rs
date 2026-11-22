@@ -274,7 +274,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=8).contains(&v)
+        } else if !(1..=9).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -323,6 +323,15 @@ impl Store {
         }
         if v < 8 {
             tx.execute_batch(include_str!("admission.sql"))?;
+        }
+        if v < 9 {
+            tx.execute_batch(
+                "CREATE TABLE tool_cursors (tool TEXT PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0);
+                INSERT INTO tool_cursors SELECT tool,cursor FROM tools;
+                DROP TABLE tools;
+                ALTER TABLE tool_cursors RENAME TO tools;
+                PRAGMA user_version=9;",
+            )?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.

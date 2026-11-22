@@ -11,7 +11,6 @@ use axum::{
     serve::IncomingStream,
 };
 use ccpd::{
-    links,
     native::Build,
     paths,
     protocol::RoutingMode,
@@ -124,12 +123,21 @@ pub struct Filter {
     tool: String,
 }
 pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Result<Json<Value>> {
-    blocking(move||{
-        let db=s.store.db()?;let build=s.build(tool(&q.tool)?);
-        let mut items=Vec::new();
-        for c in configs(&db,&q.tool)?{let mut v=c.public();v["readiness"]=build.ready(&c).into();v["quota"]=super::quotas::view(&db,&c,&s.quotas)?;items.push(v);}
-        Ok(Json(json!({"items":items,"version":build.version,"supported":build.supported,"compatibility":links::status(&db,&q.tool)?})))
-    }).await
+    blocking(move || {
+        let db = s.store.db()?;
+        let build = s.build(tool(&q.tool)?);
+        let mut items = Vec::new();
+        for c in configs(&db, &q.tool)? {
+            let mut v = c.public();
+            v["readiness"] = build.ready(&c).into();
+            v["quota"] = super::quotas::view(&db, &c, &s.quotas)?;
+            items.push(v);
+        }
+        Ok(Json(
+            json!({"items":items,"version":build.version,"supported":build.supported}),
+        ))
+    })
+    .await
 }
 async fn add(State(s): State<Shared>, Json(v): Json<Value>) -> Result<(StatusCode, Json<Value>)> {
     blocking(move || {
@@ -147,15 +155,7 @@ async fn edit(
     Path(id): Path<i64>,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>> {
-    blocking(move || {
-        let c = s.store.edit(id, &v)?;
-        let mut out = c.public();
-        if !c.enabled && links::repair(&s.store, &c.tool).is_err() {
-            out["link_warning"] = "Compatibility link needs repair.".into();
-        }
-        Ok(Json(out))
-    })
-    .await
+    blocking(move || Ok(Json(s.store.edit(id, &v)?.public()))).await
 }
 async fn settings(State(s): State<Shared>) -> Result<Json<Value>> {
     blocking(move || {
@@ -187,32 +187,7 @@ async fn current(
 ) -> Result<Json<Value>> {
     blocking(move || {
         s.store.current(&tool, v.config_id)?;
-        Ok(Json(
-            json!({"link_needs_repair":links::repair(&s.store,&tool).is_err()}),
-        ))
-    })
-    .await
-}
-#[derive(Deserialize)]
-struct LinkPaths {
-    root: Option<String>,
-    outer: Option<String>,
-}
-async fn compatibility(
-    State(s): State<Shared>,
-    Path(t): Path<String>,
-    Json(v): Json<LinkPaths>,
-) -> Result<Json<Value>> {
-    blocking(move || {
-        links::configure(
-            &s.store,
-            &t,
-            v.root.as_deref(),
-            v.outer.as_deref(),
-            &s.state_dir,
-            &paths::runtime_dir()?,
-        )?;
-        Ok(Json(links::status(&*s.store.db()?, &t)?))
+        Ok(Json(json!({})))
     })
     .await
 }
@@ -279,17 +254,6 @@ pub fn web(s: Shared) -> Router {
         )
         .route("/api/v1/quota/refresh", post(super::quotas::bulk))
         .route("/api/v1/current/{tool}", put(current))
-        .route("/api/v1/compatibility/{tool}", put(compatibility))
-        .route(
-            "/api/v1/current/{tool}/repair",
-            post(
-                |State(s): State<Shared>, Path(t): Path<String>| async move {
-                    blocking(move || links::repair(&s.store, &t))
-                        .await
-                        .map(|_| Json(json!({})))
-                },
-            ),
-        )
         .route(
             "/api/v1/sessions",
             get(

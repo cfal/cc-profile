@@ -495,6 +495,39 @@ else:
                 status, _, _ = self.api("POST", "accounts", {}, extra)
                 self.assertEqual(status, 403)
 
+    def test_retired_config_links_are_not_changed_on_upgrade_or_selection(self):
+        import sqlite3
+        first = self.account("codex", "first")
+        second = self.account("codex", "second")
+        self.assertEqual(self.api("PUT","current/codex",{"config_id":first["id"]})[0], 200)
+        self.stop()
+        root = self.root / "profiles"
+        provider = root / "codex"
+        entry = provider / ".registered" / str(first["id"])
+        entry.mkdir(parents=True)
+        (entry / "config").symlink_to(os.path.relpath(first["home"], entry))
+        (provider / "current").symlink_to(entry.relative_to(provider))
+        outer = self.root / ".codex"
+        outer.symlink_to("profiles/codex/current/config")
+        db_path = self.root / "state/cc-profile/router.sqlite3"
+        with closing(sqlite3.connect(db_path)) as db, db:
+            for name in ("link_root", "outer_path", "projected"):
+                db.execute(f"ALTER TABLE tools ADD COLUMN {name} TEXT")
+            db.execute("UPDATE tools SET cursor=?,link_root=?,outer_path=?,projected=? WHERE tool='codex'",
+                       (first["id"], str(root), str(outer), str(entry.relative_to(provider))))
+            db.execute("PRAGMA user_version=8")
+        self.start()
+        self.session = self.api("POST","login",{"password":self.password})[1]["session"]
+        with closing(sqlite3.connect(db_path)) as db:
+            self.assertEqual([col[1] for col in db.execute("PRAGMA table_info(tools)")], ["tool","cursor"])
+            self.assertEqual(db.execute("SELECT cursor FROM tools WHERE tool='codex'").fetchone(), (first["id"],))
+        self.assertNotIn("compatibility", self.api("GET","accounts?tool=codex")[1])
+        self.assertEqual(self.api("PUT","compatibility/codex",{})[0], 404)
+        self.assertEqual(self.api("POST","current/codex/repair",{})[0], 404)
+        self.assertEqual(self.api("PUT","current/codex",{"config_id":second["id"]})[:2], (200,{}))
+        self.assertEqual(json.loads(self.cli("codex","login","status").stdout)["home"], second["home"])
+        self.assertEqual(outer.resolve(strict=True), Path(first["home"]))
+
     def test_routing_settings_and_account_priorities_survive_restart(self):
         for method in ["GET", "PUT"]:
             self.assertEqual(self.api(method,"settings",{"routing_mode":"priority"},{"X-CCP-Session":""})[0],403)

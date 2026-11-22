@@ -66,11 +66,6 @@ async fn run() -> Result<()> {
     let _listener_lock = paths::locked(&runtime.join("listener.lock"))?;
     let store = Store::open_user(&state)?;
     store.prune()?;
-    for t in ccpd::types::TOOLS {
-        if ccpd::links::repair(&store, t).is_err() {
-            eprintln!("ccpd: {t} compatibility link needs repair (Accounts).");
-        }
-    }
     let addr = SocketAddr::new(listen, port);
     let tcp = TcpListener::bind(addr).await.map_err(|e| {
         Error::unavailable("listener", format!("Could not bind panel to {addr}: {e}"))
