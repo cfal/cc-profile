@@ -467,7 +467,7 @@ class Panel(unittest.TestCase):
             page.get_by_role("button", name="Startup details").click()
             expect(page.get_by_role("button", name="Startup details", expanded=True)).to_be_visible()
             expect(page.get_by_text(record["request_id"], exact=True)).to_be_visible()
-            expect(page.get_by_text("round robin", exact=True)).to_have_count(1)
+            expect(page.get_by_text("most remaining", exact=True)).to_have_count(1)
             self.check_layout(page, "startups")
             page.set_viewport_size({"width": 320, "height": 720})
             config_filter = page.get_by_role("combobox", name="Config", exact=True)
@@ -823,8 +823,8 @@ class Panel(unittest.TestCase):
             page.get_by_label("Password", exact=True).fill(service.password)
             page.get_by_role("button", name="Sign in").click()
             mode = page.get_by_role("combobox", name="Routing mode", exact=True)
-            expect(mode).to_have_value("round_robin")
-            for value in ("most_remaining", "least_remaining", "priority", "round_robin"):
+            expect(mode).to_have_value("most_remaining")
+            for value in ("earliest_expiry", "least_remaining", "priority", "round_robin", "most_remaining"):
                 mode.select_option(value)
                 save = page.get_by_role("button", name="Save routing mode")
                 with page.expect_response(lambda r: r.request.method == "PUT" and r.url.endswith("/settings")) as result:

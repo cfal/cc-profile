@@ -282,7 +282,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=13).contains(&v)
+        } else if !(1..=14).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -356,6 +356,9 @@ impl Store {
         }
         if v < 13 {
             tx.execute_batch(include_str!("discovered_sessions.sql"))?;
+        }
+        if v < 14 {
+            tx.execute_batch(include_str!("earliest_expiry.sql"))?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.

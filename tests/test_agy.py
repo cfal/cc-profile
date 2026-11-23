@@ -577,7 +577,9 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(result["result"]["home"],b["home"])
         with closing(sqlite3.connect(self.s.root/"state/cc-profile/router.sqlite3")) as db, db:
             db.execute("UPDATE quota_cache SET success_ms=1,attempt_ms=1,retry_ms=0")
+        self.assertEqual(self.s.api("PUT","settings",{"routing_mode":"earliest_expiry"})[0],200)
         self.bridge([], new(4))
+        self.assertEqual(self.s.api("GET","sessions")[1]["items"][0]["config_id"],b["id"])
         for c in (a, b):
             self.assertTrue(self.wait_quota(c, "fresh")["stale"])
             self.assertEqual(len((Path(c["home"])/"usage-calls").read_text().splitlines()), 1)

@@ -2,7 +2,7 @@ use crate::{
     invocation::{Intent, Invocation, classify, native_id},
     native::{Build, env_patch, validate_binary},
     protocol::{Plan, RoutingMode, VERSION, profile_login_args},
-    quota::cached_remaining,
+    quota::{WindowExpiry::Unknown, cached_allowance},
     store::{Config, Store, config, configs, routing_mode},
     types::{Error, Result, now, tool},
 };
@@ -212,32 +212,39 @@ fn choose(
                 .into_iter()
                 .filter(|c| c.enabled && c.present())
                 .filter_map(|c| {
-                    let remaining = if check_quota {
-                        cached_remaining(db, &c, ms)
+                    let allowance = if check_quota {
+                        cached_allowance(db, &c, ms)
                     } else {
                         None
                     };
+                    let remaining = allowance.map(|q| q.remaining);
                     if remaining == Some(0.) {
                         exhausted = true;
                         return None;
                     }
                     // Lower sorts first. Unknown is behind any measured nonzero score.
-                    let rank = match mode {
-                        RoutingMode::RoundRobin => 0.,
-                        RoutingMode::Priority => -(c.priority as f64),
+                    let (rank, reset) = match mode {
+                        RoutingMode::RoundRobin => (0., Unknown),
+                        RoutingMode::Priority => (-(c.priority as f64), Unknown),
                         RoutingMode::MostRemaining => {
-                            remaining.map(|r| -r).unwrap_or(f64::INFINITY)
+                            (remaining.map(|r| -r).unwrap_or(f64::INFINITY), Unknown)
                         }
-                        RoutingMode::LeastRemaining => remaining.unwrap_or(f64::INFINITY),
+                        RoutingMode::LeastRemaining => {
+                            (remaining.unwrap_or(f64::INFINITY), Unknown)
+                        }
+                        RoutingMode::EarliestExpiry => {
+                            (0., allowance.map_or(Unknown, |q| q.expiry))
+                        }
                     };
-                    Some((c, rank))
+                    Some((c, rank, reset))
                 })
-                .min_by(|(a, x), (b, y)| {
+                .min_by(|(a, x, ta), (b, y, tb)| {
                     x.total_cmp(y)
+                        .then_with(|| ta.cmp(tb))
                         .then_with(|| (a.id <= cursor, a.id).cmp(&(b.id <= cursor, b.id)))
                 });
             Ok(match next {
-                Some((c, _)) => Selection::Allow(c, mode.name()),
+                Some((c, _, _)) => Selection::Allow(c, mode.name()),
                 None if exhausted => reject("quota_exhausted"),
                 None => reject("no_ready_config"),
             })

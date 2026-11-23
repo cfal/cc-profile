@@ -238,7 +238,7 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     assert_eq!(c.priority, 0);
     assert_eq!(
         ccpd::store::routing_mode(&db).unwrap().name(),
-        "round_robin"
+        "most_remaining"
     );
     assert_eq!(c.proxy_url.as_deref(), Some("http://saved:3128/"));
     assert!(
@@ -447,4 +447,33 @@ fn admission_settings_and_priority_are_constrained_in_sql() {
             .is_err()
     );
     assert_eq!(config(&db, c.id).unwrap().priority, 0);
+}
+
+#[test]
+fn v13_keeps_each_stored_routing_mode_and_accepts_earliest_expiry_after_upgrade() {
+    use ccpd::{
+        protocol::RoutingMode::*,
+        store::{Store, routing_mode},
+    };
+    for choice in [RoundRobin, MostRemaining, LeastRemaining, Priority] {
+        let f = Fixture::new();
+        let path = f.root.join("state/router.sqlite3");
+        {
+            let db = f.store.db().unwrap();
+            db.execute_batch("DROP TABLE settings;
+                CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1), routing_mode TEXT NOT NULL
+                    CHECK(routing_mode IN ('round_robin','most_remaining','least_remaining','priority')));
+                PRAGMA user_version=13;").unwrap();
+            db.execute("INSERT INTO settings VALUES(1,?)", [choice.name()])
+                .unwrap();
+        }
+        let upgraded = Store::open(&path).unwrap();
+        assert_eq!(routing_mode(&upgraded.db().unwrap()).unwrap(), choice);
+        upgraded.set_routing_mode(EarliestExpiry).unwrap();
+        drop(upgraded);
+        assert_eq!(
+            routing_mode(&Store::open(&path).unwrap().db().unwrap()).unwrap(),
+            EarliestExpiry
+        );
+    }
 }

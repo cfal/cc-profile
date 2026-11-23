@@ -1,6 +1,6 @@
 # cc-profile
 
-`ccp` starts Claude Code, Codex, or Antigravity with a config chosen by a local router. By default, new launches rotate among enabled, ready profiles. Settings can instead select by remaining quota or account priority. Resuming a tracked session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
+`ccp` starts Claude Code, Codex, or Antigravity with a config chosen by a local router. By default, new launches prefer the eligible profile with the most verified quota remaining. When no profile has an account-wide reading the router can trust, it rotates among eligible profiles. Resuming a tracked session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
 
 ## Install
 
@@ -79,11 +79,13 @@ Selecting an account shows its **Sign-in status**. For Claude and Codex, the dae
 
 ### Choosing a profile
 
-The **Routing mode** in Settings applies across providers. A new chat selects among eligible profiles of its own provider. **Round robin** cycles through them; **Most quota remaining** and **Least quota remaining** compare the smallest remaining percentage across the account's applicable limits. **Highest priority** uses the numeric priority set in Accounts (0 to 100; higher wins). Ties rotate rather than always selecting the first profile.
+The **Routing mode** in Settings applies across providers. A new chat selects among eligible profiles of its own provider. **Most quota remaining** (the default) and **Least quota remaining** compare the smallest remaining percentage across the account's applicable limits. **Round robin** cycles through eligible profiles; **Highest priority** uses the numeric priority set in Accounts (0 to 100; higher wins). Ties rotate. Upgrades keep the stored routing mode, including Round robin. The new default applies only to fresh databases and upgrades from versions that had no routing setting.
+
+**Earliest expiry** prefers the soonest upcoming automatic reset of any account-wide window with quota left. Next come profiles with a positive account window but no reset date, then profiles with unknown quota. A spend cap alone does not establish a positive window. This mode does not use credit balances, grants or subscription expiry dates.
 
 In every mode, a verified, fresh Codex account-wide reading of zero excludes that profile from new admissions. If all eligible profiles are known to be exhausted, the launch is refused. Missing, stale, or already-reset readings are unknown, not zero: usage-based modes prefer measured profiles but can still use an unmeasured one. Sticky resumes stay with their owner even if its quota is exhausted; the provider can still refuse the request.
 
-Claude Code's native usage report can contain cached numbers without a provider observation time. The panel displays them, but the router neither ranks nor excludes Claude profiles using those numbers. For Claude and Antigravity, both quota-based modes therefore rotate among eligible profiles.
+Claude Code's native usage report can contain cached numbers without a provider observation time. The panel displays them, but the router neither ranks nor excludes Claude profiles using those numbers. For Claude and Antigravity, all quota-based modes therefore rotate among eligible profiles.
 
 Codex quota can be displayed without being used for routing. The router ranks a Codex profile only when the native app-server confirms file-backed login and the login and config still match the reading. Keyring and auto storage, a project config override, or an ambiguous managed policy make the score unknown. Ordinary model or trust settings in the profile do not by themselves disqualify it. Antigravity reports limits per model group, not a single account-wide allowance; its quota is for display only.
 

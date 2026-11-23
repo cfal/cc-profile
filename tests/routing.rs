@@ -205,13 +205,89 @@ fn modes_skip_exhaustion_and_round_robin_among_equal_ranks() {
 }
 
 #[test]
+fn default_prefers_capacity_and_earliest_expiry_uses_any_positive_account_window() {
+    let f = Fixture::new();
+    let exe = build();
+    let ms = now();
+    let early = ms + 60_000;
+    let late = ms + 120_000;
+    let w = |used, reset| json!({"kind":"account","used_pct":used,"reset_at_ms":reset});
+    let add = |label, snapshot, at| {
+        let c = f.add("codex", label);
+        std::fs::write(c.home.join("auth.json"), "{}").unwrap();
+        cache(&f, &c, snapshot, at);
+        c
+    };
+    let unknown = add(
+        "unknown",
+        json!({"windows":[
+        {"kind":"model","used_pct":50,"reset_at_ms":early-1}, w(2, ms),
+        {"kind":"account","reset_at_ms":early-1}],"credits":{"balance":"100"}}),
+        ms,
+    );
+    let undated = add(
+        "undated",
+        json!({"windows":[{"kind":"account","used_pct":20}],
+        "spend_control":{"remaining_pct":10,"reset_at_ms":early-1}}),
+        ms,
+    );
+    let roomy = add("roomy", json!({"windows":[w(5, late)]}), ms);
+    let soon = add("soon", json!({"windows":[w(90, late+1), w(20, early)]}), ms);
+    let tied = add("tied", json!({"windows":[w(30, early)]}), ms);
+    add(
+        "capped",
+        json!({"windows":[w(1, early-1)],"spend_control":{"reached":true}}),
+        ms,
+    );
+    add(
+        "exhausted",
+        json!({"windows":[w(1, early-1), w(100, late)]}),
+        ms,
+    );
+    let stale = add("stale", json!({"windows":[w(0, early-1)]}), ms - FRESH_MS);
+    let cap_only = add(
+        "cap-only",
+        json!({"spend_control":{"remaining_pct":50,"reset_at_ms":early-1}}),
+        ms,
+    );
+    let unverified = add("changed-login", json!({"windows":[w(0, early-1)]}), ms);
+    std::fs::write(unverified.home.join("auth.json"), "different fixture").unwrap();
+    let pick = |mode: ccpd::protocol::RoutingMode| {
+        let p = launch(&f.store, &exe, &req(&f, "codex", &[], &exe)).unwrap();
+        assert_eq!(p.decision, mode.name());
+        p.config_id
+    };
+    assert_eq!(pick(MostRemaining), roomy.id);
+    f.store.set_routing_mode(EarliestExpiry).unwrap();
+    for c in [&soon, &tied, &soon] {
+        assert_eq!(pick(EarliestExpiry), c.id);
+    }
+    for c in [&roomy, &soon, &tied] {
+        cache(&f, c, window(100.), ms);
+    }
+    assert_eq!(pick(EarliestExpiry), undated.id);
+    cache(&f, &undated, window(100.), ms);
+    for c in [&stale, &cap_only, &unverified, &unknown, &stale] {
+        assert_eq!(pick(EarliestExpiry), c.id);
+    }
+    assert_eq!(
+        f.store.page(false, &Page::default()).unwrap()["items"][0]["reason"],
+        "earliest_expiry"
+    );
+    for mode in [MostRemaining, LeastRemaining] {
+        f.store.set_routing_mode(mode).unwrap();
+        assert_eq!(pick(mode), cap_only.id);
+    }
+}
+
+#[test]
 fn only_new_admissions_consult_quota_or_request_background_refresh() {
     let f = Fixture::new();
     let exe = build();
     let c = f.add("codex", "one");
     f.store.current("codex", Some(c.id)).unwrap();
     std::fs::write(c.home.join("auth.json"), "{}").unwrap();
-    f.store.set_routing_mode(MostRemaining).unwrap();
+    f.store.set_routing_mode(EarliestExpiry).unwrap();
     let print = req(
         &f,
         "codex",
@@ -220,7 +296,7 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     );
     let admission = admit(&f.store, &exe, &print).unwrap();
     assert!(admission.refresh_quota);
-    assert_eq!(admission.plan.unwrap().decision, "most_remaining");
+    assert_eq!(admission.plan.unwrap().decision, "earliest_expiry");
     assert!(!admit(&f.store, &exe, &print).unwrap().refresh_quota);
     assert!(
         observe(
@@ -282,7 +358,13 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         assert!(!admission.refresh_quota);
         assert_eq!(admission.plan.unwrap().decision, reason);
     }
-    for mode in [RoundRobin, Priority, MostRemaining, LeastRemaining] {
+    for mode in [
+        RoundRobin,
+        Priority,
+        MostRemaining,
+        LeastRemaining,
+        EarliestExpiry,
+    ] {
         f.store.set_routing_mode(mode).unwrap();
         let request = req(&f, "codex", &[], &exe);
         for refresh in [mode.uses_remaining(), false] {

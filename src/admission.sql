@@ -5,5 +5,5 @@ CREATE TABLE settings (
   routing_mode TEXT NOT NULL CHECK(routing_mode IN
     ('round_robin','most_remaining','least_remaining','priority'))
 );
-INSERT INTO settings VALUES(1,'round_robin');
+INSERT INTO settings VALUES(1,'most_remaining');
 PRAGMA user_version=8;

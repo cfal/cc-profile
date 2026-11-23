@@ -98,28 +98,54 @@ fn unmanaged_file(c: &Config) -> bool {
             .iter()
             .all(|name| absent(&Path::new("/etc/codex").join(name)))
 }
-fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
+// Ordering for expiry routing: spend caps can exclude a profile, but only a
+// positive account window can promote it out of Unknown.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum WindowExpiry {
+    At(i64),
+    Undated,
+    Unknown,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Allowance {
+    pub remaining: f64,
+    pub expiry: WindowExpiry,
+}
+
+fn allowance(snapshot: &Value, ms: i64) -> Option<Allowance> {
     let live =
         |w: &Value| w["reset_at_ms"].is_null() || w["reset_at_ms"].as_i64().is_some_and(|t| t > ms);
-    let windows = snapshot["windows"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|w| w["kind"] == "account" && live(w))
-        .filter_map(|w| percent(&w["used_pct"]).map(|used| 100. - used));
     let spend = &snapshot["spend_control"];
-    let cap = if !live(spend) {
+    let mut remaining = if !live(spend) {
         None
     } else if spend["reached"] == true {
         Some(0.)
     } else {
         percent(&spend["remaining_pct"])
     };
-    windows.chain(cap).reduce(f64::min)
+    let mut expiry = WindowExpiry::Unknown;
+    for w in snapshot["windows"].as_array().into_iter().flatten() {
+        if w["kind"] == "account"
+            && live(w)
+            && let Some(used) = percent(&w["used_pct"])
+        {
+            let left = 100. - used;
+            remaining = Some(remaining.map_or(left, |r| r.min(left)));
+            if left > 0. {
+                expiry = expiry.min(
+                    w["reset_at_ms"]
+                        .as_i64()
+                        .map_or(WindowExpiry::Undated, WindowExpiry::At),
+                );
+            }
+        }
+    }
+    remaining.map(|remaining| Allowance { remaining, expiry })
 }
 
 // Only called for present profiles. Cache failures or unidentifiable logins cannot deny a launch.
-pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
+pub(crate) fn cached_allowance(db: &Connection, c: &Config, ms: i64) -> Option<Allowance> {
     if c.tool != "codex" {
         // Claude can return undated cached usage; Antigravity reports model pools only.
         return None;
@@ -141,7 +167,11 @@ pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
     if snapshot["file_auth_verified"] != true {
         return None;
     }
-    remaining(&snapshot, ms)
+    allowance(&snapshot, ms)
+}
+
+pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
+    cached_allowance(db, c, ms).map(|a| a.remaining)
 }
 fn unavailable() -> Error {
     Error::unavailable("unavailable", "Quota unavailable.")
@@ -327,6 +357,9 @@ pub async fn fetch(c: &Config, build: &Build, cwd: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
+        allowance(snapshot, ms).map(|a| a.remaining)
+    }
     #[test]
     fn quota_is_not_inferred_and_zero_is_a_value() {
         let s=claude_snapshot(&json!({"five_hour":{"utilization":0,"resets_at":"1970-01-01T00:00:00Z"},"seven_day":{"utilization":75.5},"seven_day_sonnet":{"utilization":2}})).unwrap();

@@ -601,8 +601,8 @@ class Service(unittest.TestCase):
     def test_routing_settings_and_account_priorities_survive_restart(self):
         for method in ["GET", "PUT"]:
             self.assertEqual(self.api(method,"settings",{"routing_mode":"priority"},{"X-CCP-Session":""})[0],403)
-        self.assertEqual(self.api("GET","settings")[:2],(200,{"routing_mode":"round_robin"}))
-        for mode in ["most_remaining","least_remaining","round_robin","priority"]:
+        self.assertEqual(self.api("GET","settings")[:2],(200,{"routing_mode":"most_remaining"}))
+        for mode in ["most_remaining","least_remaining","earliest_expiry","round_robin","priority"]:
             body = {"routing_mode":mode}
             self.assertEqual(self.api("PUT","settings",body)[:2],(200,body))
         for body in [{},{"routing_mode":None},{"routing_mode":"invalid"}]:
@@ -631,11 +631,10 @@ class Service(unittest.TestCase):
         row = self.api("GET","startups")[1]["items"][0]
         self.assertEqual((row["config_id"], row["reason"]), (high["id"], "priority"))
 
-    def test_only_codex_admission_refreshes_quota_in_remaining_modes(self):
+    def test_only_codex_admission_refreshes_quota_by_default(self):
         codex = Path(self.account("codex","codex")["home"])
         claude = Path(self.account("claude","claude")["home"])
         (claude/".credentials.json").write_text("fixture login")
-        self.assertEqual(self.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
         (codex/"hold-old-quota").touch()
         try:
             self.assertEqual(self.cli("claude","chat").returncode,0)
@@ -644,6 +643,10 @@ class Service(unittest.TestCase):
                 if (codex/"held-old-pid").exists(): break
                 time.sleep(.02)
             self.assertTrue((codex/"held-old-pid").exists())
+            self.assertEqual(self.api("PUT","settings",{"routing_mode":"earliest_expiry"})[0],200)
+            p = self.cli("codex","app-server")
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertEqual(self.api("GET","startups?tool=codex")[1]["items"][0]["reason"],"earliest_expiry")
             self.assertFalse((claude/"quota-count").exists())
             q = self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
             self.assertEqual(q,{"loading":False,"status":"not_checked"})
@@ -662,7 +665,7 @@ class Service(unittest.TestCase):
             if all(r["quota"]["status"]=="fresh" for r in rows): break
             time.sleep(.02)
         self.assertEqual([r["quota"]["snapshot"]["windows"][0]["used_pct"] for r in rows],[0,100])
-        for mode in ["most_remaining","least_remaining","round_robin","priority"]:
+        for mode in ["most_remaining","least_remaining","earliest_expiry","round_robin","priority"]:
             self.assertEqual(self.api("PUT","settings",{"routing_mode":mode})[0],200)
             for home in profiles:
                 self.assertEqual(Path(json.loads(self.cli("claude","chat").stdout)["home"]),home)

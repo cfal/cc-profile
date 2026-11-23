@@ -294,8 +294,8 @@ async function loadRouting(container) {
   try {
     const settings = await api("settings");
     const mode = select([
-      ["round_robin", "Round robin"], ["most_remaining", "Most quota remaining"],
-      ["least_remaining", "Least quota remaining"], ["priority", "Highest priority"],
+      ["most_remaining", "Most quota remaining"], ["least_remaining", "Least quota remaining"],
+      ["earliest_expiry", "Earliest expiry"], ["round_robin", "Round robin"], ["priority", "Highest priority"],
     ], settings.routing_mode, {required: true});
     const save = el("button", {type: "submit"}, "Save routing mode");
     const error = el("p", {class: "error", role: "alert", hidden: true});
