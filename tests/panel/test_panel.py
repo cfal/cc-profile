@@ -266,6 +266,7 @@ class Panel(unittest.TestCase):
             sid = "acp:it's here"
             tui_id = "707996ed-9668-43f7-b4d8-bc92e2021fe1"
             both_id = str(uuid.uuid4())
+            discovered, discovered_after_acp = str(uuid.uuid4()), str(uuid.uuid4())
             with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
                 db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
                            "VALUES('agy',?,?,'observed','/my workspace',1,1)",(sid,c["id"]))
@@ -273,6 +274,10 @@ class Panel(unittest.TestCase):
                            "VALUES('agy',?,?,'saved_file','/a tui workspace',2,2)",(tui_id,c["id"]))
                 db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms) "
                            "VALUES('agy',?,?,'observed','/dual acp','/dual tui',3,4)",(both_id,c["id"]))
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,bound_ms,saved_file_seen_ms) "
+                           "VALUES('agy',?,?,'saved_file',5,5)",(discovered,c["id"]))
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms,saved_file_seen_ms) "
+                           "VALUES('agy',?,?,'observed','/acp known',6,6,7)",(discovered_after_acp,c["id"]))
             page.get_by_role("navigation").get_by_text("Sessions").click()
             expect(page.get_by_role("button",name=sid,exact=True)).to_be_visible()
             page.get_by_role("row").filter(has_text="/my workspace").get_by_role("button",name="Copy resume command").click()
@@ -286,6 +291,19 @@ class Panel(unittest.TestCase):
                                 ("Copy terminal resume command",["/dual tui","&&","ccp","agy","--conversation="+both_id])]:
                 both.get_by_role("button",name=label).click()
                 self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),["cd",*args])
+            for needle, label, native in [("Not routed","Copy resume command",discovered),
+                                          ("/acp known","Copy terminal resume command",discovered_after_acp)]:
+                row = page.get_by_role("row").filter(has_text=needle)
+                if native == discovered:
+                    expect(row).to_contain_text("Unknown")
+                row.get_by_role("button", name=label).click()
+                self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
+                                 ["ccp","agy","--conversation="+native])
+            self.assertEqual(service.cli("agy").returncode, 0)
+            page.get_by_role("navigation").get_by_text("Dashboard").click()
+            logs = page.get_by_role("region", name="Startup logs")
+            expect(logs.get_by_role("cell", name="Unknown", exact=True)).to_be_visible()
+            expect(logs.get_by_role("cell", name="Unknown", exact=True).get_by_role("button")).to_have_count(0)
 
     def test_identity_follows_selected_account_not_delayed_probe(self):
         service = self.start_service()

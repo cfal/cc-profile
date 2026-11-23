@@ -2,12 +2,15 @@ use crate::{
     paths,
     types::{Error, Result},
 };
+use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, openat, statat};
 use std::{
-    fs,
+    fs, io,
+    os::fd::OwnedFd,
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
 };
 use tokio::process::Command;
+pub mod discovery;
 
 pub const APP_DIR: &str = "antigravity-cli";
 pub const STATUS: &[&str] = &["profile-status"];
@@ -52,31 +55,62 @@ pub fn session_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
-/// Check only the exact native filenames. Never open or enumerate conversations.
-pub fn has_conversation(home: &Path, id: uuid::Uuid) -> Result<bool> {
-    let dir = home.join(".gemini").join(APP_DIR).join("conversations");
-    let unsafe_path = || {
-        Error::bad(
-            "unsafe_conversation",
-            "Cannot verify the native conversation path.",
-        )
-    };
-    match dir.canonicalize() {
-        Ok(path) if path == dir => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        _ => return Err(unsafe_path()),
+fn open_home(home: &Path) -> io::Result<OwnedFd> {
+    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::PATH;
+    let mut dir = openat(CWD, "/", flags, Mode::empty())?;
+    let mut parts = home.components();
+    if parts.next() != Some(std::path::Component::RootDir) {
+        return Err(io::ErrorKind::InvalidInput.into());
     }
+    for part in parts {
+        let std::path::Component::Normal(name) = part else {
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
+        dir = openat(dir, name, flags, Mode::empty())?;
+    }
+    Ok(dir)
+}
+fn conversation_dir(home: &OwnedFd) -> io::Result<OwnedFd> {
+    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let gemini = openat(home, ".gemini", flags | OFlags::PATH, Mode::empty())?;
+    let app = openat(gemini, APP_DIR, flags | OFlags::PATH, Mode::empty())?;
+    Ok(openat(
+        app,
+        "conversations",
+        flags | OFlags::PATH,
+        Mode::empty(),
+    )?)
+}
+fn saved_in(dir: &OwnedFd, id: uuid::Uuid) -> io::Result<bool> {
     let mut found = false;
     for ext in ["db", "pb"] {
-        match fs::symlink_metadata(dir.join(format!("{id}.{ext}"))) {
-            Ok(m) if m.is_file() && m.uid() == paths::uid() && m.nlink() == 1 => {
-                found |= m.len() != 0;
+        match statat(dir, format!("{id}.{ext}"), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(m)
+                if FileType::from_raw_mode(m.st_mode) == FileType::RegularFile
+                    && m.st_uid == paths::uid()
+                    && m.st_nlink == 1 =>
+            {
+                found |= m.st_size > 0;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(unsafe_path()),
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => return Err(io::ErrorKind::InvalidData.into()),
         }
     }
     Ok(found)
+}
+/// Exact resumes recheck both native suffixes without opening either file.
+pub fn has_conversation(home: &Path, id: uuid::Uuid) -> Result<bool> {
+    match open_home(home)
+        .and_then(|home| conversation_dir(&home))
+        .and_then(|dir| saved_in(&dir, id))
+    {
+        Ok(found) => Ok(found),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(Error::bad(
+            "unsafe_conversation",
+            "Cannot verify the native conversation path.",
+        )),
+    }
 }
 
 pub fn has_login(home: &Path) -> Result<bool> {

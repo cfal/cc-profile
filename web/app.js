@@ -403,7 +403,8 @@ async function logs(view, params, ver, enter) {
             row.label,
           );
     const uid = row.native_id,
-      alias = names[row.tool];
+      alias = names[row.tool],
+      unknownTui = !uid && row.tool === "agy" && row.intent === "tui" && row.state === "routed";
     const idLink = uid
       ? el(
           "button",
@@ -418,7 +419,7 @@ async function logs(view, params, ver, enter) {
           },
           short(uid),
         )
-      : text(row.state === "pending" ? "Pending" : "None");
+      : text(row.state === "pending" ? "Pending" : unknownTui ? "Unknown" : "None");
     const state = states[row.state] || row.state;
     const decision = el(
       "div",
@@ -434,14 +435,14 @@ async function logs(view, params, ver, enter) {
     let commands;
     if (sessions) {
       const resume = (label, glyph, cwd, args) => ib(label, glyph, () =>
-        copy("cd " + shell(cwd) + " && ccp " + row.tool + args));
+        copy((cwd ? "cd " + shell(cwd) + " && " : "") + "ccp " + row.tool + args));
       const fileOnly = row.evidence === "saved_file";
-      const both = row.tool === "agy" && !fileOnly && row.tui_workspace != null;
+      const both = row.tool === "agy" && !fileOnly && (row.tui_workspace != null || row.saved_file_seen_ms != null);
       commands = el("div", {class: "row"},
         !fileOnly && resume(both ? "Copy ACP resume command" : "Copy resume command", "copy", row.workspace,
           row.tool === "agy" ? " acp --for-session " + shell(uid) : (row.tool === "claude" ? " --resume " : " resume ") + uid),
         (fileOnly || both) && resume(both ? "Copy terminal resume command" : "Copy resume command",
-          both ? "square-terminal" : "copy", row.tui_workspace || row.workspace, " --conversation=" + shell(uid)));
+          both ? "square-terminal" : "copy", row.tui_workspace || (fileOnly && row.workspace), " --conversation=" + shell(uid)));
     }
     const det = ib("Startup details", "chevron-right", async () => {
       expanded = expanded === row.seq ? null : row.seq;
@@ -453,9 +454,9 @@ async function logs(view, params, ver, enter) {
           idLink,
           alias,
           el("div", {}, cfg, row.enabled === false && el("div", {}, pill("Disabled"))),
-          el("span", {class:"wrap"}, (row.evidence === "saved_file" && row.tui_workspace) || row.workspace),
+          el("span", {class:"wrap"}, (row.evidence === "saved_file" && row.tui_workspace) || row.workspace || "Unknown"),
           pill(simple(row.evidence)),
-          fmt(row.last_routed_ms),
+          row.last_routed_ms == null ? "Not routed" : fmt(row.last_routed_ms),
           commands,
         ]
       : [fmt(row.created_ms), alias, simple(row.intent), cfg, decision, idLink, det];
@@ -473,7 +474,7 @@ async function logs(view, params, ver, enter) {
               { class: "facts" },
               datum("Request ID", code(row.request_id)),
               datum("Workspace", code(row.workspace || "Unavailable")),
-              datum("Session ID", uid ? code(uid) : "Not recorded"),
+              datum("Session ID", uid ? code(uid) : unknownTui ? "Unknown" : "Not recorded"),
               row.observed_ms && datum("ID observed", fmt(row.observed_ms)),
             ),
           ),

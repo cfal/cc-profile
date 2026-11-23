@@ -4,6 +4,42 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn discovery_upgrade_preserves_verified_evidence_workspaces_and_sequence() {
+    let f = Fixture::new();
+    {
+        let db = f.store.db().unwrap();
+        db.execute_batch(include_str!("../src/saved_file_sessions.sql"))
+            .unwrap();
+        db.execute_batch("ALTER TABLE sessions ADD COLUMN tui_workspace TEXT;
+            INSERT INTO configs(id,tool,label,home,dev,ino,birth_ns) VALUES(42,'agy','old','/offline',1,2,3);
+            INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms)
+            VALUES('agy','dual',42,'observed','/acp','/tui',7,8),('agy','file',42,'saved_file','/first','/last',9,10);
+            UPDATE sqlite_sequence SET seq=90 WHERE name='sessions'; PRAGMA user_version=12;").unwrap();
+    }
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    let rows = upgraded.page(true, &Page::default()).unwrap();
+    let (file, dual) = (&rows["items"][0], &rows["items"][1]);
+    assert_eq!(file["saved_file_seen_ms"], 9);
+    assert_eq!(file["workspace"], "/first");
+    assert_eq!(file["tui_workspace"], "/last");
+    assert_eq!(dual["workspace"], "/acp");
+    assert_eq!(dual["tui_workspace"], "/tui");
+    assert_eq!(dual["evidence"], "observed");
+    assert_eq!(dual["last_routed_ms"], 8);
+    let db = upgraded.db().unwrap();
+    db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,bound_ms) VALUES('agy','new',42,'saved_file',11)",[]).unwrap();
+    assert_eq!(db.last_insert_rowid(), 91);
+    assert!(db.execute("UPDATE sessions SET owner=42", []).is_err());
+    assert!(
+        db.execute(
+            "UPDATE sessions SET evidence='observed' WHERE native_id='new'",
+            []
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn reset_offers_upgrade_without_touching_profiles_and_keep_uncertain_attempts() {
     let f = Fixture::new();
     let c = f.add("codex", "work");

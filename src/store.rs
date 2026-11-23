@@ -65,6 +65,11 @@ impl Config {
     pub(crate) fn directory_matches(&self) -> bool {
         self.birth_ns.is_some() && self.observed_birth() == self.birth_ns
     }
+    pub(crate) fn matches_open_home(&self, fd: &std::os::fd::OwnedFd) -> bool {
+        directory_identity_at(fd, Path::new(""), AtFlags::EMPTY_PATH).is_ok_and(
+            |(dev, ino, birth)| (dev, ino, Some(birth)) == (self.dev, self.ino, self.birth_ns),
+        )
+    }
     pub fn present(&self) -> bool {
         self.directory_matches()
             && (self.tool != "agy" || crate::agy::has_login(&self.home).is_ok())
@@ -192,15 +197,16 @@ fn bad_home() -> Error {
     )
 }
 fn directory_identity(path: &Path) -> Result<(u64, u64, i64)> {
+    directory_identity_at(CWD, path, AtFlags::SYMLINK_NOFOLLOW)
+}
+fn directory_identity_at(
+    fd: impl std::os::fd::AsFd,
+    path: &Path,
+    flags: AtFlags,
+) -> Result<(u64, u64, i64)> {
     // Metadata::created() is unavailable on musl. Read the full identity in one statx call.
     let basic = StatxFlags::TYPE | StatxFlags::UID | StatxFlags::INO;
-    let m = statx(
-        CWD,
-        path,
-        AtFlags::SYMLINK_NOFOLLOW,
-        basic | StatxFlags::BTIME,
-    )
-    .map_err(|_| bad_home())?;
+    let m = statx(fd, path, flags, basic | StatxFlags::BTIME).map_err(|_| bad_home())?;
     let fields = StatxFlags::from_bits_retain(m.stx_mask);
     if !fields.contains(basic)
         || FileType::from_raw_mode(m.stx_mode.into()) != FileType::Directory
@@ -276,7 +282,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=12).contains(&v)
+        } else if !(1..=13).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -347,6 +353,9 @@ impl Store {
         }
         if v < 12 {
             tx.execute_batch(include_str!("reset_grants.sql"))?;
+        }
+        if v < 13 {
+            tx.execute_batch(include_str!("discovered_sessions.sql"))?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
@@ -484,7 +493,7 @@ impl Store {
             (
                 "sessions",
                 "owner",
-                "SELECT s.seq,s.tool,s.native_id,s.owner,c.label,c.enabled,s.evidence,s.bound_ms,s.last_routed_ms,s.workspace,s.tui_workspace",
+                "SELECT s.seq,s.tool,s.native_id,s.owner,c.label,c.enabled,s.evidence,s.bound_ms,s.last_routed_ms,s.workspace,s.tui_workspace,s.saved_file_seen_ms",
             )
         } else {
             (
@@ -521,7 +530,8 @@ impl Store {
         let mut items=db.prepare(&sql)?.query_map(params_from_iter(args),|r|{
             let mut v=json!({"seq":r.get::<_,i64>(0)?,"tool":r.get::<_,String>(1)?,"native_id":r.get::<_,Option<String>>(2)?,
                 "config_id":r.get::<_,Option<i64>>(3)?,"label":r.get::<_,Option<String>>(4)?,"enabled":r.get::<_,Option<bool>>(5)?});
-            if sessions {v["evidence"]=r.get::<_,String>(6)?.into();v["bound_ms"]=r.get::<_,i64>(7)?.into();v["last_routed_ms"]=r.get::<_,i64>(8)?.into();v["workspace"]=r.get::<_,String>(9)?.into();v["tui_workspace"]=r.get::<_,Option<String>>(10)?.into();}
+            if sessions {v["evidence"]=r.get::<_,String>(6)?.into();v["bound_ms"]=r.get::<_,i64>(7)?.into();v["last_routed_ms"]=r.get::<_,Option<i64>>(8)?.into();v["workspace"]=r.get::<_,Option<String>>(9)?.into();v["tui_workspace"]=r.get::<_,Option<String>>(10)?.into();
+                if v["tool"]=="agy" {v["saved_file_seen_ms"]=r.get::<_,Option<i64>>(11)?.into();}}
             else{for (i,k) in [(6,"intent"),(7,"state"),(8,"reason"),(10,"workspace"),(11,"request_id")]{v[k]=r.get::<_,Option<String>>(i)?.into();}
                  v["created_ms"]=r.get::<_,i64>(9)?.into();v["observed_ms"]=r.get::<_,Option<i64>>(12)?.into();v["mapped"]=r.get::<_,bool>(13)?.into();}
             Ok(v)

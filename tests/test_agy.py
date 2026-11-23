@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import pty
@@ -206,7 +207,7 @@ class Antigravity(unittest.TestCase):
             config_dir.chmod(0o700)
             duplicate.unlink()
             saved.unlink()
-            self.assertIn("No registered", run().stderr)
+            self.assertIn("pruned", run().stderr)
         (p/f"{uid}.db").write_bytes(b"moved")
         self.assertIn("Conflicting", run().stderr)
         self.assertNotEqual(self.s.cli("agy","acp","--for-session",uid).returncode,0)
@@ -220,9 +221,125 @@ class Antigravity(unittest.TestCase):
         (q/f"{uid}.db").write_bytes(b"other fixture")
         self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"enabled":False})
         self.assertIn("disabled", run().stderr)
-        self.assertEqual(len(self.s.api("GET","sessions?tool=agy")[1]["items"]),2)
+        # Discovery may already have recorded its file, never an ACP observation.
+        self.assertNotEqual(self.s.cli("agy","acp","--for-session",uid).returncode,0)
         self.assertEqual(self.s.cli("agy").returncode, 0)
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], c["id"])
+
+    def test_saved_file_discovery_and_offline_reconciliation(self):
+        a, b = self.profile("first"), self.profile("second")
+        uid = lambda: str(uuid.uuid4())
+        def directory(c):
+            d = Path(c["home"])/".gemini/antigravity-cli/conversations"
+            for level in (d.parents[1], d.parent, d):
+                level.mkdir(mode=0o700, exist_ok=True)
+            return d
+        def rows(sid):
+            return self.s.api("GET","sessions?tool=agy&native_id="+sid)[1]["items"]
+        def wait(sid, ready=lambda row: True):
+            deadline = time.monotonic() + 6
+            while not (found := rows(sid)) or not ready(found[0]):
+                self.assertLess(time.monotonic(), deadline, "Missing saved-file discovery")
+                time.sleep(.04)
+            self.assertEqual(len(found), 1)
+            return found[0]
+        def login():
+            self.s.session = self.s.api("POST","login", {"password":self.s.password})[1]["session"]
+
+        self.assertEqual(self.s.cli("agy").returncode, 0)
+        original, = self.s.api("GET","startups?tool=agy")[1]["items"]
+        self.assertIsNone(original["native_id"])
+        # Create the conversations directories after both registration and launch.
+        da, db = directory(a), directory(b)
+        seed = uid()
+        staged = da/"staged"
+        staged.write_bytes(b"inert")
+        staged.chmod(0)  # Discovery needs stat access, never transcript read access.
+        staged.rename(da/(seed+".db"))
+        first = wait(seed)
+        self.assertEqual((first["config_id"], first["evidence"], first["workspace"],
+                          first["last_routed_ms"], first["tui_workspace"]),
+                         (a["id"], "saved_file", None, None, None))
+        self.assertEqual(first["saved_file_seen_ms"], first["bound_ms"])
+
+        left, right = uid(), uid()
+        empty = da/(left+".db")
+        empty.touch()
+        self.assertFalse(rows(left))
+        def write():
+            with empty.open("ab", buffering=0) as stream:
+                stream.write(b"nonempty")
+                wait(left)  # MODIFY before close, not just CREATE or CLOSE_WRITE.
+        def move():
+            tmp = db/"staging"
+            tmp.write_bytes(b"inert")
+            tmp.rename(db/(right+".pb"))
+            wait(right)
+        with ThreadPoolExecutor(2) as pool:
+            jobs = [pool.submit(fn) for fn in (write, move)]
+            for job in jobs: job.result(timeout=8)
+        self.assertEqual(rows(left)[0]["config_id"], a["id"])
+        self.assertEqual(rows(right)[0]["config_id"], b["id"])
+        (da/(seed+".pb")).write_bytes(b"same uuid")
+        self.assertEqual(rows(seed), [first])
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"], [original])
+        self.assertNotEqual(self.s.cli("agy","acp","--for-session",seed).returncode,0)
+        self.assertEqual(self.s.cli("agy").returncode,0)
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], b["id"])
+
+        seen_ms = rows(left)[0]["saved_file_seen_ms"]
+        self.assertEqual(self.s.cli("agy","--conversation="+left).returncode,0)
+        self.assertEqual(rows(left)[0]["tui_workspace"], str(self.s.root))
+        # Only session/new supplies ACP evidence, whether it precedes or follows the file.
+        acp = uid()
+        self.bridge([], (1, "session/new", {"cwd":"/verified","fixtureId":left}),
+                        (2, "session/new", {"cwd":"/acp-only","fixtureId":acp}))
+        dual = rows(left)[0]
+        self.assertEqual((dual["evidence"],dual["workspace"],dual["tui_workspace"],dual["saved_file_seen_ms"]),
+                         ("observed","/verified",str(self.s.root),seen_ms))
+        (da/(acp+".db")).write_bytes(b"inert")
+        after = wait(acp, lambda row: row["saved_file_seen_ms"] is not None)
+        self.assertEqual((after["evidence"],after["workspace"],after["tui_workspace"]), ("observed","/acp-only",None))
+
+        self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"enabled":False})
+        self.s.stop()
+        offline, dup, bad, linked = uid(), uid(), uid(), uid()
+        (db/(offline+".db")).write_bytes(b"saved while stopped")
+        for d in (da, db): (d/(dup+".db")).write_bytes(b"ambiguous")
+        (da/(bad+".db")).symlink_to(db/(offline+".db"))
+        (da/"not-a-conversation").write_bytes(b"inert")
+        os.link(da/"not-a-conversation",da/(linked+".db"))
+        (da/(seed+".db")).unlink()
+        (da/(seed+".pb")).unlink()
+        self.s.start()
+        login()
+        self.assertEqual(wait(offline)["config_id"], b["id"])
+        self.assertIn("disabled", self.s.cli("agy","--conversation="+offline).stderr)
+        self.assertEqual(rows(seed), [first])
+        self.assertIn("pruned", self.s.cli("agy","--conversation="+seed).stderr)
+        self.assertIn("Conflicting", self.s.cli("agy","--conversation="+dup).stderr)
+        for sid in (dup,bad,linked): self.assertFalse(rows(sid))
+        # A file moved to another profile doesn't transfer a historical binding.
+        (db/(seed+".db")).write_bytes(b"copy")
+        self.assertIn("Conflicting", self.s.cli("agy","--conversation="+seed).stderr)
+        self.assertEqual(rows(seed), [first])
+
+    def test_no_discovery_after_native_build_changes_or_on_unsupported_restart(self):
+        c = self.profile("version")
+        fake = self.s.root/"bin/agy"
+        fake.write_text(fake.read_text().replace('print("1.5.14")', 'print("0.0.0")'))
+        d = Path(c["home"])/".gemini/antigravity-cli/conversations"
+        for level in (d.parents[1], d.parent, d):
+            level.mkdir(mode=0o700, exist_ok=True)
+        (d/(str(uuid.uuid4())+".pb")).write_bytes(b"inert")
+        for restart in (False, True):
+            if restart:
+                self.s.stop()
+                self.s.start()
+                self.s.session = self.s.api("POST","login", {"password":self.s.password})[1]["session"]
+            self.assertNotEqual(self.s.cli("agy").returncode, 0)
+            time.sleep(1.3)  # Includes a topology refresh with the conversation directory present.
+            self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"], [])
 
     def refresh_quota(self, c=None, stale_only=False):
         route = f"accounts/{c['id']}/quota/refresh" if c else "quota/refresh"

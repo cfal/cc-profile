@@ -60,6 +60,13 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "conversation_missing",
             "No registered Antigravity profile has this saved conversation.",
         ),
+        "conversation_pruned" => Error::missing(
+            "conversation_pruned",
+            format!(
+                "The saved conversation is missing or was pruned from its recorded profile ({}). No other profile was selected.",
+                c.map_or("unknown", |c| &c.label)
+            ),
+        ),
         "conversation_ambiguous" => Error::conflict(
             "conversation_ambiguous",
             "Conflicting Antigravity conversation owners. No profile was selected.",
@@ -261,6 +268,11 @@ fn choose(
                     }
                 }
                 if found.is_none() {
+                    if let Some(owner) = owner {
+                        let c = config(db, owner)?;
+                        let err = denial("conversation_pruned", Some(&c), None);
+                        return Ok(Selection::Refuse(Some(c), err));
+                    }
                     return Ok(reject("conversation_missing"));
                 }
                 found
@@ -456,9 +468,10 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                     }
                     Intent::Resume(uid) => {
                         if i.agy_tui {
-                            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms)
-                                VALUES('agy',?1,?2,'saved_file',?3,?3,?4,?4)
-                                ON CONFLICT(tool,native_id) DO UPDATE SET last_routed_ms=excluded.last_routed_ms,tui_workspace=excluded.tui_workspace
+                            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms,saved_file_seen_ms)
+                                VALUES('agy',?1,?2,'saved_file',?3,?3,?4,?4,?4)
+                                ON CONFLICT(tool,native_id) DO UPDATE SET last_routed_ms=excluded.last_routed_ms,tui_workspace=excluded.tui_workspace,
+                                workspace=coalesce(sessions.workspace,excluded.workspace),saved_file_seen_ms=coalesce(sessions.saved_file_seen_ms,excluded.saved_file_seen_ms)
                                 WHERE owner=excluded.owner", params![uid,c.id,workspace,ms])?;
                         } else {
                             db.execute("UPDATE sessions SET last_routed_ms=? WHERE tool=? AND native_id=?", params![ms, req.tool, uid])?;

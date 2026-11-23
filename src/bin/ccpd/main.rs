@@ -116,6 +116,15 @@ async fn run() -> Result<()> {
         Store::user_db_path(&app.state_dir).display(),
         sock.display()
     );
+    if app.agy.supported {
+        let a = app.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("agy-saved-files".into())
+            .spawn(move || ccpd::agy::discovery::run(&a.store, &a.agy))
+        {
+            eprintln!("Antigravity saved-file discovery unavailable: {e}");
+        }
+    }
     tokio::select! {
         result=axum::serve(unix,service::private(app.clone()).into_make_service_with_connect_info::<service::Peer>())=>result?,
         result=axum::serve(tcp,service::web(app))=>result?,
