@@ -90,10 +90,6 @@ fn executable_paths(name: &str) -> impl Iterator<Item = PathBuf> {
         .then_some(p)
     })
 }
-pub fn executable(name: &str) -> Option<PathBuf> {
-    executable_paths(name).next()
-}
-
 type FileId = (u64, u64);
 fn file_id(path: &Path) -> Option<FileId> {
     fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))

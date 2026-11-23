@@ -475,7 +475,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
             params![req.request_id,req.tool,intent,state,reason,id,config_id,revision,workspace,fingerprint,digest(&req.ticket),ms],
         )?;
         Ok(Admission {
-            refresh_quota: req.tool != "agy" && mode.uses_remaining()
+            refresh_quota: req.tool == "codex" && mode.uses_remaining()
                 && (response.is_ok() || reason == "quota_exhausted"),
             plan: response,
         })

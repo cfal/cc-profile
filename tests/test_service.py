@@ -27,6 +27,31 @@ if t == "claude" and sys.argv[1:] == ["auth","status","--json"]:
     path = home / "fixture-identity.json"
     print(path.read_text() if path.exists() else '{"loggedIn":false}')
     sys.exit(0 if path.exists() else 1)
+if t == "claude" and "--input-format" in sys.argv:
+    import time
+    assert sys.argv[1:] == ["--print","--verbose","--input-format","stream-json","--output-format","stream-json",
+        "--no-session-persistence","--setting-sources","","--settings",'{"disableAllHooks":true}',
+        "--strict-mcp-config","--mcp-config",'{"mcpServers":{}}',"--tools",""]
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in os.environ
+    assert os.environ.get("DISABLE_TELEMETRY") == os.environ.get("DISABLE_ERROR_REPORTING") == "1"
+    assert not any(k in os.environ for k in ["CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_API_KEY","ANTHROPIC_AUTH_TOKEN"])
+    messages = [json.loads(line) for line in sys.stdin]
+    assert messages == [{"type":"control_request","request_id":tag,"request":request} for tag, request in [
+        ("init",{"subtype":"initialize"}),("usage",{"subtype":"get_usage","skip_behaviors":True})]]
+    (home/"quota-proxies").write_text(json.dumps([os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")]))
+    with (home/"quota-count").open("a") as stream: stream.write("fetch\n")
+    while (home/"hold-fetch").exists(): time.sleep(.02)
+    if (home/"raw-output").exists():
+        sys.stdout.write((home/"raw-output").read_text())
+        sys.exit()
+    def reply(tag,v):
+        print(json.dumps({"type":"control_response","response":{"request_id":tag,"subtype":"success","response":v}}))
+    reply("init",{"commands":[]})
+    fixture = home/"usage.json"
+    limits = json.loads(fixture.read_text()) if fixture.exists() else {"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}
+    reply("usage",{"subscription_type":"max","rate_limits_available":True,"rate_limits":limits,
+                   "behaviors":None,"session":{"private":"fixture-private"}})
+    sys.exit()
 if sys.argv[1:2] == ["app-server"]:
     if (home/"track-child").exists(): (home/"child-pid").write_text(str(os.getpid()))
     for line in sys.stdin:
@@ -115,26 +140,6 @@ class Service(unittest.TestCase):
         if not getattr(self, "native", False):
             shutil.copyfile(ROOT / "tests/fixtures/agy.py", paths / "agy")
             (paths / "agy").chmod(0o700)
-        curl = paths / "curl"
-        curl.write_text("#!" + sys.executable + r'''
-import json, os, pathlib, sys, time
-home = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"])
-config = sys.stdin.read()
-assert 'proxy =' not in config  # curl uses the launch environment, not a second proxy policy.
-with (home / "quota-proxies").open("w") as f:
-    json.dump([os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],f)
-assert 'Bearer private-test-token' in config and not any('private-test-token' in a for a in sys.argv)
-assert 'https://api.anthropic.com/api/oauth/usage' in config
-with (home / "quota-count").open("a") as stream: stream.write("fetch\n")
-while (home / "hold-fetch").exists(): time.sleep(.02)
-if (home / "throttled").exists():
-    print('{"error":"fixture"}\n429\n600',end="")
-else:
-    fixture = home / "usage.json"
-    usage = fixture.read_text() if fixture.exists() else '{"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"}}'
-    print(usage+'\n200\n', end="")
-''')
-        curl.chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
                     "XDG_RUNTIME_DIR": str(self.root / "run"), "XDG_STATE_HOME": str(self.root / "state")}
         if getattr(self, "native", False):
@@ -622,65 +627,43 @@ else:
         self.assertIn(high["home"],p.stderr)
         self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"priority")
 
-    def test_remaining_modes_warm_only_this_provider_without_waiting_for_quota(self):
-        profiles = [Path(self.account("claude",name)["home"]) for name in ("nearly-empty","roomy")]
-        codex = Path(self.account("codex","other-provider")["home"])
-        for home, used in zip(profiles, [99.9,20]):
-            (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
-            (home/"usage.json").write_text(json.dumps({"five_hour":{"utilization":used}}))
-            (home/"hold-fetch").touch()
+    def test_only_codex_admission_refreshes_quota_in_remaining_modes(self):
+        codex = Path(self.account("codex","codex")["home"])
+        claude = Path(self.account("claude","claude")["home"])
+        (claude/".credentials.json").write_text("fixture login")
         self.assertEqual(self.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
+        (codex/"hold-old-quota").touch()
         try:
-            # First admission (unknown quota) must complete while both fetches are held.
-            first = self.cli("claude","chat")
-            self.assertEqual(first.returncode,0,first.stderr)
-            self.assertEqual(json.loads(first.stdout)["home"],str(profiles[0]))
+            self.assertEqual(self.cli("claude","chat").returncode,0)
+            self.assertEqual(self.cli("codex","app-server").returncode,0)
             for _ in range(200):
-                if all((home/"quota-count").exists() for home in profiles): break
+                if (codex/"held-old-pid").exists(): break
                 time.sleep(.02)
-            self.assertTrue(all((home/"quota-count").exists() for home in profiles))
-            self.assertEqual(self.cli("claude","second").returncode,0)
+            self.assertTrue((codex/"held-old-pid").exists())
+            self.assertFalse((claude/"quota-count").exists())
+            q = self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
+            self.assertEqual(q,{"loading":False,"status":"not_checked"})
         finally:
-            for home in profiles: (home/"hold-fetch").unlink()
+            (codex/"hold-old-quota").unlink()
+
+    def test_native_claude_usage_is_display_only_in_all_routing_modes(self):
+        profiles = [Path(self.account("claude", n)["home"]) for n in ("full", "empty")]
+        for home, used in zip(profiles, (0, 100)):
+            # Opaque to ccpd: only the native process interprets the credential store.
+            (home/".credentials.json").write_text("not JSON")
+            (home/"usage.json").write_text(json.dumps({"five_hour":{"utilization":used}}))
+        self.assertEqual(self.api("POST","quota/refresh",{})[1]["queued"],2)
         for _ in range(200):
-            if all(c["quota"]["status"]=="fresh" for c in self.api("GET","accounts?tool=claude")[1]["items"]): break
+            rows = self.api("GET","accounts?tool=claude")[1]["items"]
+            if all(r["quota"]["status"]=="fresh" for r in rows): break
             time.sleep(.02)
-        else:
-            self.fail("background quota refresh did not finish")
-        for mode, index in [("most_remaining",1),("least_remaining",0)]:
+        self.assertEqual([r["quota"]["snapshot"]["windows"][0]["used_pct"] for r in rows],[0,100])
+        for mode in ["most_remaining","least_remaining","round_robin","priority"]:
             self.assertEqual(self.api("PUT","settings",{"routing_mode":mode})[0],200)
-            for _ in range(2):
-                p = self.cli("claude","chat")
-                self.assertEqual(p.returncode,0,p.stderr)
-                self.assertEqual(json.loads(p.stdout)["home"],str(profiles[index]))
-            self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],mode)
+            for home in profiles:
+                self.assertEqual(Path(json.loads(self.cli("claude","chat").stdout)["home"]),home)
         for home in profiles:
             self.assertEqual((home/"quota-count").read_text(),"fetch\n")
-        self.assertFalse((codex/"quota-count").exists())
-
-        import sqlite3
-        for home in profiles:
-            (home/"usage.json").write_text('{"seven_day":{"utilization":100}}')
-            (home/"hold-fetch").touch()
-        try:
-            with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
-                db.execute("UPDATE quota_cache SET success_ms=0,attempt_ms=0,retry_ms=0")
-            self.assertEqual(self.cli("claude","stale").returncode,0)
-        finally:
-            for home in profiles: (home/"hold-fetch").unlink()
-        for _ in range(200):
-            quotas = [c["quota"] for c in self.api("GET","accounts?tool=claude")[1]["items"]]
-            if all(not q["stale"] and q["snapshot"]["windows"][0]["used_pct"]==100 for q in quotas): break
-            time.sleep(.02)
-        else:
-            self.fail("new admission did not replace stale quota")
-        self.assertEqual(self.api("PUT","settings",{"routing_mode":"round_robin"})[0],200)
-        refused = self.cli("claude","new")
-        self.assertNotEqual(refused.returncode,0)
-        self.assertIn("exhausted",refused.stderr)
-        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"quota_exhausted")
-        uid = json.loads(first.stdout)["argv"][1]
-        self.assertEqual(json.loads(self.cli("claude","--resume",uid).stdout)["home"],str(profiles[0]))
 
     def reset_fixture(self, name="reset-profile"):
         c = self.account("codex", name)
@@ -978,7 +961,7 @@ else:
         self.assertEqual(json.loads((Path(cl["home"])/"quota-proxies").read_text()),["http://fixture.invalid:3128/"]*4)
         self.assertEqual(json.loads(self.cli("claude","hello").stdout)["proxy"],"http://fixture.invalid:3128/")
 
-    def test_throttled_background_refresh_keeps_last_good_and_does_not_block_launch(self):
+    def test_unavailable_claude_refresh_keeps_last_good_and_does_not_block_launch(self):
         import sqlite3
         c=self.account("claude","usage")
         home=Path(c["home"])
@@ -994,7 +977,7 @@ else:
         wait_status("fresh")
         with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
             db.execute("UPDATE quota_cache SET retry_ms=0")
-        (home/"throttled").touch()
+        (home/"raw-output").write_text("fixture-private malformed native output")
         hold=home/"hold-fetch"
         hold.touch()
         try:
@@ -1004,28 +987,27 @@ else:
             self.assertEqual(self.api("PUT","current/claude",{"config_id":c["id"]})[0],200)
         finally:
             hold.unlink()
-        q=wait_status("rate_limited")
+        q=wait_status("unavailable")
         self.assertTrue(q["stale"])
         self.assertEqual(q["snapshot"]["windows"][0]["used_pct"],25)
-        self.assertGreaterEqual(q["retry_ms"]-q["attempt_ms"],600000)
+        self.assertGreaterEqual(q["retry_ms"]-q["attempt_ms"],30000)
+        self.assertNotIn("fixture-private",str(q))
         self.assertEqual(self.api("PUT","current/claude",{"config_id":None})[0],200)
         def edit(**fields):
             account=self.api("GET","accounts?tool=claude")[1]["items"][0]
             self.assertEqual(self.api("PATCH","accounts/%d" % c["id"],
                                       dict(fields,revision=account["revision"]))[0],200)
         edit(label="renamed",enabled=False)
-        self.assertEqual(wait_status("rate_limited"),q)
+        self.assertEqual(wait_status("unavailable"),q)
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         edit(proxy_mode="direct")
-        hidden=wait_status("rate_limited")
+        hidden=wait_status("not_checked")
         self.assertFalse(hidden.get("snapshot"))
-        self.assertEqual(hidden["retry_ms"],q["retry_ms"])
-        self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
-        edit(proxy_mode="inherit")
-        (home/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"different"}}')
-        self.assertFalse(wait_status("rate_limited").get("snapshot"))
-        self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
-        self.assertEqual((home/"quota-count").read_text(),"fetch\n"*2)
+        self.assertEqual(hidden["retry_ms"],0)
+        (home/"raw-output").unlink()
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+        self.assertFalse(wait_status("fresh")["stale"])
+        self.assertEqual((home/"quota-count").read_text(),"fetch\n"*3)
 
     def test_new_login_can_refresh_after_a_sign_in_error(self):
         c = self.account("claude","signed-out")
@@ -1041,6 +1023,36 @@ else:
         self.assertEqual(self.api("POST",route,{})[1]["queued"],0)
         (Path(c["home"])/".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"private-test-token"}}')
         self.assertEqual(refresh("fresh")["snapshot"]["windows"][0]["used_pct"],25)
+
+    def test_claude_usage_rechecks_the_profile_login_and_native_build(self):
+        c = self.account("claude","native-check")
+        home, route = Path(c["home"]), f"accounts/{c['id']}/quota/refresh"
+        login = home/".credentials.json"
+        login.write_text("old fixture login")
+        def check(predicate):
+            for _ in range(200):
+                q = self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
+                if predicate(q): return q
+                time.sleep(.02)
+            self.fail(str(q))
+        hold = home/"hold-fetch"
+        hold.touch()
+        try:
+            self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+            check(lambda q: q["loading"] and (home/"quota-count").exists())
+            login.write_text("new fixture login")
+        finally:
+            hold.unlink()
+        self.assertFalse(check(lambda q:not q["loading"]).get("snapshot"))
+        (home/"raw-output").write_text("x" * (1024*1024 + 1))
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+        self.assertEqual(check(lambda q:not q["loading"])["status"],"unavailable")
+        login.write_text("another login")
+        with (self.root/"bin/claude").open("a") as f: f.write("\n# replaced\n")
+        (home/"raw-output").unlink()
+        self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
+        self.assertEqual(check(lambda q:not q["loading"])["status"],"unavailable")
+        self.assertEqual((home/"quota-count").read_text(),"fetch\n"*2)
 
     def test_codex_quota_follows_verified_store_not_a_leftover_auth_file(self):
         import sqlite3
@@ -1108,8 +1120,7 @@ else:
             c = profile("queued")
             def quota():
                 return next(row["quota"] for row in self.api("GET","accounts?tool=claude")[1]["items"] if row["id"]==c["id"])
-            self.assertEqual(self.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
-            self.assertEqual(self.cli("claude","test").returncode,0)
+            self.assertEqual(self.api("POST","quota/refresh",{"stale_only":True})[1]["queued"],1)
             wait(lambda: quota()["loading"])
             route = f"accounts/{c['id']}"
             self.assertEqual(self.api("PATCH",route,{"revision":c["revision"],"enabled":False})[0],200)

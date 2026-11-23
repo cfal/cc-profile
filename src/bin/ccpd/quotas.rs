@@ -5,7 +5,6 @@ use axum::{
     http::StatusCode,
 };
 use ccpd::{
-    native::executable,
     quota::{self, FRESH_MS, inputs},
     store::{Config, config, configs},
     types::{Error, Result, now},
@@ -13,14 +12,13 @@ use ccpd::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, sync::Mutex};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 pub struct Jobs {
     active: Mutex<HashMap<i64, Uuid>>,
     slots: Semaphore,
-    curl: Option<PathBuf>,
 }
 impl Jobs {
     // Called under the store transaction: a superseded fetch cannot restore the old observation.
@@ -33,7 +31,6 @@ impl Jobs {
         Self {
             active: Mutex::default(),
             slots: Semaphore::new(2),
-            curl: executable("curl"),
         }
     }
 }
@@ -178,9 +175,7 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                     && a.quotas.active.lock().unwrap().get(&id) == Some(&ticket))
             };
             if run().unwrap_or(false) {
-                let result =
-                    quota::fetch(&c, a.build(&c.tool), a.quotas.curl.as_deref(), &a.state_dir)
-                        .await;
+                let result = quota::fetch(&c, a.build(&c.tool), &a.state_dir).await;
                 let a2 = a.clone();
                 let saved = blocking(move || a2.store.write(|db| {
                     if a2.quotas.active.lock().unwrap().get(&id) != Some(&ticket) {
@@ -191,15 +186,19 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                         Ok(v) => ("fresh", 0, ms + 30000, Some(ms), Some(v.to_string())),
                         Err(e) => {
                             let fails = prior.as_ref().filter(|q| q.stamp==stamp || q.status=="rate_limited").map_or(1, |q| q.fails.max(0).saturating_add(1));
-                            let delay = (30000_i64 << (fails-1).min(6)).max(e.retry_after_ms.unwrap_or(0));
+                            let delay = 30000_i64 << (fails-1).min(6);
+                            let status = match e.1 {
+                                "sign_in_required" | "rate_limited" => e.1,
+                                _ => "unavailable",
+                            };
                             let last = prior.filter(|q| q.stamp == stamp);
-                            (e.status, fails, ms.saturating_add(delay), last.as_ref().and_then(|q| q.success), last.and_then(|q| q.snapshot))
+                            (status, fails, ms.saturating_add(delay), last.as_ref().and_then(|q| q.success), last.and_then(|q| q.snapshot))
                         }
                     };
-                    // Discard numbers if inputs changed in flight, not a provider's Retry-After.
+                    // Never publish an observation across a profile or credential change.
                     let (status, success, snapshot) = if inputs(&config(db, id)?).as_ref() == Some(&stamp) {
                         (status, success, snapshot)
-                    } else if c.tool == "agy" {
+                    } else if c.tool != "codex" {
                         return Ok(());
                     } else {
                         (if status=="fresh" { "unavailable" } else { status }, None, None)

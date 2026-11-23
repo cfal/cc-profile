@@ -613,7 +613,7 @@ function quotaDetails(q, tool) {
     q.stale && q.status !== "fresh" && (quotaStates[q.status] || "Unavailable"),
     s && tool === "agy" && "Model-pool limits",
     s?.plan,
-    q.success_ms && "Last checked " + fmt(q.success_ms),
+    q.success_ms && (tool === "claude" ? "CLI checked " : "Last checked ") + fmt(q.success_ms),
     !q.loading && q.status !== "fresh" && q.retry_ms > Date.now() && "Retry after " + new Date(q.retry_ms).toLocaleTimeString(),
   ].filter(Boolean).join(" · ")));
   for (const w of s?.windows || []) {

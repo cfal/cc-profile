@@ -1,20 +1,17 @@
 mod agy_usage;
+mod claude_usage;
 
 use crate::{
-    native::{Build, PROXIES, clean_command, stamp},
-    paths, rpc,
+    native::{Build, PROXIES, stamp},
+    rpc,
     store::Config,
-    types::{Error, Result, now},
+    types::{Error, Result},
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{path::Path, process::Stdio, time::Duration};
-use time::{
-    OffsetDateTime,
-    format_description::well_known::{Rfc2822, Rfc3339},
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::{path::Path, time::Duration};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub const FRESH_MS: i64 = 300_000;
 
@@ -31,7 +28,11 @@ fn input_stamp(c: &Config, auth: &str) -> (String, bool) {
     let inherited = (c.mode == "inherit").then(|| PROXIES.map(|k| std::env::var(k).ok()));
     // Older normalizers collapsed malformed reset timestamps into trustworthy-looking nulls.
     let mut fields = json!([
-        "quota-v2",
+        if c.tool == "claude" {
+            "claude-get-usage-v1"
+        } else {
+            "quota-v2"
+        },
         c.dev,
         c.ino,
         auth,
@@ -119,8 +120,9 @@ fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
 
 // Only called for present profiles. Cache failures or unidentifiable logins cannot deny a launch.
 pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
-    if c.tool == "agy" {
-        return None; // A model pool, even an exhausted one, is not an account-wide allowance.
+    if c.tool != "codex" {
+        // Claude can return undated cached usage; Antigravity reports model pools only.
+        return None;
     }
     let (stamp, snapshot): (String, String) = db
         .prepare_cached(
@@ -136,7 +138,7 @@ pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
         return None;
     }
     let snapshot: Value = serde_json::from_str(&snapshot).ok()?;
-    if c.tool == "codex" && snapshot["file_auth_verified"] != true {
+    if snapshot["file_auth_verified"] != true {
         return None;
     }
     remaining(&snapshot, ms)
@@ -174,7 +176,23 @@ fn length(min: Option<i64>) -> String {
         _ => "window".into(),
     }
 }
-pub fn claude_snapshot(v: &Value) -> Result<Value> {
+fn claude_window(w: &Value, kind: &str, label: String) -> Option<Value> {
+    let p = used_percent(&w["utilization"])?;
+    let reset = match &w["resets_at"] {
+        Value::Null => None,
+        v => Some(
+            i64::try_from(
+                OffsetDateTime::parse(v.as_str()?, &Rfc3339)
+                    .ok()?
+                    .unix_timestamp_nanos()
+                    / 1_000_000,
+            )
+            .ok()?,
+        ),
+    };
+    Some(json!({"kind":kind,"label":label,"used_pct":p,"reset_at_ms":reset}))
+}
+fn claude_snapshot(v: &Value) -> Result<Value> {
     let fields = v.as_object().ok_or_else(unavailable)?;
     let mut windows = Vec::new();
     for (k, w) in fields {
@@ -189,21 +207,16 @@ pub fn claude_snapshot(v: &Value) -> Result<Value> {
             }
             _ => continue,
         };
-        let Some(p) = used_percent(&w["utilization"]) else {
-            continue;
-        };
-        let reset = w["resets_at"]
-            .as_str()
-            .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
-            .and_then(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).ok());
-        if !w["resets_at"].is_null() && reset.is_none() {
-            continue;
-        }
-        windows.push(json!({"kind":kind,"label":label,"used_pct":p,"reset_at_ms":reset}));
+        windows.extend(claude_window(w, kind, label));
     }
-    Ok(
-        json!({"plan":display(&v["plan_type"]),"windows":windows,"credits":null,"spend_control":null}),
-    )
+    if let Some(scoped) = v["model_scoped"].as_array() {
+        for w in scoped.iter().take(64) {
+            if let Some(name) = display(&w["display_name"]).filter(|s| !s.trim().is_empty()) {
+                windows.extend(claude_window(w, "model", format!("7d {name}")));
+            }
+        }
+    }
+    Ok(json!({"windows":windows,"credits":null,"spend_control":null}))
 }
 pub fn codex_snapshot(v: &Value) -> Result<Value> {
     let mut buckets = Vec::new();
@@ -272,124 +285,12 @@ pub fn codex_snapshot(v: &Value) -> Result<Value> {
         json!({"plan":plan,"windows":windows,"credits":credits,"spend_control":spend,"earned_resets":resets}),
     )
 }
-pub struct FetchError {
-    pub status: &'static str,
-    pub retry_after_ms: Option<i64>,
-}
-impl From<Error> for FetchError {
-    fn from(e: Error) -> Self {
-        Self {
-            status: match e.1 {
-                "sign_in_required" => "sign_in_required",
-                "rate_limited" => "rate_limited",
-                _ => "unavailable",
-            },
-            retry_after_ms: None,
-        }
-    }
-}
-type Fetch = std::result::Result<Value, FetchError>;
-fn curl_string(s: &str) -> Result<String> {
-    if s.chars().any(char::is_control) {
+pub async fn fetch(c: &Config, build: &Build, cwd: &Path) -> Result<Value> {
+    if !c.present() {
         return Err(unavailable());
     }
-    Ok(format!(
-        "\"{}\"",
-        s.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
-}
-async fn claude(c: &Config, curl: &Path, cwd: &Path) -> Fetch {
-    let cred = c.home.join(".credentials.json");
-    if !cred.symlink_metadata().is_ok_and(|m| m.is_file()) {
-        return Err(signin().into());
-    }
-    let v: Value =
-        serde_json::from_slice(&paths::read_limited(&cred, 1 << 20)?).map_err(|_| signin())?;
-    let oauth = &v["claudeAiOauth"];
-    let token = oauth["accessToken"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(signin)?;
-    if oauth["expiresAt"].as_i64().is_some_and(|t| t <= now()) {
-        return Err(signin().into());
-    }
-    let opts = format!(
-        "url = \"https://api.anthropic.com/api/oauth/usage\"\nheader = {}\nheader = \"Accept: application/json\"\nheader = \"anthropic-beta: oauth-2025-04-20\"\nuser-agent = \"cc-profile/{}\"\n",
-        curl_string(&format!("Authorization: Bearer {token}"))?,
-        env!("CARGO_PKG_VERSION")
-    );
-    let mut child = clean_command(curl, cwd, Some(c))
-        .args([
-            "-q",
-            "--silent",
-            "--proto",
-            "=https",
-            "--connect-timeout",
-            "3",
-            "--max-time",
-            "8",
-            "--max-filesize",
-            "262144",
-            "--config",
-            "-",
-            "--write-out",
-            "\n%{response_code}\n%header{retry-after}",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|_| unavailable())?;
-    let mut input = child.stdin.take().unwrap();
-    let output = child.stdout.take().unwrap();
-    let res = tokio::time::timeout(Duration::from_secs(10), async {
-        input.write_all(opts.as_bytes()).await?;
-        drop(input);
-        let mut bytes = Vec::new();
-        output.take(262657).read_to_end(&mut bytes).await?;
-        if bytes.len() > 262656 || !child.wait().await?.success() {
-            return Err(unavailable());
-        }
-        Ok(bytes)
-    })
-    .await
-    .unwrap_or_else(|_| Err(unavailable()));
-    if res.is_err() {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-    }
-    let bytes = res?;
-    let mut parts = bytes.rsplitn(3, |b| *b == b'\n');
-    let retry = std::str::from_utf8(parts.next().unwrap_or_default())
-        .unwrap_or("")
-        .trim();
-    match parts.next() {
-        Some(b"200") => {
-            let body = serde_json::from_slice(parts.next().unwrap_or_default())
-                .map_err(|_| unavailable())?;
-            Ok(claude_snapshot(&body)?)
-        }
-        Some(b"401") => Err(signin().into()),
-        Some(b"429") => Err(FetchError {
-            status: "rate_limited",
-            retry_after_ms: retry
-                .parse::<i64>()
-                .ok()
-                .and_then(|s| s.checked_mul(1000))
-                .or_else(|| {
-                    OffsetDateTime::parse(retry, &Rfc2822)
-                        .ok()
-                        .map(|t| t.unix_timestamp() * 1000 - now())
-                }),
-        }),
-        _ => Err(unavailable().into()),
-    }
-}
-pub async fn fetch(c: &Config, build: &Build, curl: Option<&Path>, cwd: &Path) -> Fetch {
-    if !c.present() {
-        return Err(unavailable().into());
-    }
     if c.tool == "agy" {
-        return Ok(agy_usage::fetch(c, build).await?);
+        return agy_usage::fetch(c, build).await;
     }
     if c.tool == "codex" {
         let (mut client, quota) = tokio::time::timeout(Duration::from_secs(12), async {
@@ -420,7 +321,7 @@ pub async fn fetch(c: &Config, build: &Build, curl: Option<&Path>, cwd: &Path) -
         snapshot["file_auth_verified"] = bound.into();
         Ok(snapshot)
     } else {
-        claude(c, curl.ok_or_else(unavailable)?, cwd).await
+        claude_usage::fetch(c, build, cwd).await
     }
 }
 #[cfg(test)]
