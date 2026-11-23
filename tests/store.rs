@@ -4,6 +4,61 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn v16_allows_native_agy_list_evidence_without_inventing_a_launch() {
+    let f = Fixture::new();
+    use std::os::unix::fs::DirBuilderExt;
+    let home = f.root.join("agy-list");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let agy = f
+        .store
+        .register(&json!({"tool":"agy","label":"listed","home":home}))
+        .unwrap();
+    let codex = f.add("codex", "other");
+    {
+        let db = f.store.db().unwrap();
+        db.execute_batch(include_str!("../src/rollout_sessions.sql"))
+            .unwrap();
+        db.execute(
+            "INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
+            VALUES('agy','old',?,'observed','/old',1,2)",
+            [agy.id],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE sqlite_sequence SET seq=70 WHERE name='sessions'",
+            [],
+        )
+        .unwrap();
+    }
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    let db = upgraded.db().unwrap();
+    let add = "INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms) VALUES(?,'found',?,'acp_listed','/listed',3)";
+    assert!(
+        db.execute(add, rusqlite::params!["codex", codex.id])
+            .is_err()
+    );
+    db.execute(add, rusqlite::params!["agy", agy.id]).unwrap();
+    assert_eq!(db.last_insert_rowid(), 71);
+    assert!(
+        db.prepare("SELECT 1 FROM sessions WHERE native_id='found' AND last_routed_ms IS NULL")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    assert!(db.prepare("SELECT 1 FROM sessions WHERE native_id='old' AND last_routed_ms=2 AND evidence='observed'").unwrap().exists([]).unwrap());
+    assert!(db.execute("UPDATE sessions SET owner=owner", []).is_err());
+    assert!(
+        !db.prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+}
+
+#[test]
 fn v15_keeps_protocol_history_and_retires_old_codex_tickets() {
     use ccpd::rollout::{Owner, probe};
     let f = Fixture::new();

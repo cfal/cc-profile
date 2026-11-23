@@ -14,6 +14,11 @@ from contextlib import closing
 
 import test_service as svc
 
+INIT = {"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},
+        "clientInfo":{"name":"fixture","version":"1"},"_meta":{"test":"client-specific"}}}
+INITIALIZED = {"jsonrpc":"2.0","method":"notifications/initialized"}
+PRELUDE = json.dumps(INIT)+"\n"+json.dumps(INITIALIZED)+"\n"
+
 
 class Antigravity(unittest.TestCase):
     def setUp(self):
@@ -33,10 +38,12 @@ class Antigravity(unittest.TestCase):
 
     def bridge(self, args, *calls):
         wire = "".join(json.dumps({"jsonrpc":"2.0","id":n,"method":m,"params":p})+"\n" for n,m,p in calls)
-        result = subprocess.run([svc.LAUNCHER,"agy","acp",*args],input=wire,text=True,capture_output=True,
+        result = subprocess.run([svc.LAUNCHER,"agy","acp",*args],input=PRELUDE+wire,text=True,capture_output=True,
                                 cwd=self.s.root,env=self.s.env,timeout=8)
         self.assertEqual(result.returncode,0,result.stderr)
-        return [json.loads(line) for line in result.stdout.splitlines()]
+        init, *replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual((init["id"],init["result"]["authMethods"]), ("init",[]))
+        return replies
 
     def test_disabled_named_login_status_and_native_usage(self):
         c = self.profile("work", enable=False)
@@ -63,7 +70,7 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
         self.assertFalse(Path(obs["runtime"]).exists())
         self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
-        self.assertEqual(self.s.cli("agy","acp").returncode,1)
+        self.assertEqual(self.s.cli("agy","acp").returncode,0)  # EOF before selecting a profile.
 
     def test_native_tui_selects_a_profile_without_claiming_a_session(self):
         a = self.profile("first")
@@ -132,6 +139,7 @@ class Antigravity(unittest.TestCase):
         alias.symlink_to(svc.LAUNCHER)
         self.s.env["PATH"] = str(alias.parent) + ":" + self.s.env["PATH"]
         for args, wire, expected in [([], "", "fixture Antigravity TUI"),
+                (["acp"], PRELUDE, '"protocolVersion"'),
                 (["acp"], '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n', '"protocolVersion"')]:
             result = subprocess.run(["agy", *args], input=wire, text=True, capture_output=True,
                                     env=self.s.env, cwd=self.s.root, timeout=8)
@@ -341,6 +349,7 @@ class Antigravity(unittest.TestCase):
                 self.s.start()
                 self.s.session = self.s.api("POST","login", {"password":self.s.password})[1]["session"]
             self.assertNotEqual(self.s.cli("agy").returncode, 0)
+            self.assertNotEqual(self.s.cli("agy","acp").returncode,0)
             time.sleep(1.3)  # Includes a topology refresh with the conversation directory present.
             self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"], [])
 
@@ -500,19 +509,145 @@ class Antigravity(unittest.TestCase):
         rows=self.s.api("GET","sessions?tool=agy")[1]["items"]
         self.assertEqual({(r["native_id"],r["workspace"],r["config_id"]) for r in rows},
                          {(first,"/one",a["id"]),("CaseSensitive","/two",a["id"])})
-        wrong=self.bridge([], (1,"session/load",{"sessionId":first}), (2,"session/resume",{"sessionId":"unknown"}),
-                          (3,"session/new",new("owned-by-b","/work")))
-        self.assertTrue(all("error" in r for r in wrong[:2]))
-        self.assertEqual((Path(b["home"])/"calls").read_text().splitlines(),["session/new"])
+        for method in ("session/load","session/resume"):
+            restored, = self.bridge([], (1,method,{"sessionId":first}))
+            self.assertEqual(restored["result"]["home"],a["home"])
+            self.assertFalse((Path(b["home"])/"calls").exists())
+        opened, wrong = sorted(self.bridge([], (1,"session/new",new("owned-by-b","/work")),
+                                   (2,"session/resume",{"sessionId":first})),key=lambda r:r["id"])
+        self.assertEqual(opened["result"]["sessionId"],"owned-by-b")
+        self.assertIn("error",wrong)
+        self.assertEqual((Path(b["home"])/"calls").read_text().splitlines(),["initialize","session/new"])
         result=self.bridge(["--for-session",first], (1,"session/load",{"sessionId":first}),
                            (2,"session/resume",{"sessionId":"CaseSensitive"}))
         self.assertEqual([r["result"]["home"] for r in result], [a["home"]]*2)
         self.assertNotEqual(self.s.cli("agy","acp","--for-session","unknown").returncode,0)
         self.s.api("PATCH",f"accounts/{a['id']}",{"revision":a["revision"],"enabled":False})
         self.assertNotEqual(self.s.cli("agy","acp","--for-session",first).returncode,0)
+        refused, = self.bridge([], (1,"session/resume",{"sessionId":first}))
+        self.assertIn("disabled",refused["error"]["message"])
         self.assertNotEqual(self.s.cli("agy","acp","--gemini-dir","/other").returncode,0)
         self.s.env["AGY_ADC_AUTH"]="true"
         self.assertIn("AGY_ADC_AUTH",self.s.cli("agy","acp").stderr)
+
+    def test_unbound_browse_aggregates_pages_without_routing_and_restores_listed_owner(self):
+        a,b,off = self.profile("a"),self.profile("b"),self.profile("disabled",False)
+        ha,hb = Path(a["home"]), Path(b["home"])
+        row = lambda sid,cwd: {"sessionId":sid,"cwd":cwd,"title":"only for browse","_meta":{"private":1}}
+        (ha/"browse-pages").write_text(json.dumps({"":{"sessions":[row("a1","/other")],"nextCursor":"native/A"},
+            "native/A":{"sessions":[row("a2","/work")]}}))
+        (hb/"browse-pages").write_text(json.dumps({"":{"sessions":[row("b1","/work")]}}))
+        bad, filtered, all_rows = self.bridge([], (1,"session/list",{"cursor":"foreign"}),
+            (2,"session/list",{"cwd":"/work"}),(3,"session/list",{}))
+        self.assertIn("error",bad)
+        self.assertEqual([r["sessionId"] for r in filtered["result"]["sessions"]],["a2","b1"])
+        self.assertEqual([r["sessionId"] for r in all_rows["result"]["sessions"]],["a1","a2","b1"])
+        self.assertNotIn("_meta",str(all_rows))
+        self.assertFalse((Path(off["home"])/"last-run").exists())
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"],[])
+        mappings=self.s.api("GET","sessions?tool=agy")[1]["items"]
+        self.assertEqual({(r["evidence"],r["last_routed_ms"]) for r in mappings},{("acp_listed",None)})
+        self.assertNotIn("only for browse",str(mappings))
+        for home,expected in [(ha,["initialize","session/list","session/list"]*2),
+                              (hb,["initialize","session/list"]*2)]:
+            self.assertEqual((home/"calls").read_text().splitlines(),expected)
+            seen=json.loads((home/"last-run").read_text())
+            self.assertEqual(seen["proxy"],["https://proxy.invalid:8443/"]*4)
+            self.assertFalse(Path(seen["runtime"]).exists())
+        restored, = self.bridge([], (1,"session/resume",{"sessionId":"b1","cwd":"/work"}))
+        self.assertEqual(restored["result"]["home"],b["home"])
+        self.assertEqual([json.loads(s) for s in (hb/"acp-wire").read_text().splitlines()][-3:-1],[INIT,INITIALIZED])
+        browse, selected = self.bridge([], (1,"session/list",{}),(2,"session/load",{"sessionId":"b1","cwd":"/work"}))
+        self.assertIn("sessions",browse["result"])
+        self.assertEqual(selected["result"]["home"],b["home"])
+        self.assertNotIn("session/load",(ha/"calls").read_text())
+        self.bridge([], (1,"session/new",{"fixtureId":"next","cwd":"/work"}))
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"],a["id"])
+
+    def test_unbound_browse_is_atomic_on_duplicate_failure_and_profile_change(self):
+        a,b=self.profile("a"),self.profile("b")
+        ha,hb=Path(a["home"]),Path(b["home"])
+        one={"sessions":[{"sessionId":"first","cwd":"/a"}]}
+        (ha/"browse-pages").write_text(json.dumps({"":one}))
+        browse=lambda: self.bridge([], (1,"session/list",{}))[0]
+        for pages in ({"":one},{"":{"sessions":[],"nextCursor":"loop"},"loop":{"sessions":[],"nextCursor":"loop"}},
+                      {"":{"sessions":"private fixture detail"}},
+                      {"":{"sessions":[{"sessionId":"large","cwd":"/b","title":"x"*(401*1024)}]}}):
+            (hb/"browse-pages").write_text(json.dumps(pages))
+            reply=browse()
+            self.assertIn("error",reply)
+            self.assertNotIn("private fixture",str(reply))
+            self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+        (hb/"browse-pages").unlink()
+        (hb/"hold-list").touch()
+        (hb/"acp-wire").unlink()
+        with ThreadPoolExecutor(1) as pool:
+            job=pool.submit(browse)
+            try:
+                deadline=time.monotonic()+5
+                while not (hb/"acp-wire").exists() or "session/list" not in (hb/"acp-wire").read_text():
+                    self.assertLess(time.monotonic(),deadline)
+                    time.sleep(.03)
+                self.assertIn("Another AgY browse",browse()["error"]["message"])
+                self.assertEqual(self.s.api("PATCH",f"accounts/{a['id']}",{"enabled":False,"revision":a["revision"]})[0],200)
+            finally:
+                (hb/"hold-list").unlink()
+            self.assertIn("error",job.result())
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+        self.assertFalse(list((self.s.root/"run/cc-profile").glob("agy-*")))
+
+    def test_list_conflicting_historical_owner_rolls_back_earlier_rows(self):
+        a,b=self.profile("a"),self.profile("b")
+        self.bridge([], (1,"session/new",{"fixtureId":"old","cwd":"/work"}))
+        (Path(b["home"])/"browse-pages").write_text(json.dumps({"":{"sessions":[
+            {"sessionId":"before-conflict","cwd":"/new"},{"sessionId":"old","cwd":"/new"}]}}))
+        refused, = self.bridge([], (2,"session/list",{}))
+        self.assertIn("recorded owner",refused["error"]["message"])
+        rows=self.s.api("GET","sessions?tool=agy")[1]["items"]
+        self.assertEqual([(r["native_id"],r["config_id"],r["workspace"]) for r in rows],[("old",a["id"],"/work")])
+
+    def test_slow_browse_does_not_block_restore_or_leave_workers(self):
+        a,b=self.profile("a"),self.profile("b")
+        self.bridge([], (1,"session/new",{"fixtureId":"known","cwd":"/work"}))
+        home=Path(b["home"])
+        (home/"hold-list").touch()
+        wire=PRELUDE+json.dumps({"jsonrpc":"2.0","id":"browse","method":"session/list","params":{}})+"\n"
+        with subprocess.Popen([svc.LAUNCHER,"agy","acp"],cwd=self.s.root,env=self.s.env,
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) as p:
+            try:
+                p.stdin.write(wire)
+                p.stdin.flush()
+                deadline=time.monotonic()+5
+                while not (home/"acp-wire").exists() or "session/list" not in (home/"acp-wire").read_text():
+                    self.assertLess(time.monotonic(),deadline)
+                    time.sleep(.03)
+                restored,=self.bridge([], (1,"session/load",{"sessionId":"known"}))
+                self.assertEqual(restored["result"]["home"],a["home"])
+                output,err=p.communicate(timeout=12)
+                self.assertEqual(p.returncode,0,err)
+                self.assertIn("No partial list",json.loads(output.splitlines()[-1])["error"]["message"])
+            finally:
+                (home/"hold-list").unlink()
+                if p.poll() is None: p.kill()
+        self.assertFalse(list((self.s.root/"run/cc-profile").glob("agy-*")))
+
+    def test_lazy_protocol_failures_do_not_send_a_session_or_guess_an_owner(self):
+        a,b=self.profile("a"),self.profile("b")
+        denied=self.bridge([], (1,"session/prompt",{}), (2,"initialize",INIT["params"]),
+            (3,"session/resume",{"sessionId":"unknown"}),(4,"session/new",{"cwd":"relative"}))
+        self.assertTrue(all("error" in r for r in denied))
+        for c in (a,b): self.assertFalse((Path(c["home"])/"last-run").exists())
+        (Path(a["home"])/"incompatible-acp").touch()
+        first=json.dumps({"jsonrpc":"2.0","id":"open","method":"session/new","params":{"cwd":"/work"}})
+        p=subprocess.run([svc.LAUNCHER,"agy","acp"],input=PRELUDE+first+"\n",capture_output=True,
+                         text=True,env=self.s.env,cwd=self.s.root,timeout=8)
+        self.assertNotEqual(p.returncode,0)
+        init,error=map(json.loads,p.stdout.splitlines())
+        self.assertEqual((init["id"],error["id"]),("init","open"))
+        self.assertIn("handshake",error["error"]["message"])
+        self.assertEqual((Path(a["home"])/"calls").read_text().splitlines(),["initialize"])
+        self.assertFalse((Path(b["home"])/"calls").exists())
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
 
     def test_private_profile_checks_apply_to_registration_and_existing_profiles(self):
         external = self.s.root/"external"
@@ -547,16 +682,19 @@ class Antigravity(unittest.TestCase):
                 self.assertTrue(select.select([child.stdout],[],[],5)[0], "Missing ACP response")
                 return json.loads(child.stdout.readline())
             try:
-                self.assertEqual(call(1,"initialize",{})["result"]["authMethods"],[])
+                self.assertEqual(call(1,"initialize",INIT["params"])["result"]["authMethods"],[])
                 self.assertIn("ccp login",call(2,"authenticate",{"methodId":"terminal-login"})["error"]["message"])
+                self.assertFalse((Path(c["home"])/"calls").exists())
+                self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"],[])
+                self.assertEqual(call("bind","session/new",{"fixtureId":"first","cwd":"/work"})["result"]["sessionId"],"first")
                 self.s.api("PATCH",f"accounts/{c['id']}",{"revision":c["revision"],"enabled":False})
                 self.assertIn("error",call(3,"session/new",{"fixtureId":"refused","cwd":"/work"}))
                 child.stdin.close()
                 self.assertEqual(child.wait(timeout=5),0)
             finally:
                 if child.poll() is None: child.kill()
-        self.assertEqual((Path(c["home"])/"calls").read_text().splitlines(),["initialize"])
-        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+        self.assertEqual((Path(c["home"])/"calls").read_text().splitlines(),["initialize","session/new"])
+        self.assertEqual([r["native_id"] for r in self.s.api("GET","sessions?tool=agy")[1]["items"]],["first"])
 
     def test_acp_priority_pins_connection_and_native_reports_remain_unranked(self):
         a,b = self.profile("a"),self.profile("b")
@@ -596,9 +734,9 @@ class Antigravity(unittest.TestCase):
         invalid = json.dumps({"jsonrpc":"2.0","id":1,"method":"session/new",
                               "params":dict(args,fixtureId="not-bound",invalidReply=True)})+"\n"
         for wire in (data, "not json\n", data.replace("already-bound", "x" * (8 << 20)), invalid):
-            result = subprocess.run([svc.LAUNCHER,"agy","acp"],input=wire,cwd=self.s.root,env=self.s.env,
+            result = subprocess.run([svc.LAUNCHER,"agy","acp"],input=PRELUDE+wire,cwd=self.s.root,env=self.s.env,
                                     capture_output=True,text=True,timeout=8)
             self.assertNotEqual(result.returncode,0)
-            self.assertEqual(result.stdout,"")
+            self.assertEqual([json.loads(line)["id"] for line in result.stdout.splitlines()],["init"])
         rows = self.s.api("GET","sessions?tool=agy")[1]["items"]
         self.assertEqual([(r["native_id"],r["config_id"]) for r in rows],[("already-bound",a["id"])])

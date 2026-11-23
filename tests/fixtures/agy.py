@@ -82,11 +82,23 @@ if "--login" in args:
 held = None
 for line in sys.stdin:
     r = json.loads(line)
+    with (home/"acp-wire").open("a") as f:
+        print(json.dumps(r), file=f)
     if "method" not in r or "id" not in r:
         continue
     params = r.get("params", {})
     if r["method"] == "initialize":
-        result = {"protocolVersion": 1, "authMethods": [{"id": "terminal-login"}]}
+        result = {"protocolVersion": 1, "agentInfo":{"name":"fixture","version":"1.5.14"},
+                  "agentCapabilities":{"loadSession":True,"sessionCapabilities":{"resume":{},"list":{},"close":{}},
+                  "promptCapabilities":{"image":True,"embeddedContext":True}}, "authMethods": [{"id": "terminal-login"}]}
+        if (home/"incompatible-acp").exists():
+            del result["agentCapabilities"]["sessionCapabilities"]["resume"]
+    elif r["method"] == "session/list":
+        from time import sleep
+        while (home/"hold-list").exists():
+            sleep(.01)
+        pages = home/"browse-pages"
+        result = (json.loads(pages.read_text())[params.get("cursor","")] if pages.exists() else {"sessions":[]})
     elif r["method"] == "session/new":
         result = {"sessionId":params["fixtureId"]}
     else:

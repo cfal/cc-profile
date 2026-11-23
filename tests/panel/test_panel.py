@@ -278,7 +278,14 @@ class Panel(unittest.TestCase):
                            "VALUES('agy',?,?,'saved_file',5,5)",(discovered,c["id"]))
                 db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms,saved_file_seen_ms) "
                            "VALUES('agy',?,?,'observed','/acp known',6,6,7)",(discovered_after_acp,c["id"]))
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms) "
+                           "VALUES('agy','catalog-only',?,'acp_listed','/from catalog',8)",(c["id"],))
             page.get_by_role("navigation").get_by_text("Sessions").click()
+            listed = page.get_by_role("row").filter(has_text="Listed by ACP")
+            expect(listed).to_contain_text("Not routed")
+            listed.get_by_role("button",name="Copy resume command").click()
+            self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
+                             ["cd","/from catalog","&&","ccp","agy","acp","--for-session","catalog-only"])
             expect(page.get_by_role("button",name=sid,exact=True)).to_be_visible()
             page.get_by_role("row").filter(has_text="/my workspace").get_by_role("button",name="Copy resume command").click()
             self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
@@ -291,11 +298,11 @@ class Panel(unittest.TestCase):
                                 ("Copy terminal resume command",["/dual tui","&&","ccp","agy","--conversation="+both_id])]:
                 both.get_by_role("button",name=label).click()
                 self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),["cd",*args])
-            for needle, label, native in [("Not routed","Copy resume command",discovered),
+            for needle, label, native in [("Unknown","Copy resume command",discovered),
                                           ("/acp known","Copy terminal resume command",discovered_after_acp)]:
                 row = page.get_by_role("row").filter(has_text=needle)
                 if native == discovered:
-                    expect(row).to_contain_text("Unknown")
+                    expect(row).to_contain_text("Not routed")
                 row.get_by_role("button", name=label).click()
                 self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
                                  ["ccp","agy","--conversation="+native])

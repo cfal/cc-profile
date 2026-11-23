@@ -21,7 +21,9 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-const FRAME: usize = 8 << 20;
+use agy::acp::{self as wire, FRAME};
+#[path = "acp/lazy.rs"]
+pub(super) mod lazy;
 enum Reply {
     Initialize,
     NewSession(String),
@@ -65,13 +67,17 @@ async fn emit(out: &Out, bytes: &[u8]) -> Result<()> {
     out.flush().await?;
     Ok(())
 }
-async fn reject(out: &Out, id: &Value, message: &str) -> Result<()> {
-    let mut bytes = serde_json::to_vec(
-        &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,"message":message}}),
-    )
-    .map_err(|_| bad())?;
+async fn send(out: &Out, v: Value) -> Result<()> {
+    let mut bytes = serde_json::to_vec(&v).map_err(|_| bad())?;
     bytes.push(b'\n');
     emit(out, &bytes).await
+}
+async fn reject(out: &Out, id: &Value, message: &str) -> Result<()> {
+    send(
+        out,
+        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,"message":message}}),
+    )
+    .await
 }
 async fn record(req: &Request, event: &str, session: &str, workspace: Option<&str>) -> Result<()> {
     let data=json!({"request_id":req.request_id,"ticket":req.ticket,"source":"acp","event":event,"native_id":session,"workspace":workspace}).to_string();
@@ -87,7 +93,8 @@ async fn record(req: &Request, event: &str, session: &str, workspace: Option<&st
 }
 
 // A blocking terminal read must not keep the Tokio runtime alive after the agent exits.
-fn incoming() -> Result<mpsc::Receiver<io::Result<Vec<u8>>>> {
+type Incoming = mpsc::Receiver<io::Result<Vec<u8>>>;
+fn incoming() -> Result<Incoming> {
     let (tx, rx) = mpsc::channel(1);
     std::thread::Builder::new()
         .name("acp-stdin".into())
@@ -119,10 +126,18 @@ async fn input(
     pending: &Pending,
     out: &Out,
     mut pipe: tokio::process::ChildStdin,
+    mut rx: Incoming,
+    mut first: Option<Vec<u8>>,
 ) -> Result<()> {
-    let mut rx = incoming()?;
-    while let Some(bytes) = rx.recv().await {
-        let bytes = bytes?;
+    let initialized = first.is_some();
+    loop {
+        let bytes = match first.take() {
+            Some(bytes) => bytes,
+            None => match rx.recv().await {
+                Some(bytes) => bytes?,
+                None => break,
+            },
+        };
         let v = parse(&bytes)?;
         if let Some(method) = v["method"].as_str() {
             let id = &v["id"];
@@ -133,17 +148,17 @@ async fn input(
             match method {
                 "initialize" => {
                     key(id)?;
+                    if initialized {
+                        reject(out, id, "This ACP connection is already initialized.").await?;
+                        continue;
+                    }
                     reply = Reply::Initialize;
                 }
                 "session/new" => {
                     key(id)?;
                     let ws = v["params"]["cwd"]
                         .as_str()
-                        .filter(|s| {
-                            Path::new(s).is_absolute()
-                                && s.len() <= 4096
-                                && !s.chars().any(char::is_control)
-                        })
+                        .filter(|s| wire::workspace(s))
                         .ok_or_else(bad)?;
                     if record(req, "admit_new", "", None).await.is_err() {
                         reject(out, id, "This profile is unavailable for new sessions.").await?;
@@ -157,7 +172,7 @@ async fn input(
                     if agy::session_id(session).is_err()
                         || record(req, method, session, None).await.is_err()
                     {
-                        reject(out,id,"Unknown, unavailable, or different profile owns this session. Start an owner-pinned connection.").await?;
+                        reject(out,id,"Unknown, unavailable, or different profile owns this session. Open a fresh ACP connection to resume.").await?;
                         continue;
                     }
                 }
@@ -166,7 +181,7 @@ async fn input(
                     reject(out, id, "Managed ACP does not support forks.").await?;
                     continue;
                 }
-                "authenticate" => {
+                "authenticate" | "auth/logout" | "logout" => {
                     key(id)?;
                     reject(
                         out,
@@ -195,9 +210,8 @@ async fn output(
     req: &Request,
     pending: &Pending,
     out: &Out,
-    pipe: tokio::process::ChildStdout,
+    mut reader: BufReader<tokio::process::ChildStdout>,
 ) -> Result<()> {
-    let mut reader = BufReader::new(pipe);
     let mut bytes = Vec::new();
     loop {
         bytes.clear();
@@ -279,6 +293,7 @@ pub(super) async fn run(
     req: &Request,
     plan: &Plan,
     managed: Option<&Invocation>,
+    mut binding: Option<&mut lazy::Binding>,
 ) -> Result<ExitCode> {
     let saved = agy::has_login(home)?;
     if let Some(id) = managed.and_then(Invocation::agy_conversation)
@@ -350,8 +365,27 @@ pub(super) async fn run(
         if bridge {
             let pending = Pending::default();
             let out = Out::new(tokio::io::stdout());
-            let input = input(req, &pending, &out, child.stdin.take().unwrap());
-            let output = output(req, &pending, &out, child.stdout.take().unwrap());
+            let mut stdin = child.stdin.take().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            let (rx, first) = if let Some(b) = binding.as_mut() {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    wire::exchange(&mut stdin, &mut stdout, &b.init),
+                )
+                .await
+                .map_err(|_| {
+                    Error::unavailable("acp_timeout", "AgY initialization timed out.")
+                })??;
+                wire::check_initialize(&result)?;
+                if let Some(n) = &b.notification {
+                    wire::write(&mut stdin, n).await?;
+                }
+                (b.rx.take().unwrap(), b.first.take())
+            } else {
+                (incoming()?, None)
+            };
+            let input = input(req, &pending, &out, stdin, rx, first);
+            let output = output(req, &pending, &out, stdout);
             tokio::pin!(output);
             tokio::select! {
                 r=input=>{r?;output.await?;}

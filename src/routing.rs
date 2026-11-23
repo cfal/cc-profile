@@ -621,7 +621,7 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
                 match existing {
                     None => insert_binding(db, "agy", id, owner, ws, "observed", now()),
                     Some((n, evidence)) if n == owner => {
-                        if evidence == "saved_file" {
+                        if evidence == "saved_file" || evidence == "acp_listed" {
                             db.execute("UPDATE sessions SET evidence='observed',workspace=?,last_routed_ms=? WHERE tool='agy' AND native_id=?",
                                 params![ws,now(),id])?;
                         }
@@ -635,7 +635,7 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
             }
             "session/load" | "session/resume" => {
                 let c = config(db, owner)?;
-                if !existing.is_some_and(|(n,e)| n == owner && e == "observed") || !c.enabled || !c.present() {
+                if !existing.is_some_and(|(n,e)| n == owner && matches!(e.as_str(),"observed"|"acp_listed")) || !c.enabled || !c.present() {
                     return Err(Error::denied());
                 }
                 db.execute(

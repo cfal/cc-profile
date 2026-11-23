@@ -34,6 +34,7 @@ pub struct App {
     pub quotas: super::quotas::Jobs,
     pub logins: super::device_login::Logins,
     pub identity_slots: tokio::sync::Semaphore,
+    pub acp_listing: tokio::sync::Semaphore,
     pub reset_write: tokio::sync::Mutex<()>,
 }
 impl App {
@@ -74,6 +75,8 @@ async fn same_uid(req: Request, next: Next) -> Response {
 }
 pub fn private(s: Shared) -> Router {
     Router::new()
+        .route("/v3/agy-acp/check", post(super::acp_list::check))
+        .route("/v3/agy-acp/list", post(super::acp_list::list))
         .route(
             "/v2/profile-tool",
             post(|State(s): State<Shared>, Json(id): Json<i64>| async move {

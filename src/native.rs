@@ -278,7 +278,7 @@ impl Build {
         let supported = match tool {
             "claude" => version.split_whitespace().next() == Some("2.1.329"),
             "codex" => version == "codex-cli 0.171.0",
-            "agy" => version == "1.5.14",
+            "agy" => version == crate::agy::VERSION,
             _ => false,
         };
         Self {

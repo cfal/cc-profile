@@ -378,8 +378,15 @@ async fn run() -> Result<ExitCode> {
         binary,
         override_names,
     };
-    let body = serde_json::to_vec(&req).map_err(|_| utf8())?;
-    let plan = request("/v3/launch", &body, deadline).await?;
+    if tool == "agy"
+        && req.login_profile.is_none()
+        && req.override_names.is_empty()
+        && req.argv.first().is_some_and(|a| a == "acp")
+        && classify(tool, &req.argv, &req.cwd).is_ok_and(|i| i.intent == Intent::New)
+    {
+        return acp::lazy::run(req).await;
+    }
+    let plan = launch(&req, deadline).await?;
     let (home, managed) = validate(&plan, &req)?;
     let binary = req
         .binary
@@ -389,7 +396,7 @@ async fn run() -> Result<ExitCode> {
         eprintln!("ccp: {tool}/{} -> {home}", plan.label);
     }
     if tool == "agy" {
-        let result = acp::run(binary, Path::new(home), &req, &plan, managed.as_ref()).await;
+        let result = acp::run(binary, Path::new(home), &req, &plan, managed.as_ref(), None).await;
         if result.is_err() {
             record_failure(&req, libc::EIO).await;
         }
@@ -413,6 +420,14 @@ async fn run() -> Result<ExitCode> {
     } else {
         126
     }))
+}
+async fn launch(req: &Request, deadline: Instant) -> Result<Plan> {
+    request(
+        "/v3/launch",
+        &serde_json::to_vec(req).map_err(|_| utf8())?,
+        deadline,
+    )
+    .await
 }
 async fn record_failure(req: &Request, errno: i32) {
     let failure = Failure {
