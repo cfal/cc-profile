@@ -30,7 +30,7 @@ class PeerCredentials(unittest.TestCase):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                     client.settimeout(2)
                     client.connect(str(path))
-                    client.sendall(b"POST /v2/launch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+                    client.sendall(b"POST /v3/launch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
                     status = client.makefile("rb").readline()
                 os._exit(0 if status.startswith(b"HTTP/1.1 403 ") else 1)
             except OSError:

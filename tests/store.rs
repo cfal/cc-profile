@@ -4,6 +4,86 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn v15_keeps_protocol_history_and_retires_old_codex_tickets() {
+    use ccpd::rollout::{Owner, probe};
+    let f = Fixture::new();
+    let a = f.add("codex", "original");
+    let uid = uuid::Uuid::new_v4();
+    {
+        let db = f.store.db().unwrap();
+        db.execute_batch(include_str!("../src/discovered_sessions.sql"))
+            .unwrap();
+        db.execute_batch(
+            "DROP TABLE rollout_paths; DROP TABLE rollout_dirs; PRAGMA user_version=14;",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms)
+            VALUES('codex',?,?,'observed','/verified',7,8)",
+            rusqlite::params![uid.to_string(), a.id],
+        )
+        .unwrap();
+        db.execute("INSERT INTO launches(request_id,tool,intent,state,reason,config_id,workspace,digest,ticket_digest,created_ms)
+            VALUES('legacy','codex','new','pending','round_robin',?,'/never-associated',x'01',x'01',1)",[a.id]).unwrap();
+        db.execute(
+            "UPDATE sqlite_sequence SET seq=90 WHERE name='sessions'",
+            [],
+        )
+        .unwrap();
+    }
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    let archive = a.home.join("archived_sessions");
+    let missing = probe(&upgraded, uid).unwrap();
+    assert_eq!(
+        upgraded.write(|db| missing.resolve(db)).unwrap(),
+        Owner::Missing
+    );
+    std::fs::create_dir(&archive).unwrap();
+    std::fs::write(
+        archive.join(format!("rollout-2024-03-01T00-00-00-{uid}.jsonl.zst")),
+        b"x",
+    )
+    .unwrap();
+    let found = probe(&upgraded, uid).unwrap();
+    assert_eq!(
+        upgraded.write(|db| found.resolve(db)).unwrap(),
+        Owner::Unique(a.id)
+    );
+    {
+        let db = upgraded.db().unwrap();
+        assert!(db.prepare("SELECT 1 FROM launches WHERE state='unobserved' AND reason='router_upgraded' AND native_id IS NULL").unwrap().exists([]).unwrap());
+        assert!(db.execute("UPDATE sessions SET owner=owner", []).is_err());
+        assert!(
+            !db.prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+    }
+    let page = upgraded.page(true, &Page::default()).unwrap();
+    let r = &page["items"][0];
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (
+            &r["evidence"],
+            &r["workspace"],
+            &r["last_routed_ms"],
+            &r["bound_ms"]
+        ),
+        (
+            &json!("observed"),
+            &json!("/verified"),
+            &json!(8),
+            &json!(7)
+        )
+    );
+    assert!(r["saved_file_seen_ms"].is_number());
+    let db = upgraded.db().unwrap();
+    db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,bound_ms) VALUES('codex','new',?,'saved_file',9)",[a.id]).unwrap();
+    assert!(db.last_insert_rowid() > 90);
+}
+
+#[test]
 fn discovery_upgrade_preserves_verified_evidence_workspaces_and_sequence() {
     let f = Fixture::new();
     {

@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler
 import json
 import os
 from pathlib import Path
+import pty
 import shutil
 import socketserver
 import subprocess
@@ -56,7 +57,7 @@ sys.exit(17)
                   "EDITOR":"test-editor","CCP_OBSERVE_TICKET":"old-ticket","HTTPS_PROXY":"http://127.0.0.1:9"}
 
     def plan(self,r):
-        return {"v":2,"request_id":r["request_id"],"tool":r["tool"],"label":"work","decision":"current","config_id":1,
+        return {"v":3,"request_id":r["request_id"],"tool":r["tool"],"label":"work","decision":"current","config_id":1,
                 "argv":r["argv"],"env_set":{"CLAUDE_CONFIG_DIR":"/physical/home"},
                 "env_unset":[]}
 
@@ -80,6 +81,46 @@ sys.exit(17)
                 self.assertEqual(p.returncode, 17)
                 self.assertEqual(json.loads(p.stdout)[0], ["test"])
                 self.assertEqual(p.stderr, "ccp: claude/work -> /physical/home\n" if value == "1" else "")
+
+    def test_codex_is_the_native_process_for_chats_and_exact_resumes(self):
+        exe = self.root/"codex"
+        exe.write_text("#!" + sys.executable + "\n" + """
+import json, os, sys
+print(json.dumps([sys.argv[1:], os.getpid(), os.getcwd(), os.environ["CODEX_HOME"],
+                  os.environ["HTTPS_PROXY"], sys.stdin.isatty(), None if sys.stdin.isatty() else sys.stdin.read()]))
+print("native stderr", file=sys.stderr)
+sys.exit(17)
+""")
+        exe.chmod(0o700)
+        uid = "12345678-1234-4234-9234-123456789abc"
+        for argv, tty, sticky in [
+            (["-a", "never", "-m", "exec", "--image=pic.png", "--", "--last"], True, False),
+            (["-m", "resume", "exec", "--sandbox=read-only", "-C", ".", "--json", "hello"], False, False),
+            (["resume", uid, "--image=pic.png", "--", "text with spaces"], True, True),
+            (["exec", "resume", uid, "--", "-"], False, True),
+            (["exec", "--ephemeral", "--", "-"], False, False),
+        ]:
+            with self.subTest(argv=argv):
+                self.calls.clear()
+                home = str(self.root/"selected")
+                self.respond = lambda path,r: (200, dict(self.plan(r), env_set={"CODEX_HOME":home},
+                                                       decision="sticky" if sticky else "round_robin"))
+                master, slave = pty.openpty()
+                try:
+                    expected = self.env | {"CODEX_HOME":home}
+                    for cmd, env in [([exe], expected), ([LAUNCHER,"codex"], self.env)]:
+                        with subprocess.Popen([*cmd,*argv], cwd=self.root, env=env, text=True,
+                                              stdin=slave if tty else subprocess.PIPE,
+                                              stdout=subprocess.PIPE,stderr=subprocess.PIPE) as child:
+                            out, err = child.communicate(None if tty else "input\n", timeout=5)
+                        self.assertEqual((child.returncode,err), (17,"native stderr\n"))
+                        self.assertEqual(json.loads(out), [argv,child.pid,str(self.root),home,
+                                         self.env["HTTPS_PROXY"],tty,None if tty else "input\n"])
+                finally:
+                    os.close(slave)
+                    os.close(master)
+                self.assertEqual([p for p,_ in self.calls], ["/v3/launch"])
+                self.assertFalse(list(self.directory.glob("c-*")))
 
     def test_runtime_socket_does_not_require_a_home_directory(self):
         self.env.pop("HOME")
@@ -170,14 +211,15 @@ sys.exit(17)
 
     def test_denial_sends_override_names_not_values_and_does_not_retry(self):
         self.respond=lambda path,r:(409,{"message":"owner disabled"})
-        for args, key in [(("claude","--resume","id"),"ANTHROPIC_API_KEY"), (("codex",),"CODEX_ACCESS_TOKEN")]:
+        for args, key in [(("claude","--resume","id"),"ANTHROPIC_API_KEY"), (("codex",),"CODEX_ACCESS_TOKEN"),
+                          (("codex",),"CODEX_EXEC_SERVER_URL"), (("codex",),"CODEX_REFRESH_TOKEN_URL_OVERRIDE")]:
             with self.subTest(key=key):
                 self.env[key]="private-override"
                 self.calls.clear()
                 p=self.run_ccp(*args)
                 self.assertEqual((p.returncode,p.stdout,p.stderr),(1,"","ccp: owner disabled\n"))
                 (path,raw),=self.calls
-                self.assertEqual(path,"/v2/launch")
+                self.assertEqual(path,"/v3/launch")
                 self.assertEqual(json.loads(raw)["override_names"],[key])
                 self.assertNotIn(b"private-override",raw)
                 del self.env[key]
@@ -215,7 +257,7 @@ sys.exit(17)
 
     def test_codex_cannot_downgrade_or_accept_substituted_argv_or_hook_markers(self):
         (self.root/"codex").symlink_to(self.native)
-        for changes in [{"v":1},{"argv":["--no-daemon"]},{"decision":"current"},
+        for changes in [{"v":2},{"argv":["--no-daemon"]},{"decision":"current"},
                         {"env_set":{"CODEX_HOME":"/profile","CCP_LAUNCH_ID":"unissued"}}]:
             def respond(path,req):
                 plan=dict(self.plan(req),decision="round_robin",env_set={"CODEX_HOME":"/profile"})
@@ -247,7 +289,7 @@ sys.exit(17)
             self.respond=respond
             p=self.run_ccp("claude")
             self.assertEqual((p.returncode,p.stdout),(code,""))
-            self.assertEqual([path for path,_ in self.calls],["/v2/launch","/v2/exec-failure"])
+            self.assertEqual([path for path,_ in self.calls],["/v3/launch","/v2/exec-failure"])
             req,failure=[json.loads(raw) for _,raw in self.calls]
             for key in ["request_id","ticket"]: self.assertEqual(req[key],failure[key])
 

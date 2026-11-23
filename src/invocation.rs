@@ -1,5 +1,4 @@
 use crate::types::{Error, Result};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -38,7 +37,6 @@ impl Intent {
 }
 pub struct Invocation {
     pub intent: Intent,
-    pub codex: CodexArgs,
     pub agy_tui: bool,
     pub agy_text_stdin: bool,
     pub workspace: PathBuf,
@@ -47,12 +45,6 @@ impl Invocation {
     pub fn agy_conversation(&self) -> Option<&str> {
         self.intent.id().filter(|_| self.agy_tui)
     }
-}
-#[derive(Default)]
-pub struct CodexArgs {
-    pub exec: Option<usize>,
-    pub cd: Option<Range<usize>>,
-    pub model: Option<(Range<usize>, String)>,
 }
 fn app_server(args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut it = args[1..].iter().map(String::as_str);
@@ -70,7 +62,6 @@ fn app_server(args: &[String], cwd: &Path) -> Result<Invocation> {
     }
     Ok(Invocation {
         intent,
-        codex: CodexArgs::default(),
         agy_tui: false,
         agy_text_stdin: false,
         workspace: cwd.into(),
@@ -303,7 +294,6 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             agy_tui,
             agy_text_stdin,
             workspace: cwd.into(),
-            codex: Default::default(),
         });
     }
     let claude = tool == "claude";
@@ -315,11 +305,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     }
     let mut workspace = cwd.to_owned();
     let mut words = Vec::new();
-    let mut first_word = None;
-    let mut local_only_option = false;
-    let mut codex_images = false;
-    let mut codex = CodexArgs::default();
-    let mut skip_git_check = false;
+    let mut cd = false;
     let mut tail = false;
     let mut resume = None;
     let mut help = false;
@@ -330,10 +316,8 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut it = args.iter().peekable();
     let positional = |arg: &str| !arg.starts_with('-') || arg == "-";
     while let Some(arg) = it.next() {
-        let start = args.len() - it.len() - 1;
         let arg = arg.as_str();
         if tail || positional(arg) {
-            first_word.get_or_insert(start);
             words.push((arg, !tail));
             continue;
         }
@@ -344,19 +328,6 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         let (key, inline) = arg
             .split_once('=')
             .map_or((arg, None), |(k, v)| (k, Some(v)));
-        local_only_option |= matches!(
-            key,
-            "--no-daemon"
-                | "--add-dir"
-                | "--strict-config"
-                | "--search"
-                | "-s"
-                | "--sandbox"
-                | "-a"
-                | "--ask-for-approval"
-                | "--output-schema"
-        );
-        skip_git_check |= key == "--skip-git-repo-check";
         tui_only |= matches!(
             key,
             "--no-alt-screen" | "--no-daemon" | "--search" | "-a" | "--ask-for-approval"
@@ -380,10 +351,10 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             }
             (false, "-C" | "--cd") => {
                 let s = value()?;
-                if s.is_empty() || codex.cd.is_some() {
+                if s.is_empty() || (s.starts_with('-') && inline.is_none()) || cd {
                     return Err(unsupported());
                 }
-                codex.cd = Some(start..args.len() - it.len());
+                cd = true;
                 workspace = cwd
                     .join(s)
                     .canonicalize()
@@ -394,18 +365,15 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             }
             (false, "-m" | "--model") => {
                 let s = value()?;
-                if s.is_empty() || (s.starts_with('-') && inline.is_none()) || codex.model.is_some()
-                {
+                if s.is_empty() || (s.starts_with('-') && inline.is_none()) {
                     return Err(unsupported());
                 }
-                codex.model = Some((start..args.len() - it.len(), s.to_owned()));
             }
             (false, "-i" | "--image") => {
                 let file = value()?;
                 if file.is_empty() || (inline.is_none() && !positional(file)) {
                     return Err(unsupported());
                 }
-                codex_images = true;
                 // Pinned Codex consumes a list, except for an attached value or after exec resume.
                 if inline.is_none()
                     && !matches!(
@@ -413,7 +381,14 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                         [("exec" | "e", true), ("resume", true), ..]
                     )
                 {
-                    while it.next_if(|arg| positional(arg)).is_some() {}
+                    while let Some(file) = it.next_if(|arg| positional(arg)) {
+                        if matches!(file.as_str(), "resume" | "fork" | "app-server") {
+                            return Err(Error::bad(
+                                "unsupported_invocation",
+                                "Ambiguous Codex image list. Use --image=FILE before the command.",
+                            ));
+                        }
+                    }
                 }
             }
             (false, "--device-auth" | "--with-api-key")
@@ -494,11 +469,6 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     "Codex -p/--profile selects a native configuration profile, not print mode. Use ccp codex exec --ephemeral for a one-shot prompt.",
                 ));
             }
-            (false, "--dangerously-bypass-approvals-and-sandbox" | "--yolo")
-                if inline.is_none() =>
-            {
-                local_only_option = true;
-            }
             (
                 true,
                 "--verbose"
@@ -515,6 +485,10 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 | "--no-alt-screen"
                 | "--no-daemon"
                 | "--search"
+                | "--worktree"
+                | "--approve-for-me"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--yolo"
                 | "--skip-git-repo-check"
                 | "--strict-config",
             ) if inline.is_none() => {}
@@ -620,44 +594,14 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             }
             intent = Intent::Print(native);
         }
-    } else {
-        if matches!(command, Some("exec" | "e")) {
-            codex.exec = first_word;
+    } else if ephemeral {
+        if intent != Intent::New || tui_only {
+            return Err(unsupported());
         }
-        if ephemeral {
-            if intent != Intent::New || tui_only {
-                return Err(unsupported());
-            }
-            intent = Intent::Print(args.to_vec());
-        }
-        if codex_images && !matches!(intent, Intent::Resume(_) | Intent::Print(_)) {
-            return Err(Error::bad(
-                "unsupported_invocation",
-                "Image attachments require an exact Codex resume or exec --ephemeral. Use --image=FILE before the prompt.",
-            ));
-        }
-        if intent == Intent::New {
-            if local_only_option {
-                return Err(Error::bad(
-                    "unsupported_invocation",
-                    "This option is incompatible with a new managed Codex chat; configure the profile instead.",
-                ));
-            }
-            // Codex 0.171.0 checks this in local exec, but not in exec --remote.
-            if codex.exec.is_some()
-                && !skip_git_check
-                && !workspace.ancestors().any(|dir| {
-                    let git = dir.join(".git");
-                    git.is_file() || git.join("HEAD").is_file()
-                })
-            {
-                return Err(git_required());
-            }
-        }
+        intent = Intent::Print(args.to_vec());
     }
     Ok(Invocation {
         intent,
-        codex,
         agy_tui: false,
         agy_text_stdin: false,
         workspace,
@@ -897,26 +841,51 @@ mod tests {
         }
     }
     #[test]
-    fn codex_injects_remote_after_the_exec_verb_not_an_option_value() {
-        assert_eq!(
-            parse(
-                "codex",
-                &[
-                    "-m",
-                    "exec",
-                    "exec",
-                    "--skip-git-repo-check",
-                    "--json",
-                    "review this"
-                ]
-            )
-            .unwrap()
-            .codex
-            .exec,
-            Some(2)
-        );
-        assert_eq!(parse("codex", &["--", "exec"]).unwrap().codex.exec, None);
-        for flag in ["--hook-free", "--no-daemon", "--strict-config", "--search"] {
+    fn codex_local_options_and_delimiters_do_not_change_routing() {
+        for flag in [
+            "--no-daemon",
+            "--strict-config",
+            "--search",
+            "--worktree",
+            "--approve-for-me",
+        ] {
+            assert_eq!(parse("codex", &[flag]).unwrap().intent, Intent::New);
+        }
+        for args in [
+            vec!["-m", "exec", "exec", "--json", "review this"],
+            vec!["--", "exec"],
+            vec![
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--image=photo.png",
+                "hello",
+            ],
+            vec![
+                "-a",
+                "never",
+                "--no-alt-screen",
+                "--add-dir",
+                "../docs",
+                "--",
+                "--last",
+            ],
+            vec!["--image=a.png", "--", "resume"],
+            vec!["exec", "--yolo"],
+            vec![
+                "--no-alt-screen",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "prompt",
+            ],
+        ] {
+            assert_eq!(parse("codex", &args).unwrap().intent, Intent::New);
+        }
+        for flag in [
+            "--hook-free",
+            "--remote=unix:///elsewhere",
+            "--enable",
+            "--remote-auth-token-env",
+        ] {
             assert!(parse("codex", &[flag]).is_err());
         }
         assert_eq!(
@@ -1026,18 +995,9 @@ mod tests {
             ),
             ("claude", vec!["--ax-screen-reader=false", "-r", id]),
             ("claude", vec!["--name", "display", "--", "update"]),
-            ("codex", vec!["exec", "--skip-git-repo-check", "--yolo"]),
             (
                 "claude",
                 vec!["--ax-screen-reader", "--fork-session", "-r", id],
-            ),
-            (
-                "codex",
-                vec![
-                    "--no-alt-screen",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "prompt",
-                ],
             ),
             (
                 "codex",
@@ -1070,16 +1030,9 @@ mod tests {
             vec!["-i", "a.png", "resume", id],
             vec!["resume", "-i", "a.png", id],
             vec!["exec", "-i", "a.png", "resume", id],
-            vec!["--image=a.png", "--", "resume"],
             vec!["--image=a.png", "cloud", "--help"],
             vec!["--image=a.png", "fork", id],
             vec!["--image=a.png", "resume", "--last"],
-            vec![
-                "exec",
-                "--skip-git-repo-check",
-                "--image=a.png",
-                "new prompt",
-            ],
             vec!["resume", id, "--image"],
             vec!["resume", id, "-i", "--"],
             vec!["resume", id, "--image="],

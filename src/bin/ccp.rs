@@ -67,6 +67,18 @@ const CODEX_OVERRIDES: &[&str] = &[
     "CODEX_SQLITE_HOME",
     "CODEX_MANAGED_CONFIG_PATH",
     "CODEX_CHATGPT_BASE_URL",
+    "CODEX_APP_SERVER_CHATGPT_BASE_URL",
+    "CODEX_EXEC_SERVER_URL",
+    "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+    "CODEX_OSS_BASE_URL",
+    "CODEX_OSS_PORT",
+    "CODEX_AUTHAPI_BASE_URL",
+    "CODEX_APP_SERVER_LOGIN_ISSUER",
+    "CODEX_APP_SERVER_LOGIN_CLIENT_ID",
+    "CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL",
+    "CODEX_AGENT_IDENTITY_JWKS_BASE_URL",
+    "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+    "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
 ];
 
 fn invalid() -> Error {
@@ -127,8 +139,10 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
         if plan.argv != i.intent.argv(&req.argv) || !valid_decision || plan.config_id <= 0 {
             return Err(invalid());
         }
+        let stdio = req.tool == "codex" && req.argv.first().is_some_and(|s| s == "app-server");
         if i.agy_text_stdin
-            || (req.tool != "claude" && !matches!(i.intent, Intent::Misc | Intent::Print(_)))
+            || ((req.tool == "agy" || stdio)
+                && !matches!(i.intent, Intent::Misc | Intent::Print(_)))
         {
             managed = Some(i);
         }
@@ -365,7 +379,7 @@ async fn run() -> Result<ExitCode> {
         override_names,
     };
     let body = serde_json::to_vec(&req).map_err(|_| utf8())?;
-    let plan = request("/v2/launch", &body, deadline).await?;
+    let plan = request("/v3/launch", &body, deadline).await?;
     let (home, managed) = validate(&plan, &req)?;
     let binary = req
         .binary
@@ -381,8 +395,8 @@ async fn run() -> Result<ExitCode> {
         }
         return result;
     }
-    if let Some(i) = managed {
-        match codex::run(binary, &req, &plan, &i).await {
+    if managed.is_some() {
+        match codex::run_stdio(binary, &req, &plan).await {
             Ok(code) => return Ok(code),
             Err(e) => {
                 record_failure(&req, libc::EIO).await;

@@ -1,8 +1,9 @@
+use crate::saved_files::{dir_at, open_home};
 use crate::{
     paths,
     types::{Error, Result},
 };
-use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, openat, statat};
+use rustix::fs::{AtFlags, FileType, statat};
 use std::{
     fs, io,
     os::fd::OwnedFd,
@@ -55,31 +56,10 @@ pub fn session_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
-fn open_home(home: &Path) -> io::Result<OwnedFd> {
-    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::PATH;
-    let mut dir = openat(CWD, "/", flags, Mode::empty())?;
-    let mut parts = home.components();
-    if parts.next() != Some(std::path::Component::RootDir) {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    for part in parts {
-        let std::path::Component::Normal(name) = part else {
-            return Err(io::ErrorKind::InvalidInput.into());
-        };
-        dir = openat(dir, name, flags, Mode::empty())?;
-    }
-    Ok(dir)
-}
 fn conversation_dir(home: &OwnedFd) -> io::Result<OwnedFd> {
-    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let gemini = openat(home, ".gemini", flags | OFlags::PATH, Mode::empty())?;
-    let app = openat(gemini, APP_DIR, flags | OFlags::PATH, Mode::empty())?;
-    Ok(openat(
-        app,
-        "conversations",
-        flags | OFlags::PATH,
-        Mode::empty(),
-    )?)
+    let gemini = dir_at(home, ".gemini")?;
+    let app = dir_at(&gemini, APP_DIR)?;
+    dir_at(&app, "conversations")
 }
 fn saved_in(dir: &OwnedFd, id: uuid::Uuid) -> io::Result<bool> {
     let mut found = false;

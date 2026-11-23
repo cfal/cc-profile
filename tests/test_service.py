@@ -343,7 +343,7 @@ class Service(unittest.TestCase):
         self.assertNotEqual(self.cli("codex","app-server","--listen","ws://0.0.0.0:3456").returncode,0)
         self.assertNotEqual(self.cli("codex","--hook-free").returncode,0)
 
-    def test_hook_free_child_cleanup_and_startup_failure(self):
+    def test_explicit_server_cleanup_and_direct_tui_startup(self):
         home=Path(self.account("codex","fixture")["home"])
         (home/"track-child").touch()
         with subprocess.Popen([LAUNCHER,"codex","app-server"],cwd=self.root,env=self.env,
@@ -357,13 +357,48 @@ class Service(unittest.TestCase):
                 p.terminate()
             self.assertEqual(p.wait(timeout=5),143)
             with self.assertRaises(ProcessLookupError):os.kill(pid,0)
-        # This stdio-only fixture exits instead of opening the requested socket.
+        # The same stdio-only fixture works as a plain TUI: no CCP socket is required.
         tui=self.cli("codex")
-        self.assertNotEqual(tui.returncode,0)
-        self.assertIn("app-server exited",tui.stderr)
+        self.assertEqual(tui.returncode,0,tui.stderr)
+        self.assertEqual(json.loads(tui.stdout)["argv"],[])
         self.assertFalse(list((self.root/"run/cc-profile").glob("c-*")))
         self.assertEqual(self.api("GET","sessions")[1]["items"],[])
-        self.assertEqual(self.api("GET","startups")[1]["items"][0]["state"],"exec_failed")
+        log = self.api("GET","startups")[1]["items"][0]
+        self.assertEqual((log["state"],log["native_id"]),("routed",None))
+
+    def test_saved_codex_file_routes_native_and_explicit_server_without_claiming_a_start(self):
+        a,b = [self.account("codex", name) for name in ("first","second")]
+        uid = str(uuid.uuid4())
+        relative = Path("sessions/2026/11/23") / f"rollout-2026-11-23T12-00-00-{uid}.jsonl"
+        saved = Path(b["home"])/relative
+        saved.parent.mkdir(parents=True)
+        saved.write_bytes(b"not a transcript")
+        deadline = time.monotonic()+8
+        while not (rows := self.api("GET","sessions?tool=codex")[1]["items"]) and time.monotonic() < deadline:
+            time.sleep(.05)
+        row, = rows
+        self.assertEqual((row["config_id"],row["native_id"],row["evidence"],row["workspace"],row["last_routed_ms"]),
+                         (b["id"],uid,"saved_file",None,None))
+        self.assertEqual(self.api("GET","startups")[1]["items"],[])
+        resume = self.cli("codex","resume",uid)
+        self.assertEqual(resume.returncode,0,resume.stderr)
+        self.assertEqual(json.loads(resume.stdout)["home"],b["home"])
+        args=[LAUNCHER,"codex","app-server","--for-session",uid]
+        wire=json.dumps({"id":1,"method":"thread/resume","params":{"threadId":uid}})+"\n"
+        reply=subprocess.run(args,input=wire,env=self.env,cwd=self.root,text=True,capture_output=True,timeout=8)
+        self.assertEqual(reply.returncode,0,reply.stderr)
+        self.assertEqual(json.loads(reply.stdout)["result"]["home"],b["home"])
+        self.assertEqual(self.api("GET","sessions?tool=codex")[1]["items"][0]["evidence"],"saved_file")
+        copy=Path(a["home"])/relative
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(b"duplicate")
+        self.assertNotEqual(self.cli("codex","resume",uid).returncode,0)
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"rollout_conflict")
+        copy.unlink()
+        saved.unlink()
+        self.assertNotEqual(self.cli("codex","resume",uid).returncode,0)
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"rollout_pruned")
+        self.assertEqual(self.api("GET","sessions?tool=codex")[1]["items"][0]["config_id"],b["id"])
 
     def test_managed_profile_under_relocated_data_home(self):
         data = self.root / "relocated-share"
@@ -503,11 +538,12 @@ class Service(unittest.TestCase):
                                 stdin=subprocess.DEVNULL,capture_output=True,timeout=3)
         self.assertNotEqual(callback.returncode,0)
         import socket
-        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
-            client.settimeout(2)
-            client.connect(str(self.root/"run/cc-profile/launch.sock"))
-            client.sendall(b"POST /v1/launch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
-            self.assertIn(b"404",client.recv(100))
+        for version, code in [(1,b"404"),(2,b"426")]:
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                client.settimeout(2)
+                client.connect(str(self.root/"run/cc-profile/launch.sock"))
+                client.sendall(f"POST /v{version}/launch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".encode())
+                self.assertIn(code,client.recv(100))
         self.assertEqual(self.api("GET","startups")[1]["items"],[])
 
     def test_claude_bridge_aliases_do_not_allocate_session_ids(self):

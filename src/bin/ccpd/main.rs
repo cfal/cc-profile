@@ -125,6 +125,15 @@ async fn run() -> Result<()> {
             eprintln!("Antigravity saved-file discovery unavailable: {e}");
         }
     }
+    if app.codex.supported {
+        let a = app.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("codex-rollouts".into())
+            .spawn(move || ccpd::rollout::run(&a.store, &a.codex))
+        {
+            eprintln!("Codex rollout discovery unavailable: {e}");
+        }
+    }
     tokio::select! {
         result=axum::serve(unix,service::private(app.clone()).into_make_service_with_connect_info::<service::Peer>())=>result?,
         result=axum::serve(tcp,service::web(app))=>result?,

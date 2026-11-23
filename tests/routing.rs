@@ -320,6 +320,8 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     let first = admit(&f.store, &exe, &new).unwrap();
     assert!(first.refresh_quota);
     let plan = first.plan.unwrap();
+    let server = req(&f, "codex", &["app-server"], &exe);
+    launch(&f.store, &exe, &server).unwrap();
     cache(&f, &c, window(100.), now());
     assert_eq!(
         launch(
@@ -338,9 +340,9 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     observe(
         &f.store,
         &Observation {
-            request_id: new.request_id,
-            ticket: new.ticket,
-            event: "thread/started".into(),
+            request_id: server.request_id,
+            ticket: server.ticket,
+            event: "thread/start".into(),
             source: "app-server".into(),
             native_id: uid.clone(),
             workspace: None,
@@ -421,6 +423,54 @@ fn only_recent_successful_identifiable_quota_is_trusted() {
 }
 
 #[test]
+fn codex_file_resume_is_revalidated_and_explicit_start_can_confirm_its_owner() {
+    let f = Fixture::new();
+    let exe = build();
+    let profile = f.add("codex", "only");
+    let uid = Uuid::new_v4().to_string();
+    let archive = profile.home.join("archived_sessions");
+    std::fs::create_dir(&archive).unwrap();
+    let file = archive.join(format!("rollout-2026-10-11T09-08-07-{uid}.jsonl"));
+    std::fs::write(&file, b"metadata only").unwrap();
+    let resume = req(&f, "codex", &["resume", &uid], &exe);
+    let plan = launch(&f.store, &exe, &resume).unwrap();
+    assert_eq!(plan.config_id, profile.id);
+    assert_eq!(plan, launch(&f.store, &exe, &resume).unwrap());
+    let before = &f.store.page(true, &Page::default()).unwrap()["items"][0];
+    assert_eq!(before["evidence"], "saved_file");
+    assert!(before["workspace"].is_null());
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(launch(&f.store, &exe, &resume).unwrap_err().1, "stale_plan");
+    let server = req(&f, "codex", &["app-server"], &exe);
+    launch(&f.store, &exe, &server).unwrap();
+    observe(
+        &f.store,
+        &Observation {
+            request_id: server.request_id,
+            ticket: server.ticket,
+            event: "thread/start".into(),
+            source: "app-server".into(),
+            native_id: uid.clone(),
+            workspace: Some("/confirmed".into()),
+        },
+    )
+    .unwrap();
+    let confirmed = &f.store.page(true, &Page::default()).unwrap()["items"][0];
+    assert_eq!(confirmed["seq"], before["seq"]);
+    assert_eq!(
+        confirmed["saved_file_seen_ms"],
+        before["saved_file_seen_ms"]
+    );
+    assert_eq!(confirmed["evidence"], "observed");
+    assert_eq!(confirmed["workspace"], "/confirmed");
+    let again = req(&f, "codex", &["resume", &uid], &exe);
+    assert_eq!(
+        launch(&f.store, &exe, &again).unwrap().config_id,
+        profile.id
+    );
+}
+
+#[test]
 fn codex_admission_and_tickets_are_scoped_to_the_launch_mode() {
     let f = Fixture::new();
     let exe = build();
@@ -443,15 +493,13 @@ fn codex_admission_and_tickets_are_scoped_to_the_launch_mode() {
     assert!(observe(&f.store, &o).is_err());
     o.event = "thread/started".into();
     o.source = "app-server".into();
-    observe(&f.store, &o).unwrap();
+    assert!(observe(&f.store, &o).is_err());
+    o.event = "thread/start".into();
+    assert!(observe(&f.store, &o).is_err());
     let server = req(&f, "codex", &["app-server", "--listen", "stdio://"], &exe);
     assert_eq!(start(&server).unwrap().config_id, b.id);
     o.request_id = server.request_id;
     o.ticket = server.ticket;
-    assert!(observe(&f.store, &o).is_err());
-    o.event = "thread/start".into();
-    assert_eq!(observe(&f.store, &o).unwrap_err().1, "observation_conflict");
-    o.native_id = Uuid::new_v4().to_string();
     observe(&f.store, &o).unwrap();
     observe(&f.store, &o).unwrap();
     let mut resume = req(
@@ -485,6 +533,11 @@ fn upgrading_v4_keeps_the_codex_owner_and_cursor_without_touching_native_hooks()
     std::fs::write(&path, hooks).unwrap();
     {
         let db = f.store.db().unwrap();
+        db.execute(
+            "UPDATE launches SET state='pending' WHERE request_id=?",
+            [&pending.request_id],
+        )
+        .unwrap();
         db.execute_batch(
             "DROP TABLE settings; ALTER TABLE configs DROP COLUMN priority;
             ALTER TABLE configs ADD COLUMN observer_stamp TEXT;
@@ -757,11 +810,11 @@ fn a_retry_cannot_resurrect_a_disabled_plan_or_change_the_native_arguments() {
     );
 }
 #[test]
-fn delayed_reverse_observations_bind_the_admitted_configs() {
+fn direct_launches_cannot_claim_a_session_even_with_a_valid_ticket() {
     let f = Fixture::new();
     let exe = build();
     let a = f.add("codex", "a");
-    let b = f.add("codex", "b");
+    f.add("codex", "b");
     let x = req(&f, "codex", &[], &exe);
     let y = req(
         &f,
@@ -774,7 +827,7 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
     f.store
         .edit(a.id, &json!({"enabled":false,"revision":a.revision}))
         .unwrap();
-    for (r, c) in [(&y, &b), (&x, &a)] {
+    for r in [&y, &x] {
         let mut o = Observation {
             workspace: None,
             request_id: r.request_id.clone(),
@@ -783,22 +836,19 @@ fn delayed_reverse_observations_bind_the_admitted_configs() {
             event: "thread/started".into(),
             source: "app-server".into(),
         };
-        observe(&f.store, &o).unwrap();
-        observe(&f.store, &o).unwrap();
-        let rows = f
-            .store
-            .page(
-                true,
-                &Page {
-                    native_id: Some(o.native_id.clone()),
-                    ..Page::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(rows["items"][0]["config_id"], c.id);
-        o.native_id = Uuid::new_v4().to_string();
-        assert_eq!(observe(&f.store, &o).unwrap_err().1, "observation_conflict");
+        assert!(observe(&f.store, &o).is_err());
+        o.event = "thread/start".into();
+        assert!(observe(&f.store, &o).is_err());
     }
+    let log = f.store.page(false, &Page::default()).unwrap();
+    for row in log["items"].as_array().unwrap() {
+        assert_eq!(row["state"], "routed");
+        assert!(row["native_id"].is_null());
+    }
+    assert_eq!(
+        f.store.page(true, &Page::default()).unwrap()["items"],
+        json!([])
+    );
     assert!(!config(&f.store.db().unwrap(), a.id).unwrap().enabled);
 }
 
@@ -810,14 +860,14 @@ fn a_second_config_observing_an_owned_uuid_is_always_a_conflict() {
     let other = f.add("codex", "other");
     let uid = Uuid::new_v4().to_string();
     for c in [&first, &other] {
-        let r = req(&f, "codex", &["exec", "--skip-git-repo-check"], &exe);
+        let r = req(&f, "codex", &["app-server"], &exe);
         assert_eq!(launch(&f.store, &exe, &r).unwrap().config_id, c.id);
         let o = Observation {
             workspace: None,
             request_id: r.request_id,
             ticket: r.ticket,
             native_id: uid.clone(),
-            event: "thread/started".into(),
+            event: "thread/start".into(),
             source: "app-server".into(),
         };
         if c.id == first.id {
@@ -832,9 +882,6 @@ fn a_second_config_observing_an_owned_uuid_is_always_a_conflict() {
         f.store.page(true, &Page::default()).unwrap()["items"][0]["config_id"],
         first.id
     );
-    let log = f.store.page(false, &Page::default()).unwrap();
-    assert_eq!(log["items"][0]["state"], "conflict");
-    assert_eq!(log["items"][0]["native_id"], uid);
 }
 
 #[test]

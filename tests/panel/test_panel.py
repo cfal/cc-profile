@@ -305,6 +305,28 @@ class Panel(unittest.TestCase):
             expect(logs.get_by_role("cell", name="Unknown", exact=True)).to_be_visible()
             expect(logs.get_by_role("cell", name="Unknown", exact=True).get_by_role("button")).to_have_count(0)
 
+    def test_codex_saved_id_has_native_resume_command_and_no_startup_attribution(self):
+        service = self.start_service()
+        c = service.account("codex", "Saved")
+        self.assertEqual(service.cli("codex").returncode, 0)
+        uid = str(uuid.uuid4())
+        with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,bound_ms,saved_file_seen_ms) "
+                       "VALUES('codex',?,?,'saved_file',5,5)", (uid,c["id"]))
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(permissions=["clipboard-read","clipboard-write"])
+            page.goto(f"http://127.0.0.1:{service.port}/#sessions?tool=codex")
+            page.get_by_label("Password",exact=True).fill(service.password)
+            page.get_by_role("button",name="Sign in").click()
+            row = page.get_by_role("row").filter(has_text="Not routed")
+            expect(row).to_contain_text("Unknown")
+            row.get_by_role("button",name="Copy resume command").click()
+            self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),["ccp","codex","resume",uid])
+            page.get_by_role("navigation").get_by_text("Dashboard").click()
+            logs = page.get_by_role("region",name="Startup logs")
+            expect(logs.get_by_role("cell",name="Unknown",exact=True)).to_be_visible()
+            expect(logs.get_by_role("cell",name="Pending",exact=True)).to_have_count(0)
+
     def test_identity_follows_selected_account_not_delayed_probe(self):
         service = self.start_service()
         a, b = (service.account("claude", label) for label in ("Work", "Home"))

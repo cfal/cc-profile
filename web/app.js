@@ -404,7 +404,8 @@ async function logs(view, params, ver, enter) {
           );
     const uid = row.native_id,
       alias = names[row.tool],
-      unknownTui = !uid && row.tool === "agy" && row.intent === "tui" && row.state === "routed";
+      unknownSession = !uid && row.state === "routed" &&
+        ((row.tool === "agy" && row.intent === "tui") || (row.tool === "codex" && row.intent === "new"));
     const idLink = uid
       ? el(
           "button",
@@ -419,7 +420,7 @@ async function logs(view, params, ver, enter) {
           },
           short(uid),
         )
-      : text(row.state === "pending" ? "Pending" : unknownTui ? "Unknown" : "None");
+      : text(row.state === "pending" ? "Pending" : unknownSession ? "Unknown" : "None");
     const state = states[row.state] || row.state;
     const decision = el(
       "div",
@@ -436,13 +437,13 @@ async function logs(view, params, ver, enter) {
     if (sessions) {
       const resume = (label, glyph, cwd, args) => ib(label, glyph, () =>
         copy((cwd ? "cd " + shell(cwd) + " && " : "") + "ccp " + row.tool + args));
-      const fileOnly = row.evidence === "saved_file";
-      const both = row.tool === "agy" && !fileOnly && (row.tui_workspace != null || row.saved_file_seen_ms != null);
+      const agyFile = row.tool === "agy" && row.evidence === "saved_file";
+      const both = row.tool === "agy" && !agyFile && (row.tui_workspace != null || row.saved_file_seen_ms != null);
       commands = el("div", {class: "row"},
-        !fileOnly && resume(both ? "Copy ACP resume command" : "Copy resume command", "copy", row.workspace,
+        !agyFile && resume(both ? "Copy ACP resume command" : "Copy resume command", "copy", row.workspace,
           row.tool === "agy" ? " acp --for-session " + shell(uid) : (row.tool === "claude" ? " --resume " : " resume ") + uid),
-        (fileOnly || both) && resume(both ? "Copy terminal resume command" : "Copy resume command",
-          both ? "square-terminal" : "copy", row.tui_workspace || (fileOnly && row.workspace), " --conversation=" + shell(uid)));
+        (agyFile || both) && resume(both ? "Copy terminal resume command" : "Copy resume command",
+          both ? "square-terminal" : "copy", row.tui_workspace || (agyFile && row.workspace), " --conversation=" + shell(uid)));
     }
     const det = ib("Startup details", "chevron-right", async () => {
       expanded = expanded === row.seq ? null : row.seq;
@@ -474,7 +475,7 @@ async function logs(view, params, ver, enter) {
               { class: "facts" },
               datum("Request ID", code(row.request_id)),
               datum("Workspace", code(row.workspace || "Unavailable")),
-              datum("Session ID", uid ? code(uid) : unknownTui ? "Unknown" : "Not recorded"),
+              datum("Session ID", uid ? code(uid) : unknownSession ? "Unknown" : "Not recorded"),
               row.observed_ms && datum("ID observed", fmt(row.observed_ms)),
             ),
           ),
@@ -487,7 +488,7 @@ async function logs(view, params, ver, enter) {
   else if (params.size) records = empty(sessions ? "No matching sessions" : "No matching startups",
     null, btn("Clear filters", () => go(view)));
   else records = sessions
-    ? empty("No session mappings", "Session IDs appear here when assigned or observed.")
+    ? empty("No session mappings", "No assigned, observed or saved session IDs yet.")
     : empty("No startup requests", "Only launches through ccp appear here.");
 
   const root = sessions ? main : ((!enter && $("#startup-logs")) || openDashboard(profiles));
@@ -584,7 +585,10 @@ function accountForm(t, c) {
         ? await api("accounts/" + c.id, "PATCH", { revision: c.revision, ...v })
         : await api("accounts", "POST", { tool: t, ...(source.value === "new" ? {create: true} : {home: home.value.trim()}), ...v });
       go("accounts", { tool: t, id: saved.id });
-      notice(c ? "Config updated." : "Profile added. Not enabled for chats.");
+      const proxyChanged = c && (mode.value !== c.proxy_mode || (mode.value === "custom" && proxy.value));
+      notice(t === "codex" && proxyChanged
+        ? "Config updated. A running Codex TUI daemon may keep its previous proxy until it restarts."
+        : c ? "Config updated." : "Profile added. Not enabled for chats.");
     },
   );
 }

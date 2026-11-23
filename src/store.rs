@@ -21,7 +21,7 @@ pub struct Store {
     state_dir: PathBuf,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub id: i64,
     pub tool: String,
@@ -282,7 +282,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=14).contains(&v)
+        } else if !(1..=15).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -359,6 +359,9 @@ impl Store {
         }
         if v < 14 {
             tx.execute_batch(include_str!("earliest_expiry.sql"))?;
+        }
+        if v < 15 {
+            tx.execute_batch(include_str!("rollout_sessions.sql"))?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.
@@ -534,7 +537,7 @@ impl Store {
             let mut v=json!({"seq":r.get::<_,i64>(0)?,"tool":r.get::<_,String>(1)?,"native_id":r.get::<_,Option<String>>(2)?,
                 "config_id":r.get::<_,Option<i64>>(3)?,"label":r.get::<_,Option<String>>(4)?,"enabled":r.get::<_,Option<bool>>(5)?});
             if sessions {v["evidence"]=r.get::<_,String>(6)?.into();v["bound_ms"]=r.get::<_,i64>(7)?.into();v["last_routed_ms"]=r.get::<_,Option<i64>>(8)?.into();v["workspace"]=r.get::<_,Option<String>>(9)?.into();v["tui_workspace"]=r.get::<_,Option<String>>(10)?.into();
-                if v["tool"]=="agy" {v["saved_file_seen_ms"]=r.get::<_,Option<i64>>(11)?.into();}}
+                if v["tool"]=="agy" || v["tool"]=="codex" {v["saved_file_seen_ms"]=r.get::<_,Option<i64>>(11)?.into();}}
             else{for (i,k) in [(6,"intent"),(7,"state"),(8,"reason"),(10,"workspace"),(11,"request_id")]{v[k]=r.get::<_,Option<String>>(i)?.into();}
                  v["created_ms"]=r.get::<_,i64>(9)?.into();v["observed_ms"]=r.get::<_,Option<i64>>(12)?.into();v["mapped"]=r.get::<_,bool>(13)?.into();}
             Ok(v)

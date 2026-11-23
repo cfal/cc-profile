@@ -1,10 +1,11 @@
 use super::{conversation_dir, open_home, saved_in};
+use crate::saved_files::entries as scan_dir;
 use crate::{
     native::Build,
     store::{Config, Store, configs},
     types::{Result, now},
 };
-use rustix::fs::{Dir, Mode, OFlags, fstat, inotify, openat};
+use rustix::fs::{Dir, fstat, inotify};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
@@ -58,15 +59,6 @@ struct Watched {
     key: (u64, u64),
     dir: OwnedFd,
     wd: Option<i32>,
-}
-fn scan_dir(dir: &OwnedFd) -> rustix::io::Result<Dir> {
-    // Enumeration needs read access; checking an exact filename only needs search access.
-    Dir::new(openat(
-        dir,
-        ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?)
 }
 fn watch_dir(fd: Option<&OwnedFd>, dir: &OwnedFd) -> Option<i32> {
     use inotify::WatchFlags as F;

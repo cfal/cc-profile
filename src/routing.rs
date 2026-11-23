@@ -71,6 +71,26 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "conversation_ambiguous",
             "Conflicting Antigravity conversation owners. No profile was selected.",
         ),
+        "rollout_pruned" => Error::missing(
+            "rollout_pruned",
+            "The saved Codex thread is missing from its recorded profile. No other profile was selected.",
+        ),
+        "rollout_conflict" => Error::conflict(
+            "rollout_conflict",
+            "Conflicting Codex thread owners. No profile was selected.",
+        ),
+        "rollout_pending" => Error::unavailable(
+            "rollout_pending",
+            "Codex could not verify this thread within the lookup budget. Retry after indexing; no other profile was selected.",
+        ),
+        "rollout_limit" => Error::conflict(
+            "rollout_limit",
+            "The registered Codex history exceeds the supported discovery limits. No profile was selected.",
+        ),
+        "rollout_unavailable" => Error::conflict(
+            "rollout_unavailable",
+            "Cannot verify the saved threads in a registered Codex profile. No owner was assumed.",
+        ),
         "unsafe_conversation" => Error::bad(
             "unsafe_conversation",
             "Cannot verify the native conversation path.",
@@ -172,6 +192,7 @@ fn choose(
     req: &Request,
     i: &Invocation,
     mode: RoutingMode,
+    rollout: Option<&crate::rollout::Proof>,
 ) -> Result<Selection> {
     let reject = |code| Selection::Refuse(None, denial(code, None, i.intent.id()));
     if !req.override_names.is_empty() {
@@ -250,13 +271,14 @@ fn choose(
             })
         }
         Intent::Resume(uid) => {
-            let owner = db
+            let binding: Option<(i64, String)> = db
                 .query_row(
-                    "SELECT owner FROM sessions WHERE tool=? AND native_id=? AND (? OR evidence!='saved_file')",
-                    params![req.tool, uid, i.agy_tui],
-                    |r| r.get(0),
+                    "SELECT owner,evidence FROM sessions WHERE tool=? AND native_id=?",
+                    params![req.tool, uid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
+            let owner = binding.as_ref().map(|(id, _)| *id);
             let owner = if i.agy_tui {
                 let uuid =
                     Uuid::parse_str(uid).map_err(|_| denial("exact_id_required", None, None))?;
@@ -283,6 +305,42 @@ fn choose(
                     return Ok(reject("conversation_missing"));
                 }
                 found
+            } else if req.tool == "codex" {
+                use crate::rollout::Owner;
+                let Some(proof) = rollout else {
+                    return Ok(reject("rollout_pending"));
+                };
+                match proof.resolve(db)? {
+                    Owner::Unique(id) if owner.is_none_or(|old| old == id) => Some(id),
+                    Owner::Unique(_) | Owner::Conflict => return Ok(reject("rollout_conflict")),
+                    Owner::Pending => return Ok(reject("rollout_pending")),
+                    Owner::Limit => return Ok(reject("rollout_limit")),
+                    Owner::Unavailable(id) => {
+                        let c = config(db, id)?;
+                        let code = if Some(id) == owner && !c.present() {
+                            "owner_missing"
+                        } else {
+                            "rollout_unavailable"
+                        };
+                        let err = denial(code, Some(&c), Some(uid));
+                        return Ok(Selection::Refuse(Some(c), err));
+                    }
+                    Owner::Missing => match binding {
+                        Some((id, evidence)) if evidence == "saved_file" => {
+                            let c = config(db, id)?;
+                            let code = if !c.present() {
+                                "owner_missing"
+                            } else {
+                                "rollout_pruned"
+                            };
+                            let err = denial(code, Some(&c), Some(uid));
+                            return Ok(Selection::Refuse(Some(c), err));
+                        }
+                        _ => owner, // Existing protocol evidence survives file-layout changes.
+                    },
+                }
+            } else if binding.is_some_and(|(_, e)| e == "saved_file") {
+                None // AgY ACP requires an actual protocol observation.
             } else {
                 owner
             };
@@ -368,6 +426,7 @@ impl Prior {
         req: &Request,
         fingerprint: &[u8],
         parsed: Result<&Invocation>,
+        rollout: Option<&crate::rollout::Proof>,
     ) -> Result<Plan> {
         if self.digest != fingerprint {
             return Err(Error::conflict(
@@ -389,13 +448,14 @@ impl Prior {
                 && Some(c.revision) == self.revision
         });
         if !valid
-            || !matches!(self.state.as_str(), "routed" | "pending")
+            || self.state != "routed"
             || now() - self.created > 30_000
             || validate_binary(build, req.binary.as_deref()).is_err()
             || (!build.supported && (i.intent != Intent::Misc || req.tool == "agy"))
             || self.workspace != i.workspace
-            || (i.agy_conversation().is_some()
-                && !matches!(choose(db, build, req, i, RoutingMode::RoundRobin)?,
+            || ((i.agy_conversation().is_some()
+                || req.tool == "codex" && matches!(i.intent, Intent::Resume(_)))
+                && !matches!(choose(db, build, req, i, RoutingMode::RoundRobin, rollout)?,
                     Selection::Allow(owner, _) if Some(owner.id) == self.config))
         {
             return Err(Error::conflict(
@@ -430,15 +490,27 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
             agy_tui: false,
             agy_text_stdin: false,
             workspace: req.cwd.clone(),
-            codex: Default::default(),
         })
     } else {
         classify(&req.tool, &req.argv, &req.cwd)
     };
+    // A slow profile filesystem must not hold the router's write transaction.
+    let rollout = if req.tool == "codex"
+        && build.supported
+        && req.override_names.is_empty()
+        && let Ok(i) = &parsed
+        && let Intent::Resume(id) = &i.intent
+        && validate_binary(build, req.binary.as_deref()).is_ok()
+    {
+        let id = Uuid::parse_str(id).map_err(|_| denial("exact_id_required", None, None))?;
+        Some(crate::rollout::probe(store, id)?)
+    } else {
+        None
+    };
     store.write(|db| {
         if let Some(prior) = Prior::find(db, &req.request_id)? {
             return Ok(Admission {
-                plan: prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone)),
+                plan: prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone), rollout.as_ref()),
                 refresh_quota: false,
             });
         }
@@ -458,7 +530,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
             RoutingMode::RoundRobin
         };
         let selection = match &parsed {
-            Ok(i) => choose(db, build, req, i, mode)?,
+            Ok(i) => choose(db, build, req, i, mode, rollout.as_ref())?,
             Err(e) => Selection::Refuse(None, e.clone()),
         };
         let ms = now();
@@ -467,11 +539,9 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
             Selection::Refuse(c, e) => (c.as_ref().map(|c| c.id), c.as_ref().map(|c| c.revision), "denied", e.1, Err(e)),
             Selection::Allow(c, reason) => {
                 let i = invocation.unwrap();
-                let mut state = "routed";
                 match &i.intent {
                     Intent::New => {
                         if req.tool == "claude" { id = Some(assign_claude(db, &c, &workspace, ms)?); }
-                        else if req.tool == "codex" && intent != "app_server" { state = "pending"; }
                     }
                     Intent::Print(_) => {}
                     Intent::Resume(uid) => {
@@ -490,7 +560,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                 if i.intent.rotates() {
                     db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                 }
-                (Some(c.id), Some(c.revision), state, reason, Ok(plan(req, &c, i, id.as_deref(), reason)))
+                (Some(c.id), Some(c.revision), "routed", reason, Ok(plan(req, &c, i, id.as_deref(), reason)))
             }
         };
         db.execute(
@@ -583,35 +653,52 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
         return acp_event(store, o);
     }
     let uid = native_id(&o.native_id)?;
-    let intent = match (o.event.as_str(), o.source.as_str()) {
-        ("thread/started", "app-server") => "new",
-        ("thread/start", "app-server") => "app_server",
-        _ => return Err(Error::bad("wrong_event", "Not a root startup event.")),
-    };
+    if o.event != "thread/start" || o.source != "app-server" {
+        return Err(Error::bad(
+            "wrong_event",
+            "Not a managed app-server thread/start reply.",
+        ));
+    }
     if o.workspace.as_ref().is_some_and(|s| {
         !std::path::Path::new(s).is_absolute() || s.len() > 4096 || s.chars().any(char::is_control)
     }) {
         return Err(Error::bad("bad_cwd", "Invalid thread workspace."));
     }
-    store.write(|db|{
-        let (state,old,owner,ws,created):(String,Option<String>,i64,String,i64)=db.query_row("SELECT state,native_id,config_id,workspace,created_ms FROM launches WHERE tool='codex' AND config_id IS NOT NULL AND intent=? AND request_id=? AND ticket_digest=?",params![intent,o.request_id,digest(&o.ticket)],|s|Ok((s.get(0)?,s.get(1)?,s.get(2)?,s.get(3)?,s.get(4)?))).optional()?.ok_or_else(Error::denied)?;
-        if intent == "app_server" {
-            if state != "routed" { return Ok(Err(Error::denied())); }
-            if let Some(existing) = db.query_row("SELECT owner FROM sessions WHERE tool='codex' AND native_id=?", [&uid], |r| r.get::<_,i64>(0)).optional()? {
-                return Ok(if existing == owner {Ok(())} else {Err(Error::conflict("observation_conflict", "Thread already belongs to a different profile."))});
+    store.write(|db| {
+        let (owner, ws): (i64, String) = db
+            .query_row(
+                "SELECT config_id,workspace FROM launches WHERE tool='codex' AND state='routed'
+             AND intent='app_server' AND request_id=? AND ticket_digest=?",
+                params![o.request_id, digest(&o.ticket)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(Error::denied)?;
+        let ws = o.workspace.as_deref().unwrap_or(&ws);
+        let existing: Option<(i64, String)> = db
+            .query_row(
+                "SELECT owner,evidence FROM sessions WHERE tool='codex' AND native_id=?",
+                [&uid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match existing {
+            None => insert_binding(db, "codex", &uid, owner, ws, "observed", now()),
+            Some((id, _)) if id != owner => Err(Error::conflict(
+                "observation_conflict",
+                "Thread already belongs to a different profile.",
+            )),
+            Some((_, e)) if e == "saved_file" => {
+                db.execute(
+                    "UPDATE sessions SET evidence='observed',workspace=?,last_routed_ms=?
+                            WHERE tool='codex' AND native_id=?",
+                    params![ws, now(), uid],
+                )?;
+                Ok(())
             }
-            insert_binding(db,"codex",&uid,owner,o.workspace.as_deref().unwrap_or(&ws),"observed",now())?;
-            return Ok(Ok(()));
+            _ => Ok(()),
         }
-        if state=="observed"&&old.as_deref()==Some(&uid){return Ok(Ok(()))}
-        if state=="conflict" || state=="observed" || (state=="pending" && db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='codex' AND native_id=?)",[&uid],|r|r.get::<_,bool>(0))?){
-            db.execute("UPDATE launches SET reason='observation_conflict',native_id=COALESCE(native_id,?),state=CASE WHEN state='pending' THEN 'conflict' ELSE state END WHERE request_id=?", params![uid,o.request_id])?;
-            return Ok(Err(Error::conflict("observation_conflict","Conflicting session observation; existing owner preserved.")))
-        }
-        if state!="pending"||now()-created>86_400_000{return Ok(Err(Error::conflict("ticket_expired","Observation ticket has expired or is no longer pending.")))}
-        let ms=now();insert_binding(db,"codex",&uid,owner,o.workspace.as_deref().unwrap_or(&ws),"observed",ms)?;
-        db.execute("UPDATE launches SET native_id=?,state='observed',observed_ms=? WHERE request_id=?",params![uid,ms,o.request_id])?;Ok(Ok(()))
-    })?
+    })
 }
 pub fn exec_failure(store: &Store, x: &Failure) -> Result<()> {
     let reason = match x.errno {

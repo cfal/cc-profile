@@ -82,6 +82,13 @@ pub fn private(s: Shared) -> Router {
         )
         .route(
             "/v2/launch",
+            post(|| async {
+                (StatusCode::UPGRADE_REQUIRED,
+                 Json(json!({"message":"This daemon requires a v3 launcher. Update ccp and ccpd together."})))
+            }),
+        )
+        .route(
+            "/v3/launch",
             post(
                 |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
                     let app = s.clone();
