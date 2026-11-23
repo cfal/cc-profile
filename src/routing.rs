@@ -133,7 +133,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
 }
 fn plan(r: &Request, c: &Config, i: &Invocation, session: Option<&str>, reason: &str) -> Plan {
     let (set, unset) = env_patch(c);
-    let mut args = r.argv.clone();
+    let mut args = i.intent.argv(&r.argv).to_vec();
     if i.intent == Intent::New && r.tool == "claude" {
         args.splice(0..0, ["--session-id".into(), session.unwrap().into()]);
     }
@@ -195,7 +195,7 @@ fn choose(
         );
     }
     match &i.intent {
-        Intent::New => {
+        Intent::New | Intent::Print(_) => {
             let all = configs(db, &req.tool)?;
             if !all.iter().any(|c| c.enabled) {
                 return Ok(reject("no_enabled_config"));
@@ -444,7 +444,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
             _ => i.intent.name(),
         }).unwrap_or("unsupported");
         let mut id = invocation.and_then(|i| i.intent.id()).map(str::to_owned);
-        let mode = if invocation.is_some_and(|i| i.intent == Intent::New) {
+        let mode = if invocation.is_some_and(|i| i.intent.rotates()) {
             routing_mode(db)?
         } else {
             RoutingMode::RoundRobin
@@ -464,8 +464,8 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                     Intent::New => {
                         if req.tool == "claude" { id = Some(assign_claude(db, &c, &workspace, ms)?); }
                         else if req.tool == "codex" && intent != "app_server" { state = "pending"; }
-                        db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                     }
+                    Intent::Print(_) => {}
                     Intent::Resume(uid) => {
                         if i.agy_tui {
                             db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms,saved_file_seen_ms)
@@ -478,6 +478,9 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                         }
                     }
                     Intent::Misc => {}
+                }
+                if i.intent.rotates() {
+                    db.execute("UPDATE tools SET cursor=? WHERE tool=?", params![c.id, req.tool])?;
                 }
                 (Some(c.id), Some(c.revision), state, reason, Ok(plan(req, &c, i, id.as_deref(), reason)))
             }

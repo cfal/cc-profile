@@ -29,11 +29,14 @@ mod codex;
 const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
 
   ccp claude --model opus
+  ccp claude --model opus -p 'summarize' --output-format json
   ccp codex exec --json 'review these changes'
+  ccp codex exec --ephemeral --sandbox read-only 'summarize'
   ccp claude --resume <session-uuid>
   ccp codex resume <session-uuid>
   ccp codex app-server [--for-session <uuid>]
   ccp agy
+  ccp agy --print --sandbox 'summarize'
   ccp agy models
   ccp agy --conversation <session-uuid>
   ccp agy acp [--for-session <session-id>]
@@ -104,17 +107,27 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
         return Err(invalid());
     }
     let mut managed = None;
-    if matches!(req.tool.as_str(), "codex" | "agy") && req.login_profile.is_none() {
+    if req.login_profile.is_none()
+        && (req.tool != "claude"
+            || req
+                .argv
+                .iter()
+                .any(|a| matches!(a.as_str(), "-p" | "--print")))
+    {
         let i = classify(&req.tool, &req.argv, &req.cwd)?;
+        if req.tool == "claude" && i.intent == Intent::New {
+            // A literal "-p" after "--" is chat text. New Claude chats get a daemon-assigned ID.
+            return Ok((path, None));
+        }
         let valid_decision = match i.intent {
-            Intent::New => RoutingMode::parse(&plan.decision).is_some(),
+            Intent::New | Intent::Print(_) => RoutingMode::parse(&plan.decision).is_some(),
             Intent::Resume(_) => plan.decision == "sticky",
             Intent::Misc => plan.decision == "current",
         };
-        if plan.argv != req.argv || !valid_decision || plan.config_id <= 0 {
+        if plan.argv != i.intent.argv(&req.argv) || !valid_decision || plan.config_id <= 0 {
             return Err(invalid());
         }
-        if i.intent != Intent::Misc {
+        if req.tool != "claude" && !matches!(i.intent, Intent::Misc | Intent::Print(_)) {
             managed = Some(i);
         }
     }

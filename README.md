@@ -105,7 +105,7 @@ ccp codex app-server                       # native JSONL protocol over stdin/st
 ccp codex app-server --for-session <uuid>   # select the owner; client still sends thread/resume
 ```
 
-For a new chat, the TUI or exec client connects to a private app-server on this machine. Both inherit the selected profile and proxy; no credentials are copied. The launcher records the first persistent root thread that Codex announces, not later in-app navigation. An ID observed before the first turn is not proof that Codex saved the thread. Exact resumes go straight to the native client on the saved profile. User-configured hooks are not disabled.
+For a new persistent chat, the TUI or exec client connects to a private app-server on this machine. Both inherit the selected profile and proxy; no credentials are copied. The launcher records the first persistent root thread that Codex announces, not later in-app navigation. An ID observed before the first turn is not proof that Codex saved the thread. Exact resumes go straight to the native client on the saved profile. User-configured hooks are not disabled.
 
 Use `-C` for the workspace and `-m` to override the model. Interactive launches keep the native folder trust prompt. New `exec` launches require a Git workspace unless you explicitly pass `--skip-git-repo-check`. Configure sandbox and approval policy in the profile: the router refuses per-launch policy overrides, `--add-dir`, `--no-daemon`, and `--output-schema` for new managed chats rather than silently ignoring them.
 
@@ -134,9 +134,23 @@ ccp codex login status
 - **New:** select a profile using the configured routing mode. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook. Antigravity selects a profile per ACP connection and binds each successful `session/new` to it.
 - **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native IDs are supported (opaque strings for ACP, UUIDs for Claude and Codex). A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.
 - **Miscellaneous:** help/version flags, supported auth, doctor, features and MCP management commands use Current. No Current means no launch. In Claude, `--help` shows help; the word `help` alone is a chat prompt.
-- **Unsupported:** `--last`, `claude -c`, pickers, forks, ephemeral/remote/background modes, hook or home overrides, and unrecognized routing-sensitive argument forms. The startup log is not the provider's activity history. In-app session navigation and raw native commands bypass the launcher.
+- **Unsupported:** `--last`, `claude -c`, pickers, forks, remote/background modes, hook or home overrides, and unrecognized routing-sensitive argument forms. The startup log is not the provider's activity history. In-app session navigation and raw native commands bypass the launcher.
 
 Interactive Claude can dispatch a subcommand even after `--`. The router refuses ambiguous forms such as `ccp claude -- rc` and `ccp claude -- update`; to use a verb as a literal one-word prompt, use print mode, e.g. `ccp claude -p -- rc`.
+
+### One-shot prompts
+
+```sh
+ccp claude --model opus -p 'Summarize these changes' --output-format json
+ccp agy --print --sandbox 'Summarize these changes' --output-format=json
+ccp codex exec --ephemeral --sandbox read-only --json 'Summarize these changes'
+git diff | ccp claude --print
+ccp agy -p -- '--an option-like prompt'
+```
+
+One-shots select a profile just like a new chat, inherit the caller's streams and return the native exit status. The router records a startup decision but neither assigns nor tracks a session ID. Claude and AgY accept `-p` or `--print` and can read a piped prompt when no text is supplied. Use `--option=value` for a flag-like option value and `--` before a flag-like positional prompt. Claude runs with `--no-session-persistence`; an explicit `-p --resume <uuid>` is instead a tracked resume on the original profile. AgY may still save native history that can be discovered separately; use `ccp usage <profile-id>` for its native quota report.
+
+Codex uses its own `exec --ephemeral` (or `e --ephemeral`) command directly, without a router-managed app-server. It accepts a prompt or stdin. Put `--ephemeral` after `exec`; it cannot be combined with a resume. Plain `exec` still tracks the session. Codex `-p` means `--profile`, not print; neither a native config-profile override nor a synthetic `--print` is supported.
 
 The **Dashboard** shows account quotas first, then **Startup logs** with routing decisions, denials, observed IDs and reported exec failures. The logs do not track running processes or successful model calls. Full argv, prompts, tokens and proxy URLs are not logged. **Sessions** is a separately paginated, permanent mapping table, not a transcript viewer. Disabling a config blocks future admissions; it cannot revoke a delivered plan or stop an existing process.
 

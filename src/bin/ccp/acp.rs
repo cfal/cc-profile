@@ -284,7 +284,7 @@ pub(super) async fn run(
     let mut args = if profile_usage {
         agy::usage_args(false)
     } else {
-        req.argv.clone()
+        plan.argv.clone()
     };
     if bridge && let Some(i) = args.iter().position(|s| s == "--for-session") {
         args.drain(i..i + 2);

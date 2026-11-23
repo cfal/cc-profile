@@ -79,9 +79,9 @@ sys.exit(17)
 
     def test_version_probe_environment_cannot_short_circuit_an_ordinary_launch(self):
         self.env["CCP_NATIVE_VERSION_PROBE"] = "1"
-        p = self.run_ccp("claude", "-p", "hello")
+        p = self.run_ccp("claude", "hello")
         self.assertEqual(p.returncode, 17, p.stderr)
-        self.assertEqual(json.loads(p.stdout)[0], ["-p", "hello"])
+        self.assertEqual(json.loads(p.stdout)[0], ["hello"])
 
     def test_empty_path_does_not_pick_a_program_in_the_working_directory(self):
         for path in ["", ":/nonexistent:"]:
@@ -143,6 +143,21 @@ sys.exit(17)
             with self.subTest(bad=bad):
                 p=self.run_ccp("claude")
                 self.assertEqual((p.returncode,p.stdout),(1,""))
+
+    def test_print_plans_cannot_substitute_a_persistent_launch(self):
+        for tool, key, argv, replaced in [
+            ("claude", "CLAUDE_CONFIG_DIR", ["-p", "hi"], ["--session-id", "old", "-p", "hi"]),
+            ("codex", "CODEX_HOME", ["exec", "--ephemeral", "hi"], ["exec", "hi"]),
+            ("agy", "HOME", ["--print", "hi"], ["-i", "hi"]),
+        ]:
+            if tool != "claude":
+                (self.root/tool).symlink_to(self.native)
+            self.respond = lambda path, req: (200, dict(
+                self.plan(req), decision="round_robin", argv=replaced, env_set={key: str(self.root)}))
+            with self.subTest(tool=tool):
+                p = self.run_ccp(tool, *argv)
+                self.assertEqual((p.returncode, p.stdout), (1, ""))
+                self.assertIn("Invalid launch plan", p.stderr)
 
     def test_denial_sends_override_names_not_values_and_does_not_retry(self):
         self.respond=lambda path,r:(409,{"message":"owner disabled"})

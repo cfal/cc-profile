@@ -82,7 +82,7 @@ class Antigravity(unittest.TestCase):
                              (owner["id"],"tui","routed",None))
             self.assertNotIn("private initial prompt", str(row))
         for args in [("--continue",), ("--conversation","unknown"), ("--settings","{}"),
-                     ("--sandbox","models"), ("--agent","--conversation=hidden"), ("--sandbox","-p","secret"),
+                     ("--sandbox","models"), ("--agent","--conversation=hidden"), ("--sandbox","-p","-i","secret"),
                      ("acp","--dangerously-skip-permissions"), ("--remote-control",), ("--new-project",)]:
             denied = self.s.cli("agy", *args)
             self.assertNotEqual(denied.returncode, 0, args)

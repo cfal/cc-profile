@@ -450,13 +450,16 @@ class Service(unittest.TestCase):
     def test_claude_exec_stickiness_and_fail_closed_controls(self):
         c = self.account("claude", "one")
         self.account("claude", "two")
-        p = self.cli("claude", "-p", "private prompt")
+        p = self.cli("claude", "private prompt")
         self.assertEqual(p.returncode, 0, p.stderr)
         out = json.loads(p.stdout)
         uid = out["argv"][1]
-        self.assertEqual(out["argv"][2:], ["-p", "private prompt"])
+        self.assertEqual(out["argv"][2:], ["private prompt"])
         self.assertEqual(out["home"], c["home"])
         self.assertEqual(json.loads(self.cli("claude", "-r", uid).stdout)["home"], c["home"])
+        resume = ["-p", "--resume", uid, "--output-format", "json", "continue"]
+        out = json.loads(self.cli("claude", *resume).stdout)
+        self.assertEqual((out["home"], out["argv"]), (c["home"], resume))
         code, _, _ = self.api("PATCH", "accounts/%d" % c["id"], {"enabled":False,"revision":c["revision"]})
         self.assertEqual(code, 200)
         p = self.cli("claude", "-r", uid)
@@ -531,7 +534,8 @@ class Service(unittest.TestCase):
             self.assertEqual(p.stdout, "")
         self.assertEqual(self.api("GET","sessions")[1]["items"], [])
         self.assertEqual(self.cli("claude","-p","--permission-prompts","host","hello").returncode, 0)
-        self.assertEqual(self.api("GET","sessions")[1]["items"][0]["config_id"], work["id"])
+        self.assertEqual(self.api("GET","sessions")[1]["items"], [])
+        self.assertEqual(self.api("GET","startups")[1]["items"][0]["config_id"], work["id"])
 
     def test_native_identity_is_profile_scoped_and_only_exposes_display_fields(self):
         for tool in ("claude","codex"):

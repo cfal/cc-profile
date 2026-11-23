@@ -454,7 +454,7 @@ class Panel(unittest.TestCase):
     def test_log_filters_and_session_navigation(self):
         service = self.start_service()
         profile = service.account("claude", "Work" * 24)
-        launch = service.cli("claude", "--print", "fixture")
+        launch = service.cli("claude", "fixture")
         self.assertEqual(launch.returncode, 0, launch.stderr)
         record, = service.api("GET", "startups")[1]["items"]
         with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:

@@ -40,12 +40,13 @@ class Native(unittest.TestCase):
             self.assertNotEqual(self.s.cli("claude",*args).returncode,0)
         self.assertFalse(self.s.api("GET","sessions")[1]["items"])
         result=self.s.cli("claude","-p","--output-format","json","--","rc")
-        session=self.s.api("GET","sessions")[1]["items"][0]
-        self.assertEqual(json.loads(result.stdout)["session_id"],session["native_id"])
+        self.assertEqual(self.s.api("GET","sessions")[1]["items"],[])
+        self.assertNotIn("Unsupported",result.stderr)
+        self.assertEqual(json.loads(result.stdout)["type"], "result")
 
     def test_claude_assigns_exact_id_before_exec(self):
         c = self.s.account("claude","cc-home")
-        self.s.cli("claude","-p","--output-format","json","Reply OK")
+        self.s.cli("claude","Reply OK")
         row = self.s.api("GET","sessions?tool=claude")[1]["items"][0]
         uid = row["native_id"]
         self.assertEqual(row["evidence"],"assigned")

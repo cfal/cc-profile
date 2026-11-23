@@ -212,11 +212,49 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     f.store.current("codex", Some(c.id)).unwrap();
     std::fs::write(c.home.join("auth.json"), "{}").unwrap();
     f.store.set_routing_mode(MostRemaining).unwrap();
+    let print = req(
+        &f,
+        "codex",
+        &["exec", "--ephemeral", "private question"],
+        &exe,
+    );
+    let admission = admit(&f.store, &exe, &print).unwrap();
+    assert!(admission.refresh_quota);
+    assert_eq!(admission.plan.unwrap().decision, "most_remaining");
+    assert!(!admit(&f.store, &exe, &print).unwrap().refresh_quota);
+    assert!(
+        observe(
+            &f.store,
+            &Observation {
+                request_id: print.request_id,
+                ticket: print.ticket,
+                event: "thread/started".into(),
+                source: "app-server".into(),
+                native_id: Uuid::new_v4().to_string(),
+                workspace: None,
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        f.store.page(true, &Page::default()).unwrap()["items"],
+        json!([])
+    );
     let new = req(&f, "codex", &[], &exe);
     let first = admit(&f.store, &exe, &new).unwrap();
     assert!(first.refresh_quota);
     let plan = first.plan.unwrap();
     cache(&f, &c, window(100.), now());
+    assert_eq!(
+        launch(
+            &f.store,
+            &exe,
+            &req(&f, "codex", &["exec", "--ephemeral"], &exe)
+        )
+        .unwrap_err()
+        .1,
+        "quota_exhausted"
+    );
     let replay = admit(&f.store, &exe, &new).unwrap();
     assert!(!replay.refresh_quota);
     assert_eq!(replay.plan.unwrap(), plan);
@@ -475,7 +513,7 @@ fn retries_disabled_resumes_and_redacted_log() {
     let a = f.add("claude", "a");
     let b = f.add("claude", "b");
     let exe = build();
-    let mut x = req(&f, "claude", &["-p", "private prompt"], &exe);
+    let mut x = req(&f, "claude", &["private prompt"], &exe);
     let p = launch(&f.store, &exe, &x).unwrap();
     assert_eq!(p.config_id, a.id);
     assert_eq!(p, launch(&f.store, &exe, &x).unwrap());

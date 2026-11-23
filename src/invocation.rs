@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Intent {
     New,
+    Print(Vec<String>),
     Resume(String),
     Misc,
 }
@@ -13,8 +14,18 @@ impl Intent {
     pub fn name(&self) -> &'static str {
         match self {
             Self::New => "new",
+            Self::Print(_) => "print",
             Self::Resume(_) => "resume",
             Self::Misc => "misc",
+        }
+    }
+    pub fn rotates(&self) -> bool {
+        matches!(self, Self::New | Self::Print(_))
+    }
+    pub fn argv<'a>(&'a self, original: &'a [String]) -> &'a [String] {
+        match self {
+            Self::Print(argv) => argv,
+            _ => original,
         }
     }
     pub fn id(&self) -> Option<&str> {
@@ -125,16 +136,53 @@ fn claude_command(word: &str) -> bool {
             | "upgrade"
     )
 }
-fn agy_tui_intent(args: &[String]) -> Result<Intent> {
+fn agy_terminal(args: &[String]) -> Result<Intent> {
     let invalid = || {
         Error::bad(
             "unsupported_invocation",
-            "Unsupported or ambiguous AgY terminal arguments. Use -i <prompt> for interactive input and one --conversation=<uuid> to resume.",
+            "Unsupported or ambiguous AgY arguments. Use -p for print, -i for interactive input, or one --conversation=<uuid> to resume.",
         )
     };
     let mut resume = None;
-    let mut it = args.iter().map(String::as_str);
+    let mut print = false;
+    let mut interactive = false;
+    let mut print_options = false;
+    let mut prompt = None;
+    let mut tail = false;
+    let mut options = Vec::new();
+    let mut it = args.iter().map(String::as_str).peekable();
     while let Some(arg) = it.next() {
+        if tail || !arg.starts_with('-') || arg == "-" {
+            if !tail
+                && matches!(
+                    arg,
+                    "acp"
+                        | "agent"
+                        | "agents"
+                        | "changelog"
+                        | "help"
+                        | "install"
+                        | "mcp"
+                        | "mic-serve"
+                        | "models"
+                        | "plugin"
+                        | "plugins"
+                        | "remote-control"
+                        | "update"
+                )
+            {
+                return Err(invalid());
+            }
+            if prompt.replace(arg).is_some() {
+                return Err(invalid());
+            }
+            continue;
+        }
+        if arg == "--" {
+            tail = true;
+            continue;
+        }
+        let start = args.len() - it.len() - 1;
         let (flag, inline) = arg
             .split_once('=')
             .map_or((arg, None), |(f, v)| (f, Some(v)));
@@ -145,6 +193,16 @@ fn agy_tui_intent(args: &[String]) -> Result<Intent> {
                 .ok_or_else(invalid)
         };
         match flag {
+            "-p" | "--print" if !print => {
+                print = true;
+                let operand = inline.or_else(|| it.next_if(|a| !a.starts_with('-') || *a == "-"));
+                if let Some(p) = operand
+                    && prompt.replace(p).is_some()
+                {
+                    return Err(invalid());
+                }
+                continue;
+            }
             "--dangerously-skip-permissions" | "--sandbox"
                 if matches!(inline, None | Some("true" | "false")) => {}
             "--conversation" if resume.is_none() => {
@@ -156,17 +214,55 @@ fn agy_tui_intent(args: &[String]) -> Result<Intent> {
                     )
                 })?);
             }
-            "--model"
-            | "--effort"
-            | "--mode"
-            | "--agent"
-            | "--add-dir"
-            | "-i"
-            | "--prompt-interactive" => {
+            "--model" | "--effort" | "--mode" | "--agent" | "--add-dir" => {
                 value()?;
+            }
+            "-i" | "--prompt-interactive" => {
+                interactive = true;
+                value()?;
+            }
+            "--output-format" => {
+                print_options = true;
+                if !matches!(value()?, "text" | "json" | "stream-json") {
+                    return Err(invalid());
+                }
+            }
+            "--input-format" => {
+                print_options = true;
+                if !matches!(value()?, "text" | "stream-json") {
+                    return Err(invalid());
+                }
+            }
+            "--print-timeout" | "--json-schema" => {
+                print_options = true;
+                value()?;
+            }
+            "--disable-slash-commands" if matches!(inline, None | Some("true" | "false")) => {
+                print_options = true
             }
             _ => return Err(invalid()),
         }
+        options.extend_from_slice(&args[start..args.len() - it.len()]);
+    }
+    if print {
+        if interactive || resume.is_some() {
+            return Err(invalid());
+        }
+        if prompt
+            .and_then(|p| p.split_whitespace().next())
+            .is_some_and(|w| matches!(w, "/usage" | "/quota" | "/credits"))
+        {
+            return Err(Error::bad(
+                "unsupported_invocation",
+                "Account reports are not routed prompts. For the native /usage report, use ccp usage <antigravity-profile-id>.",
+            ));
+        }
+        // Native AgY takes its prompt on the flag, not as an interspersed positional.
+        options.push(format!("--print={}", prompt.unwrap_or_default()));
+        return Ok(Intent::Print(options));
+    }
+    if tail || prompt.is_some() || print_options {
+        return Err(invalid());
     }
     Ok(resume.map(Intent::Resume).unwrap_or(Intent::New))
 }
@@ -193,7 +289,9 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             }
             (intent, false)
         } else {
-            (agy_tui_intent(args)?, true)
+            let i = agy_terminal(args)?;
+            let tui = !matches!(i, Intent::Print(_));
+            (i, tui)
         };
         return Ok(Invocation {
             intent,
@@ -220,6 +318,9 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut resume = None;
     let mut help = false;
     let mut print_mode = false;
+    let mut no_persistence = false;
+    let mut ephemeral = false;
+    let mut tui_only = false;
     let mut it = args.iter().peekable();
     let positional = |arg: &str| !arg.starts_with('-') || arg == "-";
     while let Some(arg) = it.next() {
@@ -250,6 +351,10 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 | "--output-schema"
         );
         skip_git_check |= key == "--skip-git-repo-check";
+        tui_only |= matches!(
+            key,
+            "--no-alt-screen" | "--no-daemon" | "--search" | "-a" | "--ask-for-approval"
+        );
         let mut value = || {
             inline
                 .or_else(|| it.next().map(String::as_str))
@@ -369,6 +474,20 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 }
             }
             (true, "-p" | "--print") if inline.is_none() => print_mode = true,
+            (true, "--no-session-persistence") if inline.is_none() => no_persistence = true,
+            (false, "--ephemeral")
+                if inline.is_none()
+                    && !ephemeral
+                    && matches!(words.first(), Some(("exec" | "e", true))) =>
+            {
+                ephemeral = true;
+            }
+            (false, "-p" | "--profile" | "--print") => {
+                return Err(Error::bad(
+                    "unsupported_invocation",
+                    "Codex -p/--profile selects a native configuration profile, not print mode. Use ccp codex exec --ephemeral for a one-shot prompt.",
+                ));
+            }
             (false, "--dangerously-bypass-approvals-and-sandbox" | "--yolo")
                 if inline.is_none() =>
             {
@@ -434,7 +553,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     ) {
         return Err(unsupported());
     }
-    let intent = if help {
+    let mut intent = if help {
         Intent::Misc
     } else if claude {
         match command {
@@ -484,15 +603,32 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             _ => return Err(unsupported()),
         }
     };
-    if !claude {
-        if codex_images && !matches!(intent, Intent::Resume(_)) {
-            return Err(Error::bad(
-                "unsupported_invocation",
-                "Image attachments require an exact Codex resume. Use resume UUID --image=FILE before the prompt.",
-            ));
+    if claude {
+        if no_persistence && (!print_mode || intent != Intent::New) {
+            return Err(unsupported());
         }
+        if print_mode && intent == Intent::New {
+            let mut native = args.to_vec();
+            if !no_persistence {
+                native.insert(0, "--no-session-persistence".into());
+            }
+            intent = Intent::Print(native);
+        }
+    } else {
         if matches!(command, Some("exec" | "e")) {
             codex.exec = first_word;
+        }
+        if ephemeral {
+            if intent != Intent::New || tui_only {
+                return Err(unsupported());
+            }
+            intent = Intent::Print(args.to_vec());
+        }
+        if codex_images && !matches!(intent, Intent::Resume(_) | Intent::Print(_)) {
+            return Err(Error::bad(
+                "unsupported_invocation",
+                "Image attachments require an exact Codex resume or exec --ephemeral. Use --image=FILE before the prompt.",
+            ));
         }
         if intent == Intent::New {
             if local_only_option {
@@ -529,6 +665,144 @@ mod tests {
             &a.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             Path::new("/"),
         )
+    }
+    fn print(args: &[&str]) -> Intent {
+        Intent::Print(args.iter().map(|s| s.to_string()).collect())
+    }
+    #[test]
+    fn print_switches_preserve_option_arity_and_literal_prompts() {
+        for marker in ["-p", "--print"] {
+            let args = [
+                "--model",
+                "opus",
+                "question",
+                marker,
+                "--permission-mode=plan",
+                "--output-format",
+                "json",
+            ];
+            let mut expected = vec!["--no-session-persistence"];
+            expected.extend(args);
+            assert_eq!(parse("claude", &args).unwrap().intent, print(&expected));
+            let explicit = ["--no-session-persistence", marker, "--", "-p"];
+            assert_eq!(parse("claude", &explicit).unwrap().intent, print(&explicit));
+            for tool in ["agy", "claude", "codex"] {
+                let value = format!("--model={marker}");
+                assert_eq!(parse(tool, &[&value]).unwrap().intent, Intent::New);
+                assert!(parse(tool, &["--model", marker]).is_err());
+            }
+            for args in [
+                vec![
+                    "--sandbox=true",
+                    marker,
+                    "--model",
+                    "test",
+                    "question",
+                    "--output-format=json",
+                ],
+                vec![
+                    "question",
+                    "--sandbox=true",
+                    "--model",
+                    "test",
+                    "--output-format=json",
+                    marker,
+                ],
+            ] {
+                assert_eq!(
+                    parse("agy", &args).unwrap().intent,
+                    print(&[
+                        "--sandbox=true",
+                        "--model",
+                        "test",
+                        "--output-format=json",
+                        "--print=question"
+                    ])
+                );
+            }
+            assert_eq!(
+                parse("agy", &[marker, "--", "--sandbox"]).unwrap().intent,
+                print(&["--print=--sandbox"])
+            );
+            assert_eq!(
+                parse("agy", &[marker]).unwrap().intent,
+                print(&["--print="])
+            );
+            assert_eq!(
+                parse("agy", &[marker, "models", "--model", "fixture"])
+                    .unwrap()
+                    .intent,
+                print(&["--model", "fixture", "--print=models"])
+            );
+        }
+        assert_eq!(parse("agy", &["models"]).unwrap().intent, Intent::Misc);
+        for args in [
+            vec!["models", "--print"],
+            vec!["--print", "/usage"],
+            vec!["--print=/quota"],
+            vec!["-p", "/credits"],
+            vec!["-p", "--conversation=60000000-0000-4000-8000-000000000002"],
+            vec!["-i", "chat", "--print"],
+            vec!["--print", "a", "b"],
+        ] {
+            assert!(parse("agy", &args).is_err(), "{args:?}");
+        }
+    }
+    #[test]
+    fn codex_requires_explicit_local_ephemeral_exec_and_never_reinterprets_profile() {
+        for args in [
+            vec!["--print", "question"],
+            vec!["-p", "native-profile"],
+            vec!["--profile=work", "exec", "--ephemeral"],
+            vec!["exec", "-p", "work", "--ephemeral"],
+            vec!["--ephemeral", "exec", "question"],
+            vec![
+                "exec",
+                "--ephemeral",
+                "resume",
+                "60000000-0000-4000-8000-000000000002",
+            ],
+            vec![
+                "e",
+                "resume",
+                "60000000-0000-4000-8000-000000000002",
+                "--ephemeral",
+            ],
+            vec!["exec", "--ephemeral", "review"],
+        ] {
+            assert!(parse("codex", &args).is_err(), "{args:?}");
+        }
+        for args in [
+            vec![
+                "-m=--print",
+                "exec",
+                "--json",
+                "--ephemeral",
+                "-s",
+                "read-only",
+                "--",
+                "--resume",
+            ],
+            vec!["-m", "exec", "e", "question", "--ephemeral", "--json"],
+            vec!["exec", "--ephemeral", "--image=a.png", "describe"],
+        ] {
+            assert_eq!(parse("codex", &args).unwrap().intent, print(&args));
+        }
+        assert_eq!(
+            parse(
+                "codex",
+                &[
+                    "exec",
+                    "--model=--ephemeral",
+                    "--skip-git-repo-check",
+                    "--",
+                    "--ephemeral"
+                ]
+            )
+            .unwrap()
+            .intent,
+            Intent::New
+        );
     }
     #[test]
     fn agy_tui_values_do_not_select_a_command_or_session() {
@@ -607,7 +881,7 @@ mod tests {
             vec!["--app-data-dir", "elsewhere"],
             vec!["--log-file=x"],
             vec!["--login"],
-            vec!["--print"],
+            vec!["--print", "--new-project"],
             vec!["--stdio"],
             vec!["--", "chat"],
             vec!["unknown"],
@@ -768,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn images_follow_native_arity_only_on_exact_codex_resumes() {
+    fn codex_resume_images_follow_native_arity() {
         let id = "60000000-0000-4000-8000-000000000002";
         for args in [
             vec!["resume", id, "-i", "a.png", "b.png", "--", "--last"],
@@ -816,7 +1090,14 @@ mod tests {
             (
                 "claude",
                 vec!["-p", "--model", "resume", "--", "--resume"],
-                Intent::New,
+                print(&[
+                    "--no-session-persistence",
+                    "-p",
+                    "--model",
+                    "resume",
+                    "--",
+                    "--resume",
+                ]),
             ),
             (
                 "claude",
@@ -838,7 +1119,11 @@ mod tests {
             ("claude", vec!["help"], Intent::New),
             ("claude", vec!["--help"], Intent::Misc),
             ("claude", vec!["auth", "status"], Intent::Misc),
-            ("claude", vec!["-p", "--", "doctor"], Intent::New),
+            (
+                "claude",
+                vec!["-p", "--", "doctor"],
+                print(&["--no-session-persistence", "-p", "--", "doctor"]),
+            ),
         ] {
             assert_eq!(parse(t, &args).unwrap().intent, want)
         }
@@ -856,7 +1141,7 @@ mod tests {
             ("codex", vec!["--disable", "hooks"]),
             ("codex", vec!["--config", "a=b"]),
             ("codex", vec!["fork", id]),
-            ("codex", vec!["exec", "--ephemeral"]),
+            ("codex", vec!["--ephemeral"]),
         ] {
             assert!(parse(t, &args).is_err(), "{args:?}")
         }
@@ -914,7 +1199,10 @@ mod tests {
             let delimited = parse(tool, &["--", cmd]);
             if tool == "claude" && matches!(cmd, "rc" | "remote-control") {
                 assert_eq!(delimited.err().unwrap().1, "unsupported_invocation");
-                assert_eq!(parse(tool, &["-p", "--", cmd]).unwrap().intent, Intent::New);
+                assert_eq!(
+                    parse(tool, &["-p", "--", cmd]).unwrap().intent,
+                    print(&["--no-session-persistence", "-p", "--", cmd])
+                );
             } else {
                 assert_eq!(delimited.unwrap().intent, Intent::New);
             }
