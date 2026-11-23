@@ -371,7 +371,9 @@ async fn run() -> Result<ExitCode> {
         .binary
         .as_deref()
         .ok_or_else(|| Error::bad("binary", "Native executable not found on PATH."))?;
-    eprintln!("ccp: {tool}/{} -> {home}", plan.label);
+    if env::var_os("CC_PROFILE_DEBUG").as_deref() == Some("1".as_ref()) {
+        eprintln!("ccp: {tool}/{} -> {home}", plan.label);
+    }
     if tool == "agy" {
         let result = acp::run(binary, Path::new(home), &req, &plan, managed.as_ref()).await;
         if result.is_err() {

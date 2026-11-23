@@ -628,8 +628,8 @@ class Service(unittest.TestCase):
         # Exercise the real client's validation of the new-session decision.
         p = self.cli("codex","app-server")
         self.assertEqual(p.returncode,0,p.stderr)
-        self.assertIn(high["home"],p.stderr)
-        self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"priority")
+        row = self.api("GET","startups")[1]["items"][0]
+        self.assertEqual((row["config_id"], row["reason"]), (high["id"], "priority"))
 
     def test_only_codex_admission_refreshes_quota_in_remaining_modes(self):
         codex = Path(self.account("codex","codex")["home"])

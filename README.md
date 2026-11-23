@@ -129,7 +129,7 @@ ccp claude auth status
 ccp codex login status
 ```
 
-`ccp` sends argv and cwd over a private Unix socket, applies an allowlisted environment patch, and runs the selected native tool in the same terminal. Its routing message goes to stderr, not the provider's stdout. If the server is unavailable, nothing launches. Remove conflicting inherited API-key, provider, or storage overrides rather than inadvertently charging another identity.
+`ccp` sends argv and cwd over a private Unix socket, applies an allowlisted environment patch, and runs the selected native tool in the same terminal. By default it does not print the selected profile. Set `CC_PROFILE_DEBUG=1` on the launcher to show the profile label and directory on stderr. Native output and launcher errors do not depend on this setting. If the server is unavailable, nothing launches. Remove conflicting inherited API-key, provider, or storage overrides rather than inadvertently charging another identity.
 
 - **New:** select a profile using the configured routing mode. Claude receives an unused UUID before exec. Codex chooses its own UUID; the launcher records it from the native app-server protocol without a startup hook. Antigravity selects a profile per ACP connection and binds each successful `session/new` to it.
 - **Resume:** copy the command from **Sessions**, normally from the original workspace. Only exact known native IDs are supported (opaque strings for ACP, UUIDs for Claude and Codex). A disabled/missing owner is a logged refusal, never a transfer or a replacement chat. Re-enable the owner to continue. If the underlying transcript was deleted or the login changed, the native tool can still refuse.

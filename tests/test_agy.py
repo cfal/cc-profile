@@ -146,11 +146,11 @@ class Antigravity(unittest.TestCase):
         self.s.api("PUT", "current/agy", {"config_id":b["id"]})
         failed = models()
         self.assertEqual((failed.returncode, failed.stdout), (1, ""))
-        self.assertIn("Please sign in", failed.stderr)
+        self.assertEqual(failed.stderr, "Fetching available models...\nError: Please sign in to view available models.\n")
         self.assertEqual(self.s.cli("login",str(b["id"])).returncode,0)
         result = models()
         self.assertEqual((result.returncode, result.stdout), (0, "fixture-model\tFixture Model\n"))
-        self.assertIn("Fetching available models", result.stderr)
+        self.assertEqual(result.stderr, "Fetching available models...\n")
         row = self.s.api("GET","startups?tool=agy")[1]["items"][0]
         self.assertEqual((row["config_id"],row["intent"],row["reason"]), (b["id"],"misc","current"))
         self.s.api("PUT", "current/agy", {"config_id":a["id"]})

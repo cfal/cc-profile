@@ -70,7 +70,16 @@ sys.exit(17)
         out,err=p.communicate("input\n",timeout=8)
         self.assertEqual(json.loads(out),[["--","a b",""],"/physical/home","test-editor",None,"input\n",p.pid])
         self.assertEqual(p.returncode,17)
-        self.assertEqual(err,"ccp: claude/work -> /physical/home\n")
+        self.assertEqual(err,"")
+
+    def test_route_banner_is_opt_in_on_stderr_only(self):
+        for value in ("", "0", "1"):
+            with self.subTest(value=value):
+                self.env["CC_PROFILE_DEBUG"] = value
+                p = self.run_ccp("claude", "test")
+                self.assertEqual(p.returncode, 17)
+                self.assertEqual(json.loads(p.stdout)[0], ["test"])
+                self.assertEqual(p.stderr, "ccp: claude/work -> /physical/home\n" if value == "1" else "")
 
     def test_runtime_socket_does_not_require_a_home_directory(self):
         self.env.pop("HOME")
