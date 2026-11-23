@@ -56,6 +56,21 @@ class NativeACP(unittest.TestCase):
         self.assertEqual((row["intent"], row["config_id"], row["native_id"]), ("tui", self.profile["id"], None))
         self.assertEqual(s.api("GET","sessions?tool=agy")[1]["items"], [])
 
+    def test_mixed_print_options_and_piped_prompt_reach_native_print_mode(self):
+        s = self.service
+        for args, stdin in [(["--print", "--sandbox", "/clear", "--output-format=json"], b""),
+                            (["--output-format", "json", "-p"], b"/clear\n")]:
+            p = subprocess.run([svc.LAUNCHER, "agy", *args], input=stdin, capture_output=True,
+                               env=s.env, cwd=s.root, timeout=8)
+            # This command is refused before authentication or a model turn.
+            self.assertEqual(p.returncode, 2, p.stderr)
+            result = json.loads(p.stdout)
+            self.assertEqual((result["status"], result["num_turns"]), ("ERROR", 0))
+            self.assertIn("/clear is not available in print mode", result["error"])
+        rows = s.api("GET", "startups?tool=agy")[1]["items"]
+        self.assertEqual([(r["intent"], r["native_id"]) for r in rows], [("print", None)] * 2)
+        self.assertEqual(s.api("GET", "sessions?tool=agy")[1]["items"], [])
+
     def test_initialize_and_unauthenticated_new_use_isolated_file_storage(self):
         s, c = self.service, self.profile
         p=subprocess.Popen([svc.LAUNCHER,"agy","acp","--stdio","--disable-telemetry"],cwd=s.root,env=s.env,

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 
 import test_service as svc
@@ -21,6 +22,12 @@ if tool == "agy":
     assert not os.getenv("DBUS_SESSION_BUS_ADDRESS")
     runtime=pathlib.Path(os.environ["XDG_RUNTIME_DIR"])
     assert runtime.is_dir() and not (runtime/"bus").exists()
+    if sys.argv[1:] == ["--print=fixture-save-history"]:
+        directory = pathlib.Path(os.environ[key])
+        for part in (".gemini", "antigravity-cli", "conversations"):
+            directory = directory / part
+            directory.mkdir(mode=0o700, exist_ok=True)
+        (directory/"90000000-0000-4000-8000-000000000001.db").write_bytes(b"fixture")
 print(json.dumps([sys.argv[1:],os.environ[key],os.getcwd(),os.getenv("HTTPS_PROXY")]),flush=True)
 sys.stdout.buffer.write(sys.stdin.buffer.read())
 print("native diagnostic",file=sys.stderr)
@@ -89,3 +96,18 @@ class OneShot(unittest.TestCase):
             self.assertEqual([(x["intent"], x["state"], x["native_id"]) for x in rows], [("print", "routed", None)] * 2)
             self.assertNotIn(prompt, str(rows))
             self.assertEqual(s.api("GET", f"sessions?tool={tool}")[1]["items"], [])
+
+        # A native print can leave a file. Discover its profile without assigning it to the launch.
+        p = subprocess.run([aliases/"agy", "-p", "fixture-save-history"], cwd=s.root, env=env,
+                           input=b"", capture_output=True, timeout=8)
+        self.assertEqual(p.returncode, 23, p.stderr)
+        launch = s.api("GET", "startups?tool=agy")[1]["items"][0]
+        self.assertEqual((launch["intent"], launch["native_id"]), ("print", None))
+        deadline = time.monotonic() + 6
+        while not (rows := s.api("GET", "sessions?tool=agy")[1]["items"]):
+            self.assertLess(time.monotonic(), deadline, "Saved file was not discovered")
+            time.sleep(.05)
+        row, = rows
+        self.assertEqual((row["config_id"], row["native_id"], row["evidence"], row["workspace"]),
+                         (launch["config_id"], "90000000-0000-4000-8000-000000000001", "saved_file", None))
+        self.assertEqual(s.api("GET", "startups?tool=agy")[1]["items"][0], launch)

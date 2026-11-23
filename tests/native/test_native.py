@@ -136,6 +136,20 @@ class Native(unittest.TestCase):
         self.assertFalse((home/"hooks.json").exists())
         self.assertFalse(list((self.s.root/"run/cc-profile").glob("c-*")))
 
+    def test_ephemeral_exec_does_not_assign_or_persist_a_thread(self):
+        c = self.s.account("codex", "ephemeral")
+        home = Path(c["home"])
+        models = []
+        self.offline_codex(home, models)
+        p = self.s.cli("codex", "-m", "fixture-model", "exec", "--skip-git-repo-check",
+                       "--ephemeral", "Local fixture only", "--json")
+        self.assertIn("fixture-model", models, p.stderr)
+        self.assertNotEqual(p.returncode, 0)  # The loopback endpoint rejected the request.
+        row, = self.s.api("GET", "startups?tool=codex")[1]["items"]
+        self.assertEqual((row["intent"], row["native_id"]), ("print", None))
+        self.assertEqual(self.s.api("GET", "sessions?tool=codex")[1]["items"], [])
+        self.assertFalse(list(home.glob("sessions/**/rollout-*.jsonl")))
+
     def test_codex_exec_outside_git_with_explicit_opt_out(self):
         c=self.s.account("codex","exec")
         self.offline_codex(Path(c["home"]))
