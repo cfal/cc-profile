@@ -51,7 +51,10 @@ class Antigravity(unittest.TestCase):
         self.assertEqual((home/".gemini/antigravity-cli/antigravity-oauth-token").stat().st_mode & 0o777,0o600)
         self.assertEqual(self.s.cli("usage",cid).stdout.strip(),
                          "Gemini Models\tWeekly Limit Remaining\t76%\t2030-01-01T00:00:00Z")
-        self.assertNotEqual(self.s.cli("usage",cid,"--settings","{}").returncode,0)
+        for extra in (["--settings", "{}"], ['--settings={"disableSlashCommands":true}']):
+            p = self.s.cli("usage", cid, *extra)
+            self.assertEqual((p.returncode, p.stdout), (2, ""))
+            self.assertNotIn("disableSlashCommands", p.stderr)
         for argv in (["profile-usage"], ["-p", "/usage"], ["--settings", "{}", "-p", "/usage"]):
             self.assertNotEqual(self.s.cli("agy",*argv).returncode,0)
         self.assertEqual((home/"usage-calls").read_text().splitlines(),

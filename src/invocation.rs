@@ -238,7 +238,7 @@ fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
                     _ => return Err(invalid()),
                 };
             }
-            "--print-timeout" | "--json-schema" => {
+            "--print-timeout" | "--json-schema" | "--settings" => {
                 print_options = true;
                 value()?;
             }

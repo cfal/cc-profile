@@ -74,6 +74,40 @@ class NativeACP(unittest.TestCase):
         self.assertEqual([(r["intent"], r["native_id"]) for r in rows], [("print", None)] * 3)
         self.assertEqual(s.api("GET", "sessions?tool=agy")[1]["items"], [])
 
+    def test_print_settings_use_native_parser_without_saving(self):
+        s = self.service
+        finder = '{"permissions":{"allow":["read_file(*)"]}}'
+        # This relative settings filename is also a subcommand, not a dispatch request.
+        (s.root/"acp").write_text(finder)
+        gemini = Path(self.profile["home"])/".gemini"
+        app = gemini/"antigravity-cli"
+        for directory in (gemini, app):
+            directory.mkdir(mode=0o700, exist_ok=True)
+        saved = app/"settings.json"
+        # Native also reformats noncanonical saved JSON on launches without an overlay.
+        original = b'{\n  "showTips": false\n}\n'
+        saved.write_bytes(original)
+        for args, stdin in [
+            (["--settings", finder, "-p", "/clear", "--json-schema", '{"type":"object"}'], b""),
+            (["--print", "--settings=" + finder], b"/clear\n"),
+            (["--settings", "acp", "--print=/clear"], b""),
+        ]:
+            p = subprocess.run([svc.LAUNCHER, "agy", "--output-format=json", *args], input=stdin,
+                               capture_output=True, env=s.env, cwd=s.root, timeout=8)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            result = json.loads(p.stdout)
+            self.assertEqual((result["status"], result["num_turns"]), ("ERROR", 0))
+            self.assertIn("/clear is not available in print mode", result["error"])
+        # A flag-like filename must remain attached; malformed content fails in AgY, not CCP.
+        malformed = "{bad-fixture-json}"
+        (s.root/"--sandbox").write_text(malformed)
+        for option in (["--settings=--sandbox"], ["--settings", malformed]):
+            p = s.cli("agy", "-p", "/clear", *option)
+            self.assertEqual((p.returncode, p.stdout), (1, ""))
+            self.assertIn("Error: --settings must be a JSON object", p.stderr)
+            self.assertNotIn(malformed, p.stderr)
+        self.assertEqual(saved.read_bytes(), original)
+
     def test_initialize_and_unauthenticated_new_use_isolated_file_storage(self):
         s, c = self.service, self.profile
         p=subprocess.Popen([svc.LAUNCHER,"agy","acp","--stdio","--disable-telemetry"],cwd=s.root,env=s.env,
