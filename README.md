@@ -148,7 +148,7 @@ git diff | ccp claude --print
 ccp agy -p -- '--an option-like prompt'
 ```
 
-One-shots select a profile just like a new chat, inherit the caller's streams and return the native exit status. The router records a startup decision but neither assigns nor tracks a session ID. Claude and AgY accept `-p` or `--print` and can read a piped prompt when no text is supplied. Use `--option=value` for a flag-like option value and `--` before a flag-like positional prompt. Claude runs with `--no-session-persistence`; an explicit `-p --resume <uuid>` is instead a tracked resume on the original profile. AgY may still save native history that can be discovered separately; use `ccp usage <profile-id>` for its native quota report.
+One-shots select a profile just like a new chat, use the caller's streams and return the native exit status. The router records a startup decision but neither assigns nor tracks a session ID. Claude and AgY accept `-p` or `--print` and can read a piped prompt when no text is supplied. Use `--option=value` for a flag-like option value and `--` before a flag-like positional prompt. Claude runs with `--no-session-persistence`; an explicit `-p --resume <uuid>` is instead a tracked resume on the original profile. AgY may still save native history that can be discovered separately; use `ccp usage <profile-id>` for its native quota report.
 
 Codex uses its own `exec --ephemeral` (or `e --ephemeral`) command directly, without a router-managed app-server. It accepts a prompt or stdin. Put `--ephemeral` after `exec`; it cannot be combined with a resume. Plain `exec` still tracks the session. Codex `-p` means `--profile`, not print; neither a native config-profile override nor a synthetic `--print` is supported.
 

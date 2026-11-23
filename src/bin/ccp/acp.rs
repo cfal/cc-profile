@@ -9,7 +9,7 @@ use ccpd::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io::{self, BufRead, Read},
+    io::{self, BufRead, IsTerminal, Read, Write},
     path::Path,
     process::{ExitCode, Stdio},
     sync::Mutex,
@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
 const FRAME: usize = 8 << 20;
@@ -239,6 +239,40 @@ async fn output(
     }
 }
 
+type InputFailure = oneshot::Receiver<(io::Error, io::PipeWriter)>;
+
+fn print_text_input(cmd: &mut Command, args: &mut Vec<String>) -> io::Result<Option<InputFailure>> {
+    // 1.5.14 ignores text stdin with --print=, but can open the TUI on EOF without it.
+    // Put a real input byte in the child's pipe before dropping the empty-prompt flag.
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return Ok(None);
+    }
+    let mut first = [0];
+    match stdin.lock().read_exact(&mut first) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let (reader, mut writer) = io::pipe()?;
+    writer.write_all(&first)?;
+    let (tx, rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("agy-print-stdin".into())
+        .spawn(move || {
+            if let Err(e) = io::copy(&mut stdin.lock(), &mut writer)
+                && e.kind() != io::ErrorKind::BrokenPipe
+            {
+                // Don't deliver a partial prompt as EOF on a source read failure.
+                let _ = tx.send((e, writer));
+            }
+        })?;
+    debug_assert!(args.last().is_some_and(|arg| arg == "--print="));
+    args.pop();
+    cmd.stdin(reader);
+    Ok(Some(rx))
+}
+
 pub(super) async fn run(
     binary: &Path,
     home: &Path,
@@ -280,7 +314,8 @@ pub(super) async fn run(
         ));
     }
     let tui = managed.is_some_and(|i| i.agy_tui);
-    let bridge = managed.is_some() && !tui;
+    let text_stdin = managed.is_some_and(|i| i.agy_text_stdin);
+    let bridge = managed.is_some() && !tui && !text_stdin;
     let mut args = if profile_usage {
         agy::usage_args(false)
     } else {
@@ -289,8 +324,13 @@ pub(super) async fn run(
     if bridge && let Some(i) = args.iter().position(|s| s == "--for-session") {
         args.drain(i..i + 2);
     }
-    let rt = agy::Runtime::new()?;
     let mut cmd = Command::new(binary);
+    let input_failure = if text_stdin {
+        print_text_input(&mut cmd, &mut args)?
+    } else {
+        None
+    };
+    let rt = agy::Runtime::new()?;
     cmd.envs(&plan.env_set);
     for k in &plan.env_unset {
         cmd.env_remove(k);
@@ -334,6 +374,12 @@ pub(super) async fn run(
     };
     tokio::select! {
         r=pump=>r,
+        (err, _writer) = async {
+            if let Some(rx) = input_failure && let Ok(failure) = rx.await {
+                return failure;
+            }
+            std::future::pending().await
+        } => {stop(&mut child, libc::SIGKILL).await; Err(err.into())}
         s=shutdown=>{stop(&mut child,s).await;Ok(ExitCode::from((128+s) as u8))}
     }
 }

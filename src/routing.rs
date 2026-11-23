@@ -421,6 +421,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
         Ok(Invocation {
             intent: Intent::Misc,
             agy_tui: false,
+            agy_text_stdin: false,
             workspace: req.cwd.clone(),
             codex: Default::default(),
         })

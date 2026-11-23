@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -29,7 +30,8 @@ if tool == "agy":
             directory.mkdir(mode=0o700, exist_ok=True)
         (directory/"90000000-0000-4000-8000-000000000001.db").write_bytes(b"fixture")
 print(json.dumps([sys.argv[1:],os.environ[key],os.getcwd(),os.getenv("HTTPS_PROXY")]),flush=True)
-sys.stdout.buffer.write(sys.stdin.buffer.read())
+if not sys.stdin.isatty():
+    sys.stdout.buffer.write(sys.stdin.buffer.read())
 print("native diagnostic",file=sys.stderr)
 sys.exit(23)
 '''
@@ -37,7 +39,7 @@ sys.exit(23)
 
 @unittest.skipUnless(svc.DAEMON.is_file() and svc.LAUNCHER.is_file(),"build ccp and ccpd first")
 class OneShot(unittest.TestCase):
-    def test_cli_and_executable_alias_preserve_pipes_and_rotate_without_sessions(self):
+    def setUp(self):
         s = svc.Service("test_web_authenticates_reads_and_mutations")
         self.addCleanup(s.doCleanups)
         s.setUp()
@@ -49,6 +51,10 @@ class OneShot(unittest.TestCase):
             (aliases / tool).symlink_to(svc.LAUNCHER)
         s.start()
         s.session = s.api("POST", "login", {"password": s.password})[1]["session"]
+        self.s, self.aliases = s, aliases
+
+    def test_cli_and_executable_alias_preserve_pipes_and_rotate_without_sessions(self):
+        s, aliases = self.s, self.aliases
         env = dict(s.env, PATH=str(aliases) + os.pathsep + s.env["PATH"],
                    DBUS_SESSION_BUS_ADDRESS="unix:path=/foreign")
         prompt = "private multiword prompt"
@@ -67,7 +73,7 @@ class OneShot(unittest.TestCase):
                 expected = [["--no-session-persistence", *args] for args in requests]
             elif tool == "agy":
                 expected = [["--output-format=json", "--sandbox", "--print=" + prompt],
-                            ["--model", "fixture", "--print="]]
+                            ["--model", "fixture"]]
             profiles = {}
             for label in ("one", "two"):
                 proxy = f"http://{label}.invalid:8080"
@@ -111,3 +117,54 @@ class OneShot(unittest.TestCase):
         self.assertEqual((row["config_id"], row["native_id"], row["evidence"], row["workspace"]),
                          (launch["config_id"], "90000000-0000-4000-8000-000000000001", "saved_file", None))
         self.assertEqual(s.api("GET", "startups?tool=agy")[1]["items"][0], launch)
+
+    def test_agy_input_modes_keep_bytes_and_never_select_tui_on_eof(self):
+        s = self.s
+        code, c, _ = s.api("POST", "accounts", dict(tool="agy", label="stdin", create=True))
+        self.assertEqual(code, 201, c)
+        self.assertEqual(s.api("PATCH", f"accounts/{c['id']}", dict(enabled=True, revision=c["revision"]))[0], 200)
+        exe = [svc.LAUNCHER, "agy"]
+        large = bytes(range(256)) * 8192
+        for args, data, want in [
+            (["-p", "--input-format", "text"], large, ["--input-format", "text"]),
+            (["--input-format=text", "--print"], b"", ["--input-format=text", "--print="]),
+            (["--print="], b"explicitly empty prompt", ["--print="]),
+        ]:
+            result = subprocess.run([*exe, *args], env=s.env, cwd=s.root, input=data,
+                                    capture_output=True, timeout=8)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            header, forwarded = result.stdout.split(b"\n", 1)
+            self.assertEqual((json.loads(header)[0], forwarded), (want, data))
+
+        master, slave = os.openpty()
+        try:
+            result = subprocess.run([*exe, "--print"], env=s.env, cwd=s.root, stdin=slave,
+                                    capture_output=True, timeout=8)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(json.loads(result.stdout)[0], ["--print="])
+        finally:
+            os.close(slave)
+            os.close(master)
+
+        bad_stdin = os.open(s.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            result = subprocess.run([*exe, "-p"], env=s.env, cwd=s.root, stdin=bad_stdin,
+                                    capture_output=True, timeout=8)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+        finally:
+            os.close(bad_stdin)
+
+        for fmt in [["--input-format", "stream-json"], ["--input-format=stream-json"]]:
+            args = [*fmt, "--output-format=stream-json"]
+            with subprocess.Popen([*exe, *args, "-p"], env=s.env, cwd=s.root,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
+                try:
+                    # A streaming client may wait for native output before sending a message.
+                    self.assertTrue(select.select([p.stdout], [], [], 4)[0])
+                    self.assertEqual(json.loads(p.stdout.readline())[0], [*args, "--print="])
+                    data = b'{"type":"user","message":{"role":"user","content":"/clear"}}\n'
+                    out, err = p.communicate(data, timeout=8)
+                    self.assertEqual((p.returncode, out), (23, data), err)
+                finally:
+                    p.kill()

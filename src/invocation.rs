@@ -40,6 +40,7 @@ pub struct Invocation {
     pub intent: Intent,
     pub codex: CodexArgs,
     pub agy_tui: bool,
+    pub agy_text_stdin: bool,
     pub workspace: PathBuf,
 }
 impl Invocation {
@@ -71,6 +72,7 @@ fn app_server(args: &[String], cwd: &Path) -> Result<Invocation> {
         intent,
         codex: CodexArgs::default(),
         agy_tui: false,
+        agy_text_stdin: false,
         workspace: cwd.into(),
     })
 }
@@ -136,7 +138,7 @@ fn claude_command(word: &str) -> bool {
             | "upgrade"
     )
 }
-fn agy_terminal(args: &[String]) -> Result<Intent> {
+fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
     let invalid = || {
         Error::bad(
             "unsupported_invocation",
@@ -147,6 +149,7 @@ fn agy_terminal(args: &[String]) -> Result<Intent> {
     let mut print = false;
     let mut interactive = false;
     let mut print_options = false;
+    let mut stream_json = false;
     let mut prompt = None;
     let mut tail = false;
     let mut options = Vec::new();
@@ -229,9 +232,11 @@ fn agy_terminal(args: &[String]) -> Result<Intent> {
             }
             "--input-format" => {
                 print_options = true;
-                if !matches!(value()?, "text" | "stream-json") {
-                    return Err(invalid());
-                }
+                stream_json = match value()? {
+                    "text" => false,
+                    "stream-json" => true,
+                    _ => return Err(invalid()),
+                };
             }
             "--print-timeout" | "--json-schema" => {
                 print_options = true;
@@ -259,19 +264,19 @@ fn agy_terminal(args: &[String]) -> Result<Intent> {
         }
         // Native AgY takes its prompt on the flag, not as an interspersed positional.
         options.push(format!("--print={}", prompt.unwrap_or_default()));
-        return Ok(Intent::Print(options));
+        return Ok((Intent::Print(options), prompt.is_none() && !stream_json));
     }
     if tail || prompt.is_some() || print_options {
         return Err(invalid());
     }
-    Ok(resume.map(Intent::Resume).unwrap_or(Intent::New))
+    Ok((resume.map(Intent::Resume).unwrap_or(Intent::New), false))
 }
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     if tool == "agy" {
-        let (intent, agy_tui) = if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
+        let (intent, agy_tui, agy_text_stdin) = if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
             || matches!(args, [a,b] if a=="acp" && b=="--help")
         {
-            (Intent::Misc, false)
+            (Intent::Misc, false, false)
         } else if args.first().is_some_and(|a| a == "acp") {
             let mut intent = Intent::New;
             let mut it = args[1..].iter();
@@ -287,15 +292,16 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     _ => return Err(unsupported()),
                 }
             }
-            (intent, false)
+            (intent, false, false)
         } else {
-            let i = agy_terminal(args)?;
+            let (i, text_stdin) = agy_terminal(args)?;
             let tui = !matches!(i, Intent::Print(_));
-            (i, tui)
+            (i, tui, text_stdin)
         };
         return Ok(Invocation {
             intent,
             agy_tui,
+            agy_text_stdin,
             workspace: cwd.into(),
             codex: Default::default(),
         });
@@ -653,6 +659,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         intent,
         codex,
         agy_tui: false,
+        agy_text_stdin: false,
         workspace,
     })
 }

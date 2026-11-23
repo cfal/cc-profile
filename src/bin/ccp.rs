@@ -127,7 +127,9 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
         if plan.argv != i.intent.argv(&req.argv) || !valid_decision || plan.config_id <= 0 {
             return Err(invalid());
         }
-        if req.tool != "claude" && !matches!(i.intent, Intent::Misc | Intent::Print(_)) {
+        if i.agy_text_stdin
+            || (req.tool != "claude" && !matches!(i.intent, Intent::Misc | Intent::Print(_)))
+        {
             managed = Some(i);
         }
     }
