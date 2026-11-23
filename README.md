@@ -182,7 +182,7 @@ Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while
 
 Existing config directories can be registered in place. Codex and AgY saved filenames can be discovered retrospectively. No transcript contents are read. Startups expire after 90 days; session mappings do not expire, even after a file disappears.
 
-**Upgrade:** Back up the router DB using SQLite's backup API, or stop the service before a filesystem backup. Install matching `ccp` and `ccpd` binaries and restart the daemon. Admission protocol v3 refuses mixed binaries before routing. Existing owners, profiles, rotation and startup history survive; a pending launch without a UUID becomes unobserved. For rollback, restore the pre-upgrade DB with the previous binaries. When upgrading a much older hook-based installation, remove only cc-profile's old `SessionStart` command (`'/path/to/ccpd' observe`, matcher `startup`) from native `hooks.json`. CCP does not change providers' hooks.
+**Upgrade:** Back up the router DB using SQLite's backup API, or stop the service before a filesystem backup. Install matching `ccp` and `ccpd` binaries and restart the daemon. Open a fresh ACP connection after upgrading: managed AgY ACP requires its v4 endpoints and never falls back to legacy admission. Other launches retain protocol v3. Existing owners, profiles, rotation and startup history survive; a pending launch without a UUID becomes unobserved. For rollback, restore the pre-upgrade DB with the previous binaries. When upgrading a much older hook-based installation, remove only cc-profile's old `SessionStart` command (`'/path/to/ccpd' observe`, matcher `startup`) from native `hooks.json`. CCP does not change providers' hooks.
 
 ## Verification
 

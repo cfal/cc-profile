@@ -584,13 +584,19 @@ pub struct Observation {
     pub native_id: String,
     pub workspace: Option<String>,
 }
+pub fn acp_owner(db: &Connection, request_id: &str, ticket: &str) -> Result<i64> {
+    db.query_row(
+        "SELECT config_id FROM launches WHERE tool='agy' AND intent='acp' AND state='routed'
+             AND request_id=? AND ticket_digest=?",
+        params![request_id, digest(ticket)],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(Error::denied)
+}
 fn acp_event(store: &Store, o: &Observation) -> Result<()> {
     store.write(|db| {
-        let owner: i64 = db.query_row(
-            "SELECT config_id FROM launches WHERE tool='agy' AND intent='acp' AND state='routed'
-             AND request_id=? AND ticket_digest=?",
-            params![o.request_id, digest(&o.ticket)], |r| r.get(0)
-        ).optional()?.ok_or_else(Error::denied)?;
+        let owner = acp_owner(db, &o.request_id, &o.ticket)?;
         if o.event == "admit_new" {
             let c = config(db, owner)?;
             return if c.enabled && c.present() {

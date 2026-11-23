@@ -101,7 +101,7 @@ async fn run() -> Result<()> {
         quotas: quotas::Jobs::new(),
         logins: device_login::Logins::default(),
         identity_slots: tokio::sync::Semaphore::new(2),
-        acp_listing: tokio::sync::Semaphore::new(1),
+        acp_listing: Arc::new(tokio::sync::Semaphore::new(1)),
         reset_write: tokio::sync::Mutex::new(()),
     });
     let a = app.clone();

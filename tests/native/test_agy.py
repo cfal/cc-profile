@@ -133,8 +133,8 @@ class NativeACP(unittest.TestCase):
                 p.stdin.flush()
                 self.assertEqual(s.api("GET","startups?tool=agy")[1]["items"],[])
                 self.assertFalse((Path(c["home"])/".gemini/antigravity-cli/log").exists())
-                # Native 1.5.14 refuses listing while signed out; an empty aggregate would be misleading.
-                self.assertIn("No partial list",call("browse","session/list",{})["error"]["message"])
+                self.assertIn("no saved login",call("browse","session/list",{})["error"]["message"])
+                self.assertFalse((Path(c["home"])/".gemini/antigravity-cli/log").exists())
                 self.assertEqual(s.api("GET","startups?tool=agy")[1]["items"],[])
                 self.assertEqual(call(2,"session/new",{"cwd":str(s.root),"mcpServers":[]})["error"]["code"],-32000)
                 p.stdin.close()

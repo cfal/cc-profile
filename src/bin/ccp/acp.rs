@@ -27,6 +27,7 @@ pub(super) mod lazy;
 enum Reply {
     Initialize,
     NewSession(String),
+    ListedPage,
     Forward,
 }
 type Pending = Mutex<HashMap<String, Reply>>;
@@ -90,6 +91,54 @@ async fn record(req: &Request, event: &str, session: &str, workspace: Option<&st
             "Cannot confirm ACP session ownership for this profile.",
         ))
     }
+}
+async fn confirm_page(req: &Request, result: &Value) -> Result<()> {
+    let invalid = || {
+        Error::bad(
+            "acp_page",
+            "AgY returned an invalid list page; no results were released.",
+        )
+    };
+    let rows = result["sessions"]
+        .as_array()
+        .filter(|r| r.len() <= wire::MAX_LIST_ROWS)
+        .ok_or_else(invalid)?;
+    let sessions = rows
+        .iter()
+        .map(|r| {
+            let id = agy::session_id(r["sessionId"].as_str().ok_or_else(invalid)?)?;
+            let cwd = r["cwd"]
+                .as_str()
+                .filter(|s| wire::workspace(s))
+                .ok_or_else(invalid)?;
+            Ok((id.to_owned(), cwd.to_owned()))
+        })
+        .collect::<Result<_>>()?;
+    let page = ccpd::protocol::ListedPage {
+        request_id: req.request_id.clone(),
+        ticket: req.ticket.clone(),
+        sessions,
+    };
+    let body = serde_json::to_vec(&page).map_err(|_| bad())?;
+    if body.len() > 256 * 1024 {
+        return Err(Error::bad(
+            "acp_list_limit",
+            "This native AgY list page is too large to verify.",
+        ));
+    }
+    let confirmed: usize = super::request(
+        ccpd::protocol::ACP_LISTED,
+        &body,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+    )
+    .await?;
+    if confirmed != rows.len() {
+        return Err(Error::conflict(
+            "acp_page",
+            "The daemon did not confirm the complete AgY list page.",
+        ));
+    }
+    Ok(())
 }
 
 // A blocking terminal read must not keep the Tokio runtime alive after the agent exits.
@@ -176,6 +225,10 @@ async fn input(
                         continue;
                     }
                 }
+                "session/list" => {
+                    key(id)?;
+                    reply = Reply::ListedPage;
+                }
                 "session/fork" => {
                     key(id)?;
                     reject(out, id, "Managed ACP does not support forks.").await?;
@@ -237,6 +290,12 @@ async fn output(
                             agy::session_id(v["result"]["sessionId"].as_str().ok_or_else(bad)?)?;
                         // The harness can reconnect to resume as soon as it receives this reply.
                         record(req, "session/new", id, Some(&ws)).await?;
+                    }
+                    Reply::ListedPage => {
+                        if let Err(e) = confirm_page(req, &v["result"]).await {
+                            reject(out, &v["id"], &e.2).await?;
+                            continue;
+                        }
                     }
                     Reply::Initialize => {
                         // A harness must not execute native login outside the selected profile.

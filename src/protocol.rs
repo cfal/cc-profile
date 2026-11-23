@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub const VERSION: u8 = 3;
+pub const ACP_LAUNCH: &str = "/v4/agy-acp/launch";
+pub const ACP_CHECK: &str = "/v4/agy-acp/check";
+pub const ACP_LIST: &str = "/v4/agy-acp/list";
+pub const ACP_LISTED: &str = "/v4/agy-acp/listed";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingMode {
@@ -63,6 +67,23 @@ pub struct Request {
     pub cwd: PathBuf,
     pub binary: Option<PathBuf>,
     pub override_names: Vec<String>,
+}
+impl Request {
+    pub fn managed_agy_acp(&self) -> bool {
+        self.tool == "agy"
+            && self.login_profile.is_none()
+            && self.argv.first().is_some_and(|a| a == "acp")
+            && self.argv != ["acp", "--help"]
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListedPage {
+    pub request_id: String,
+    pub ticket: String,
+    // Only native IDs and workspaces cross the socket; titles stay on the ACP stream.
+    pub sessions: Vec<(String, String)>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]

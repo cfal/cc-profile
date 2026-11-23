@@ -10,7 +10,7 @@ import subprocess
 import time
 import unittest
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 import test_service as svc
 
@@ -44,6 +44,48 @@ class Antigravity(unittest.TestCase):
         init, *replies = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual((init["id"],init["result"]["authMethods"]), ("init",[]))
         return replies
+
+    @staticmethod
+    def login_markers(*profiles):
+        for c in profiles:
+            gemini = Path(c["home"])/".gemini"
+            app = gemini/"antigravity-cli"
+            for d in (gemini,app): d.mkdir(mode=0o700,exist_ok=True)
+            token=app/"antigravity-oauth-token"
+            token.touch(mode=0o600)
+            token.write_text("inert fixture marker")
+
+    @contextmanager
+    def connection(self, *args):
+        with subprocess.Popen([svc.LAUNCHER,"agy","acp",*args],cwd=self.s.root,env=self.s.env,
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) as p:
+            def call(i,m,params):
+                p.stdin.write(json.dumps(dict(jsonrpc="2.0",id=i,method=m,params=params))+"\n")
+                p.stdin.flush()
+                self.assertTrue(select.select([p.stdout],[],[],6)[0],m)
+                r=json.loads(p.stdout.readline())
+                self.assertEqual(r["id"],i)
+                return r
+            try:
+                self.assertEqual(call("init","initialize",INIT["params"])["result"]["authMethods"],[])
+                p.stdin.write(json.dumps(INITIALIZED)+"\n")
+                p.stdin.flush()
+                yield call
+                p.stdin.close()
+                self.assertEqual(p.wait(timeout=5),0,p.stderr.read())
+            finally:
+                if p.poll() is None: p.kill()
+
+    def private_status(self,path,body):
+        import http.client
+        import socket
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
+            sock.settimeout(3)
+            sock.connect(str(self.s.root/"run/cc-profile/launch.sock"))
+            with closing(http.client.HTTPConnection("localhost")) as conn:
+                conn.sock=sock
+                conn.request("POST",path,json.dumps(body),{"Content-Type":"application/json"})
+                return conn.getresponse().status
 
     def test_disabled_named_login_status_and_native_usage(self):
         c = self.profile("work", enable=False)
@@ -532,8 +574,10 @@ class Antigravity(unittest.TestCase):
 
     def test_unbound_browse_aggregates_pages_without_routing_and_restores_listed_owner(self):
         a,b,off = self.profile("a"),self.profile("b"),self.profile("disabled",False)
+        self.login_markers(a,b)
         ha,hb = Path(a["home"]), Path(b["home"])
-        row = lambda sid,cwd: {"sessionId":sid,"cwd":cwd,"title":"only for browse","_meta":{"private":1}}
+        row = lambda sid,cwd: {"sessionId":sid,"cwd":cwd,"additionalDirectories":["/extra a","/extra-b"],
+                               "title":"only for browse","_meta":{"private":1}}
         (ha/"browse-pages").write_text(json.dumps({"":{"sessions":[row("a1","/other")],"nextCursor":"native/A"},
             "native/A":{"sessions":[row("a2","/work")]}}))
         (hb/"browse-pages").write_text(json.dumps({"":{"sessions":[row("b1","/work")]}}))
@@ -543,6 +587,7 @@ class Antigravity(unittest.TestCase):
         self.assertEqual([r["sessionId"] for r in filtered["result"]["sessions"]],["a2","b1"])
         self.assertEqual([r["sessionId"] for r in all_rows["result"]["sessions"]],["a1","a2","b1"])
         self.assertNotIn("_meta",str(all_rows))
+        self.assertEqual(all_rows["result"]["sessions"][0]["additionalDirectories"],["/extra a","/extra-b"])
         self.assertFalse((Path(off["home"])/"last-run").exists())
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"],[])
         mappings=self.s.api("GET","sessions?tool=agy")[1]["items"]
@@ -566,13 +611,16 @@ class Antigravity(unittest.TestCase):
 
     def test_unbound_browse_is_atomic_on_duplicate_failure_and_profile_change(self):
         a,b=self.profile("a"),self.profile("b")
+        self.login_markers(a,b)
         ha,hb=Path(a["home"]),Path(b["home"])
         one={"sessions":[{"sessionId":"first","cwd":"/a"}]}
         (ha/"browse-pages").write_text(json.dumps({"":one}))
         browse=lambda: self.bridge([], (1,"session/list",{}))[0]
         for pages in ({"":one},{"":{"sessions":[],"nextCursor":"loop"},"loop":{"sessions":[],"nextCursor":"loop"}},
                       {"":{"sessions":"private fixture detail"}},
-                      {"":{"sessions":[{"sessionId":"large","cwd":"/b","title":"x"*(401*1024)}]}}):
+                      {"":{"sessions":[{"sessionId":"large","cwd":"/b","title":"x"*(401*1024)}]}},
+                      *[{"":{"sessions":[{"sessionId":"bad-dirs","cwd":"/b","additionalDirectories":dirs}]}}
+                        for dirs in ("/work",["relative"],["/work"]*65)]):
             (hb/"browse-pages").write_text(json.dumps(pages))
             reply=browse()
             self.assertIn("error",reply)
@@ -598,6 +646,7 @@ class Antigravity(unittest.TestCase):
 
     def test_list_conflicting_historical_owner_rolls_back_earlier_rows(self):
         a,b=self.profile("a"),self.profile("b")
+        self.login_markers(a,b)
         self.bridge([], (1,"session/new",{"fixtureId":"old","cwd":"/work"}))
         (Path(b["home"])/"browse-pages").write_text(json.dumps({"":{"sessions":[
             {"sessionId":"before-conflict","cwd":"/new"},{"sessionId":"old","cwd":"/new"}]}}))
@@ -606,8 +655,94 @@ class Antigravity(unittest.TestCase):
         rows=self.s.api("GET","sessions?tool=agy")[1]["items"]
         self.assertEqual([(r["native_id"],r["config_id"],r["workspace"]) for r in rows],[("old",a["id"],"/work")])
 
+    def test_missing_login_in_last_profile_starts_no_browse_workers(self):
+        a,b=self.profile("ready"), self.profile("signed-out")
+        self.login_markers(a)
+        reply,=self.bridge([], (1,"session/list",{}))
+        self.assertIn("no saved login",reply["error"]["message"])
+        for c in (a,b):
+            self.assertFalse((Path(c["home"])/"last-run").exists())
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"],[])
+
+    def test_bound_native_list_records_page_before_reply_or_refuses_it_atomically(self):
+        a,b=self.profile("selected"),self.profile("other")
+        self.login_markers(a,b)
+        row=lambda sid: {"sessionId":sid,"cwd":"/native","title":"not persisted"}
+        for sid in ("pin-a","belongs-to-b"):
+            self.bridge([], (1,"session/new",{"fixtureId":sid,"cwd":"/work"}))
+        pages=Path(a["home"])/"browse-pages"
+        for n,args in enumerate([[],["--for-session","pin-a"]]):
+            sid, second = f"listed-{n}", f"next-page-{n}"
+            with closing(sqlite3.connect(self.s.root/"state/cc-profile/router.sqlite3")) as db, db:
+                db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,bound_ms,saved_file_seen_ms) "
+                           "VALUES('agy',?,?,'saved_file',1,1)",(sid,a["id"]))
+            pages.write_text(json.dumps({"":{"sessions":[row(sid)],"nextCursor":"native-cursor"},
+                                         "native-cursor":{"sessions":[row(second)]}}))
+            with self.connection(*args) as call:
+                if not args:
+                    self.assertIn("result",call(1,"session/new",{"fixtureId":"warm-a","cwd":"/work"}))
+                self.assertEqual(call(2,"session/list",{})["result"],{"sessions":[row(sid)],"nextCursor":"native-cursor"})
+                self.assertEqual(call(3,"session/list",{"cursor":"native-cursor"})["result"]["sessions"],[row(second)])
+                items=self.s.api("GET","sessions?tool=agy")[1]["items"]
+                for uid in (sid,second):
+                    mapping=next(r for r in items if r["native_id"]==uid)
+                    self.assertEqual((mapping["config_id"],mapping["workspace"],mapping["evidence"],mapping["last_routed_ms"]),
+                                     (a["id"],"/native","acp_listed",None))
+                self.assertNotIn("not persisted",str(items))
+                self.assertEqual(call(4,"session/load",{"sessionId":sid,"cwd":"/native"})["result"]["home"],a["home"])
+                self.assertEqual(call(5,"session/resume",{"sessionId":second,"cwd":"/native"})["result"]["home"],a["home"])
+                pages.write_text(json.dumps({"":{"sessions":[row("earlier-in-page"),row("belongs-to-b")]}}))
+                refused=call(6,"session/list",{})
+                self.assertNotIn("result",refused)
+                self.assertIn("recorded owner",refused["error"]["message"])
+                self.assertIn("error",call(7,"session/load",{"sessionId":"belongs-to-b","cwd":"/native"}))
+                self.assertFalse(any(r["native_id"]=="earlier-in-page" for r in self.s.api("GET","sessions?tool=agy")[1]["items"]))
+            restored,=self.bridge([], (1,"session/load",{"sessionId":sid,"cwd":"/native"}))
+            self.assertEqual(restored["result"]["home"],a["home"])
+        self.assertEqual((Path(b["home"])/"calls").read_text().splitlines(),["initialize","session/new"])
+
+    def test_legacy_acp_admission_rejected_before_selection(self):
+        a=self.profile("first")
+        self.profile("second")
+        args=dict(request_id=str(uuid.uuid4()),ticket="21"*32,tool="agy",cwd=str(self.s.root),
+                  argv=["acp"],binary=str(self.s.root/"bin/agy"),override_names=[])
+        for endpoint,body in [("/v3/launch",args),("/v3/agy-acp/check",args["binary"]),
+                              ("/v3/launch",dict(args,argv=["acp","--stdio","--for-session","prior"]))]:
+            self.assertEqual(self.private_status(endpoint,body),426)
+        self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"],[])
+        self.bridge([], (1,"session/new",{"fixtureId":"first","cwd":"/work"}))
+        self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"][0]["config_id"],a["id"])
+
+    def test_bound_list_requires_routed_acp_ticket_and_enabled_owner(self):
+        a=self.profile("owner")
+        self.login_markers(a)
+        launch=dict(request_id=str(uuid.uuid4()),ticket="1a"*32,tool="agy",argv=[],cwd=str(self.s.root),
+                    binary=str(self.s.root/"bin/agy"),override_names=[])
+        page=dict(request_id=launch["request_id"],ticket=launch["ticket"],sessions=[["not-listed","/work"]])
+        self.assertEqual(self.private_status("/v3/launch",launch),200)  # A TUI ticket cannot attest to ACP rows.
+        self.assertEqual(self.private_status("/v4/agy-acp/listed",page),403)
+        home=Path(a["home"])
+        (home/"browse-pages").write_text(json.dumps({"":{"sessions":[{"sessionId":"from-disabled","cwd":"/work"}]}}))
+        with self.connection() as call, ThreadPoolExecutor(1) as pool:
+            self.assertIn("result",call(1,"session/new",{"fixtureId":"observed","cwd":"/work"}))
+            req_id=self.s.api("GET","startups?tool=agy")[1]["items"][0]["request_id"]
+            self.assertEqual(self.private_status("/v4/agy-acp/listed",dict(page,request_id=req_id)),403)
+            (home/"hold-list").touch()
+            job=pool.submit(call, 2,"session/list",{})
+            try:
+                deadline=time.monotonic()+3
+                while "session/list" not in (home/"acp-wire").read_text():
+                    self.assertLess(time.monotonic(),deadline)
+                    time.sleep(.02)
+                self.assertEqual(self.s.api("PATCH",f"accounts/{a['id']}",dict(revision=a["revision"],enabled=False))[0],200)
+            finally: (home/"hold-list").unlink()
+            self.assertIn("error",job.result())
+        self.assertEqual([r["native_id"] for r in self.s.api("GET","sessions?tool=agy")[1]["items"]],["observed"])
+
     def test_slow_browse_does_not_block_restore_or_leave_workers(self):
         a,b=self.profile("a"),self.profile("b")
+        self.login_markers(a,b)
         self.bridge([], (1,"session/new",{"fixtureId":"known","cwd":"/work"}))
         home=Path(b["home"])
         (home/"hold-list").touch()

@@ -423,7 +423,11 @@ async fn run() -> Result<ExitCode> {
 }
 async fn launch(req: &Request, deadline: Instant) -> Result<Plan> {
     request(
-        "/v3/launch",
+        if req.managed_agy_acp() {
+            ccpd::protocol::ACP_LAUNCH
+        } else {
+            "/v3/launch"
+        },
         &serde_json::to_vec(req).map_err(|_| utf8())?,
         deadline,
     )

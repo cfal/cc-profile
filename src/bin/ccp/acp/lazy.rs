@@ -23,7 +23,7 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
         .clone()
         .ok_or_else(ccpd::native::unsupported_build)?;
     let version: String = request(
-        "/v3/agy-acp/check",
+        ccpd::protocol::ACP_CHECK,
         json!(binary).to_string().as_bytes(),
         deadline(),
     )
@@ -95,7 +95,7 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
                 }
                 let q = json!({"binary":binary,"cwd":params["cwd"]});
                 match request::<Value>(
-                    "/v3/agy-acp/list",
+                    ccpd::protocol::ACP_LIST,
                     q.to_string().as_bytes(),
                     Instant::now() + Duration::from_secs(35),
                 )

@@ -127,6 +127,16 @@ sys.exit(17)
         p=self.run_ccp("claude")
         self.assertEqual(p.returncode,17,p.stderr)
 
+    def test_agy_acp_never_falls_back_to_legacy_admission(self):
+        (self.root/"agy").symlink_to(self.native)
+        self.respond=lambda path,r: (404,{}) if path.startswith("/v4/") else (200,self.plan(r))
+        for args,expected in [([], "check"),(["--for-session","known"],"launch")]:
+            self.calls.clear()
+            p=self.run_ccp("agy","acp",*args)
+            self.assertNotEqual(p.returncode,0)
+            self.assertEqual(p.stdout,"")
+            self.assertEqual([path for path,_ in self.calls],["/v4/agy-acp/"+expected])
+
     def test_version_probe_environment_cannot_short_circuit_an_ordinary_launch(self):
         self.env["CCP_NATIVE_VERSION_PROBE"] = "1"
         p = self.run_ccp("claude", "hello")

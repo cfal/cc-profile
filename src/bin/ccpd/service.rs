@@ -4,7 +4,7 @@ use axum::{
     extract::{
         ConnectInfo, DefaultBodyLimit, Path, Query, Request, State, connect_info::Connected,
     },
-    http::StatusCode,
+    http::{StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
@@ -13,7 +13,7 @@ use axum::{
 use ccpd::{
     native::Build,
     paths,
-    protocol::RoutingMode,
+    protocol::{ACP_CHECK, ACP_LAUNCH, ACP_LIST, ACP_LISTED, RoutingMode},
     routing::{self, Failure, Observation},
     store::{Page, Store, config, configs, routing_mode},
     types::{Error, Result, tool},
@@ -34,7 +34,7 @@ pub struct App {
     pub quotas: super::quotas::Jobs,
     pub logins: super::device_login::Logins,
     pub identity_slots: tokio::sync::Semaphore,
-    pub acp_listing: tokio::sync::Semaphore,
+    pub acp_listing: Arc<tokio::sync::Semaphore>,
     pub reset_write: tokio::sync::Mutex<()>,
 }
 impl App {
@@ -75,8 +75,11 @@ async fn same_uid(req: Request, next: Next) -> Response {
 }
 pub fn private(s: Shared) -> Router {
     Router::new()
-        .route("/v3/agy-acp/check", post(super::acp_list::check))
-        .route("/v3/agy-acp/list", post(super::acp_list::list))
+        .route(ACP_CHECK, post(super::acp_list::check))
+        .route(ACP_LIST, post(super::acp_list::list))
+        .route(ACP_LISTED, post(super::acp_list::listed))
+        .route("/v3/agy-acp/check", post(|| async { acp_upgrade() }))
+        .route("/v3/agy-acp/list", post(|| async { acp_upgrade() }))
         .route(
             "/v2/profile-tool",
             post(|State(s): State<Shared>, Json(id): Json<i64>| async move {
@@ -90,22 +93,8 @@ pub fn private(s: Shared) -> Router {
                  Json(json!({"message":"This daemon requires a v3 launcher. Update ccp and ccpd together."})))
             }),
         )
-        .route(
-            "/v3/launch",
-            post(
-                |State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
-                    let app = s.clone();
-                    let tool = r.tool.clone();
-                    let admission =
-                        blocking(move || routing::admit(&app.store, app.build(&r.tool), &r))
-                            .await?;
-                    if admission.refresh_quota {
-                        tokio::spawn(super::quotas::refresh_provider(s, tool));
-                    }
-                    admission.plan.map(Json)
-                },
-            ),
-        )
+        .route("/v3/launch", post(launch))
+        .route(ACP_LAUNCH, post(launch))
         .route(
             "/v2/observations",
             post(
@@ -129,6 +118,29 @@ pub fn private(s: Shared) -> Router {
         .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(middleware::from_fn(same_uid))
         .with_state(s)
+}
+fn acp_upgrade() -> Error {
+    Error(
+        StatusCode::UPGRADE_REQUIRED,
+        "acp_version",
+        "Managed AgY ACP requires matching ccp and ccpd. Update both and restart ccpd.".into(),
+    )
+}
+async fn launch(
+    State(s): State<Shared>,
+    uri: Uri,
+    Json(r): Json<routing::Request>,
+) -> Result<Json<ccpd::protocol::Plan>> {
+    if r.managed_agy_acp() != (uri.path() == ACP_LAUNCH) {
+        return Err(acp_upgrade());
+    }
+    let app = s.clone();
+    let tool = r.tool.clone();
+    let admission = blocking(move || routing::admit(&app.store, app.build(&r.tool), &r)).await?;
+    if admission.refresh_quota {
+        tokio::spawn(super::quotas::refresh_provider(s, tool));
+    }
+    admission.plan.map(Json)
 }
 #[derive(Deserialize)]
 pub struct Filter {
