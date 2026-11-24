@@ -7,7 +7,7 @@ use crate::{
 use ccpd::{
     invocation::{codex_stdio_command, native_id},
     paths,
-    protocol::{CODEX_BROWSE, CODEX_CHECK, CODEX_OWNER, Plan, Request},
+    protocol::{CODEX_BROWSE, CODEX_CHECK, CODEX_LISTED, CODEX_OWNER, CodexListed, Plan, Request},
     types::{Error, Result},
 };
 use serde_json::{Value, json};
@@ -32,7 +32,6 @@ fn reject(msg: &'static str) -> Error {
     Error::bad("codex_routing", msg)
 }
 type Out = Mutex<Stdout>;
-const LISTED: &str = "/v4/codex-stdio/listed";
 async fn send(out: &Out, v: &Value) -> Result<()> {
     write(&mut *out.lock().await, &bytes(v)?).await
 }
@@ -109,6 +108,7 @@ fn source(call: &mut Value) -> Result<Option<String>> {
     // In native Codex a path takes precedence over the ID. A client-supplied
     // path must never turn a sticky admission into a read from a different home.
     params.remove("path");
+    params.insert("threadId".into(), Value::String(id.clone()));
     Ok(Some(id))
 }
 
@@ -130,13 +130,23 @@ impl Connection {
             .map(|r| {
                 Ok((
                     owner,
-                    r["id"].as_str().ok_or_else(bad)?,
-                    r["cwd"].as_str().ok_or_else(bad)?,
+                    r["id"].as_str().ok_or_else(bad)?.into(),
+                    r["cwd"].as_str().ok_or_else(bad)?.into(),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let body = json!({"bound":[req.request_id,req.ticket],"binary":req.binary,"profiles":[],"threads":threads});
-        let count: usize = request(LISTED, &bytes(&body)?, deadline()).await?;
+        let body = CodexListed {
+            bound: Some((req.request_id.clone(), req.ticket.clone())),
+            binary: req.binary.clone().ok_or_else(bad)?,
+            profiles: Vec::new(),
+            threads,
+        };
+        let count: usize = request(
+            CODEX_LISTED,
+            &serde_json::to_vec(&body).map_err(|_| bad())?,
+            deadline(),
+        )
+        .await?;
         if count != rows.len() {
             return Err(bad());
         }
@@ -190,11 +200,7 @@ impl Connection {
         let cwd = if let Some(cwd) = call["params"].get("cwd").filter(|v| !v.is_null()) {
             let cwd = cwd
                 .as_str()
-                .filter(|p| {
-                    Path::new(p).is_absolute()
-                        && p.len() <= 4096
-                        && !p.chars().any(char::is_control)
-                })
+                .filter(|p| paths::workspace(p))
                 .ok_or_else(bad)?;
             Some(Path::new(cwd))
         } else {
@@ -260,8 +266,10 @@ impl Connection {
                         if ephemeral.borrow().len() < 1024 {
                             ephemeral.borrow_mut().insert(thread.id);
                         }
-                    } else if let Err(e) = report(&req, event, &thread).await {
-                        eprintln!("ccp: {e}");
+                    } else if report(&req, event, &thread).await.is_err() {
+                        let id = &value(&line)?["id"];
+                        send(out, &error(id, "Native Codex created a thread but CCP could not confirm its owner. Do not automatically retry.")).await?;
+                        continue;
                     }
                 }
                 write(&mut *out.lock().await, &line).await?;
@@ -274,6 +282,20 @@ impl Connection {
             while let Some(line) = rx.recv().await {
                 let mut line = line?;
                 let mut call = value(&line)?;
+                if matches!(
+                    call["method"].as_str(),
+                    Some("thread/start" | "thread/fork" | "thread/resume")
+                ) {
+                    let check = json!({"request_id":req.request_id,"ticket":req.ticket,"event":"admit_new",
+                        "source":"app-server","native_id":""});
+                    if request::<Value>("/v2/observations", &bytes(&check)?, deadline())
+                        .await
+                        .is_err()
+                    {
+                        send(out,&error(&call["id"],"This Codex profile changed or is unavailable. Open a new connection.")).await?;
+                        continue;
+                    }
+                }
                 if call.get("method").is_some()
                     && let Some(id) = call.get("id")
                 {
@@ -383,7 +405,13 @@ async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, 
             return Err(bad());
         }
         if method == "initialize" && conn.is_none() {
-            let reply = neutral(&req, &argv, &call).await?;
+            let reply = match neutral(&req, &argv, &call).await {
+                Ok(reply) => reply,
+                Err(e) => {
+                    send(out, &error(&id, &e.2)).await?;
+                    return Err(e);
+                }
+            };
             send(out, &reply).await?;
             if reply.get("result").is_some() {
                 conn = Some(Connection {
@@ -401,6 +429,18 @@ async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, 
             continue;
         };
         let is_new = method == "thread/start";
+        if method == "thread/loaded/list" {
+            let reply = if call["params"]["cursor"].is_null() {
+                json!({"id":id,"result":{"data":[],"nextCursor":null}})
+            } else {
+                error(
+                    &id,
+                    "This unbound connection has no loaded threads or cursor.",
+                )
+            };
+            send(out, &reply).await?;
+            continue;
+        }
         if matches!(
             method,
             "model/list"

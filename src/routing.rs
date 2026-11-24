@@ -739,6 +739,21 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
     if o.source == "acp" {
         return acp_event(store, o);
     }
+    if o.source == "app-server" && o.event == "admit_new" && o.native_id.is_empty() {
+        let c = {
+            let db = store.db()?;
+            let (owner, revision, _) = codex_admission(&db, &o.request_id, &o.ticket)?;
+            let c = config(&db, owner)?;
+            if !c.enabled || revision != Some(c.revision) {
+                return Err(Error::denied());
+            }
+            c
+        };
+        if !c.present() || config(&*store.db()?, c.id)? != c {
+            return Err(Error::denied());
+        }
+        return Ok(());
+    }
     let uid = native_id(&o.native_id)?;
     if !matches!(o.event.as_str(), "thread/start" | "thread/fork") || o.source != "app-server" {
         return Err(Error::bad(

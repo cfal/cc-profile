@@ -82,3 +82,18 @@ class DeferredCodex(unittest.TestCase):
         self.assertFalse(self.s.api("GET","sessions")[1]["items"])
         rows = self.s.api("GET","startups")[1]["items"]
         self.assertEqual([row["state"] for row in rows],["exec_failed"])
+
+    def test_bound_list_confirms_before_reply_and_does_not_expose_historical_conflicts(self):
+        db_only = str(uuid.uuid4())
+        listed = {"id":db_only, "cwd":"/fixture/work", "name":"private fixture"}
+        (Path(self.a["home"])/"listed-fixture.json").write_text(json.dumps([listed]))
+        _, page = self.connection(("thread/start",{}),("thread/list",{}))
+        self.assertEqual(page["result"]["data"],[listed])
+        sessions = self.s.api("GET","sessions?native_id="+db_only)[1]["items"]
+        self.assertEqual([(s["evidence"],s["last_routed_ms"]) for s in sessions],[("codex_listed",None)])
+        resumed, = self.connection(("thread/resume",{"threadId":db_only}))
+        self.assertEqual(resumed["result"]["home"],self.a["home"])
+        (Path(self.b["home"])/"listed-fixture.json").write_text(json.dumps([listed]))
+        _, rejected = self.connection(("thread/start",{}),("thread/list",{}))
+        self.assertIn("error",rejected)
+        self.assertNotIn("result",rejected)

@@ -43,6 +43,12 @@ class ListedCodex(unittest.TestCase):
     def sessions(self):
         return self.s.api("GET", "sessions?tool=codex")[1]["items"]
 
+    def test_old_launcher_cannot_eagerly_select_a_codex_stdio_profile(self):
+        r = {"request_id":uid(),"ticket":"a"*64,"cwd":str(self.s.root),"tool":"codex",
+             "argv":["app-server"],"binary":self.bin,"override_names":[]}
+        self.assertEqual(self.private("/v3/launch", r)[0],426)
+        self.assertFalse(self.s.api("GET","startups")[1]["items"])
+
     def test_listed_only_thread_resumes_without_disk_but_never_overrules_the_disk_or_disabled_owner(self):
         aid, bid = self.a["id"], self.b["id"]
         x, y = uid(), uid()

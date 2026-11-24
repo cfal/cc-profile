@@ -67,6 +67,10 @@ if sys.argv[1:2] == ["app-server"]:
             path = home / "fixture-identity.json"
             result = json.loads(path.read_text()) if path.exists() else {"account":None}
             checked_identity = True
+        if r["method"] == "thread/list":
+            source = home / "listed-fixture.json"
+            rows = json.loads(source.read_text()) if source.is_file() else []
+            result = {"data":rows, "nextCursor":None, "backwardsCursor":None}
         if r["method"] in ("thread/start","thread/resume","thread/fork","thread/read","unrelated"):
             assert r.get("params",{}).get("path") is None
             uid = r.get("params",{}).get("threadId",str(uuid.uuid4()))
