@@ -104,6 +104,7 @@ async fn run() -> Result<()> {
         acp_listing: Arc::new(tokio::sync::Semaphore::new(1)),
         reset_write: tokio::sync::Mutex::new(()),
     });
+    tokio::spawn(quotas::run_daily(app.clone()));
     let a = app.clone();
     tokio::spawn(async move {
         loop {

@@ -12,7 +12,7 @@ use ccpd::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -111,7 +111,34 @@ enum Scope {
     Provider(String),
     All,
 }
-async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>> {
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const ROSTER_CHECK_MS: i64 = 60_000;
+
+#[derive(Clone, Copy)]
+enum Refresh {
+    Manual,
+    Stale,
+    Daily,
+}
+impl Refresh {
+    fn due_at(self, cache: &Cache, stamp: &str, ms: i64) -> i64 {
+        let age_limit = match self {
+            Self::Stale if cache.status == "fresh" => FRESH_MS,
+            Self::Daily => DAY_MS,
+            _ => 0,
+        };
+        let deadline = cache
+            .success
+            .filter(|&t| cache.stamp == stamp && t <= ms)
+            .map_or(0, |t| t.saturating_add(age_limit));
+        deadline.max(cache.retry_for(stamp))
+    }
+}
+struct Queued {
+    count: usize,
+    next_check_ms: i64,
+}
+async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
     let a = s.clone();
     let enabled_only = !matches!(
         scope,
@@ -120,7 +147,7 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
             ..
         }
     );
-    let candidates = blocking(move || {
+    let (candidates, next_check_ms) = blocking(move || {
         let db = a.store.db()?;
         let cs = match &scope {
             Scope::Account { id, .. } => vec![config(&db, *id)?],
@@ -131,20 +158,22 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                 .chain(configs(&db, "agy")?)
                 .collect(),
         };
+        drop(db);
+        // A slow profile directory must not hold the store lock during a roster sweep.
+        let stamped: Vec<_> = cs.into_iter().filter(|c| !enabled_only || c.enabled)
+            .filter_map(|c| inputs(&c).map(|stamp| (c, stamp))).collect();
+        let db = a.store.db()?;
+        let ms = now();
+        let mut next = ms + ROSTER_CHECK_MS;
         let mut jobs = Vec::new();
-        for c in cs.into_iter().filter(|c| !enabled_only || c.enabled) {
-            let Some(stamp) = inputs(&c) else { continue };
+        for (c, stamp) in stamped {
             if matches!(&scope, Scope::Account { expected: Some(expected), .. } if *expected != stamp) {
                 continue;
             }
             let cache = cached(&db, c.id)?;
-            if cache.as_ref().is_some_and(|r| {
-                now() < r.retry_for(&stamp)
-                    || (stale_only
-                        && r.stamp == stamp
-                        && r.status == "fresh"
-                        && r.success.is_some_and(fresh))
-            }) {
+            let due = cache.as_ref().map_or(0, |r| refresh.due_at(r, &stamp, ms));
+            if due > ms {
+                next = next.min(due);
                 continue;
             }
             jobs.push((stamp, c, cache, Uuid::new_v4()));
@@ -159,7 +188,7 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
                 false
             }
         });
-        Ok(jobs)
+        Ok((jobs, next))
     })
     .await?;
     let n = candidates.len();
@@ -217,7 +246,25 @@ async fn queue(s: Shared, scope: Scope, stale_only: bool) -> Result<Json<Value>>
             }
         });
     }
-    Ok(Json(json!({"queued":n})))
+    Ok(Queued {
+        count: n,
+        next_check_ms,
+    })
+}
+pub async fn run_daily(s: Shared) {
+    loop {
+        let delay = match queue(s.clone(), Scope::All, Refresh::Daily).await {
+            Ok(q) => q
+                .next_check_ms
+                .saturating_sub(now())
+                .clamp(0, ROSTER_CHECK_MS),
+            Err(_) => {
+                eprintln!("ccpd: could not schedule daily quota checks");
+                ROSTER_CHECK_MS
+            }
+        };
+        tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+    }
 }
 pub async fn after_reset(s: Shared, selected: i64, refresh: Vec<(i64, String)>) {
     for (id, stamp) in refresh {
@@ -226,13 +273,16 @@ pub async fn after_reset(s: Shared, selected: i64, refresh: Vec<(i64, String)>) 
             enabled_only: id != selected,
             expected: Some(stamp),
         };
-        if queue(s.clone(), scope, false).await.is_err() {
+        if queue(s.clone(), scope, Refresh::Manual).await.is_err() {
             eprintln!("ccpd: could not queue post-reset quota check for config {id}");
         }
     }
 }
 pub async fn refresh_provider(s: Shared, tool: String) {
-    if queue(s, Scope::Provider(tool), true).await.is_err() {
+    if queue(s, Scope::Provider(tool), Refresh::Stale)
+        .await
+        .is_err()
+    {
         eprintln!("ccpd: could not queue stale routing quota checks");
     }
 }
@@ -245,10 +295,13 @@ pub async fn bulk(
     State(s): State<Shared>,
     Json(v): Json<Options>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    Ok((
-        StatusCode::ACCEPTED,
-        queue(s, Scope::All, v.stale_only).await?,
-    ))
+    let refresh = if v.stale_only {
+        Refresh::Stale
+    } else {
+        Refresh::Manual
+    };
+    let q = queue(s, Scope::All, refresh).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"queued": q.count}))))
 }
 pub async fn one(
     State(s): State<Shared>,
@@ -257,17 +310,47 @@ pub async fn one(
     if id <= 0 {
         return Err(Error::bad("config", "Expected config ID."));
     }
-    Ok((
-        StatusCode::ACCEPTED,
-        queue(
-            s,
-            Scope::Account {
-                id,
-                enabled_only: false,
-                expected: None,
-            },
-            false,
-        )
-        .await?,
-    ))
+    let q = queue(
+        s,
+        Scope::Account {
+            id,
+            enabled_only: false,
+            expected: None,
+        },
+        Refresh::Manual,
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"queued": q.count}))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daily_deadline_uses_the_last_matching_success_not_the_last_attempt() {
+        let mut q = Cache {
+            stamp: "login".into(),
+            status: "fresh".into(),
+            attempt: DAY_MS,
+            success: Some(DAY_MS),
+            retry: DAY_MS + 30_000,
+            fails: 0,
+            snapshot: None,
+        };
+        let ms = DAY_MS + FRESH_MS;
+        assert_eq!(Refresh::Stale.due_at(&q, "login", ms), ms);
+        assert_eq!(Refresh::Daily.due_at(&q, "login", ms), 2 * DAY_MS);
+        assert!(Refresh::Daily.due_at(&q, "new login", ms) <= ms);
+        q.status = "unavailable".into();
+        q.attempt = ms;
+        q.retry = ms + 30_000;
+        q.fails = 1;
+        assert_eq!(Refresh::Daily.due_at(&q, "login", ms), 2 * DAY_MS);
+        q.success = None;
+        assert_eq!(Refresh::Daily.due_at(&q, "login", ms), q.retry);
+        assert_eq!(Refresh::Daily.due_at(&q, "new login", ms), 0);
+        q.status = "rate_limited".into();
+        assert_eq!(Refresh::Daily.due_at(&q, "new login", ms), q.retry);
+    }
 }

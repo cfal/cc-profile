@@ -1004,6 +1004,77 @@ class Service(unittest.TestCase):
         self.assertEqual(json.loads((Path(cl["home"])/"quota-proxies").read_text()),["http://fixture.invalid:3128/"]*4)
         self.assertEqual(json.loads(self.cli("claude","hello").stdout)["proxy"],"http://fixture.invalid:3128/")
 
+    def wait_for_quota_success(self, profile, after=0):
+        import sqlite3
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                row = db.execute("SELECT success_ms FROM quota_cache WHERE config_id=?",
+                                 (profile["id"],)).fetchone()
+                if row and row[0] and row[0] > after:
+                    return row[0]
+                time.sleep(.02)
+        self.fail("no new quota reading for " + profile["label"])
+
+    def test_daily_quota_catches_up_without_a_dashboard_or_launch(self):
+        claude = self.account("claude", "daily-claude")
+        ch = Path(claude["home"])
+        (ch/".credentials.json").write_text("fixture login")
+        codex = self.account("codex", "daily-codex")
+        _, agy, _ = self.api("POST", "accounts", {"tool":"agy", "label":"daily-agy", "create":True})
+        self.assertEqual(self.api("PATCH", f"accounts/{agy['id']}",
+                                  {"revision":agy["revision"], "enabled":True})[0], 200)
+        token = Path(agy["home"])/".gemini/antigravity-cli/antigravity-oauth-token"
+        token.parent.parent.mkdir(mode=0o700)
+        token.parent.mkdir(mode=0o700)
+        token.touch(mode=0o600)
+        token.write_text("fixture login")
+        disabled = self.account("codex", "daily-disabled")
+        self.assertEqual(self.api("PATCH", f"accounts/{disabled['id']}",
+                                  {"revision":disabled["revision"], "enabled":False})[0], 200)
+
+        self.stop()
+        hold = ch/"hold-fetch"
+        hold.touch()
+        self.start()
+        try:
+            self.wait_for_quota_success(codex)
+            self.wait_for_quota_success(agy)
+            self.assertTrue((ch/"quota-count").exists())
+            self.session = self.api("POST", "login", {"password":self.password})[1]["session"]
+            self.assertEqual(self.api("POST", "quota/refresh", {"stale_only":True})[1]["queued"], 0)
+        finally:
+            hold.unlink()
+        self.wait_for_quota_success(claude)
+        self.assertEqual((ch/"quota-count").read_text(), "fetch\n")
+        self.assertFalse((Path(disabled["home"])/"quota-count").exists())
+        self.assertEqual(self.api("GET", "startups")[1]["items"], [])
+
+    def test_dashboard_refresh_reschedules_only_the_refreshed_profile(self):
+        import sqlite3
+        panel, idle = [self.account("codex", name) for name in ("panel", "idle")]
+        self.assertEqual(self.api("POST", "quota/refresh", {"stale_only":True})[1]["queued"], 2)
+        for profile in (panel, idle):
+            self.wait_for_quota_success(profile)
+        self.stop()
+        # Both daily checks come due together; only the idle profile is in backoff until then.
+        due = int(time.time() * 1000) + 3000
+        last_success = due - 24 * 3600 * 1000
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("UPDATE quota_cache SET success_ms=?,retry_ms=CASE WHEN config_id=? THEN ? ELSE 0 END",
+                       (last_success, idle["id"], due))
+        self.start()
+        self.session = self.api("POST", "login", {"password":self.password})[1]["session"]
+        self.assertEqual(self.api("POST", "quota/refresh", {"stale_only":True})[1]["queued"], 1)
+        panel_success = self.wait_for_quota_success(panel, last_success)
+        self.assertLess(panel_success, due)
+        # The daily scheduler must skip this profile even outside the short post-fetch cooldown.
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("UPDATE quota_cache SET retry_ms=0 WHERE config_id=?", (panel["id"],))
+        self.assertGreaterEqual(self.wait_for_quota_success(idle, last_success), due)
+        for profile in (panel, idle):
+            self.assertEqual((Path(profile["home"])/"quota-count").read_text(), "fetch\n" * 2)
+
     def test_unavailable_claude_refresh_keeps_last_good_and_does_not_block_launch(self):
         import sqlite3
         c=self.account("claude","usage")
