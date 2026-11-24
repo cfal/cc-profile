@@ -392,12 +392,13 @@ async function logs(view, params, ver, enter) {
       chooser("state", "Result", [["", "All"], ...Object.entries(states)], result),
     el("label", {}, icon("search"), search),
   );
-  const table = el("table"),
+  const table = el("table", {class: "records", role: "table"}),
     head = el("tr"),
-    body = el("tbody");
-  for (const h of sessions
+    body = el("tbody", {role: "rowgroup"});
+  const headings = sessions
     ? ["Session ID", "Tool", "Bound config", "Workspace", "Evidence", "Last routed", "Resume"]
-    : ["Time", "Tool", "Intent", "Config", "Decision", "Session ID", "Details"])
+    : ["Time", "Tool", "Intent", "Config", "Decision", "Session ID", "Details"];
+  for (const h of headings)
     head.append(el("th", { scope: "col" }, h));
   table.append(el("thead", {}, head), body);
   const short = (s) => s.length <= 14 ? s : s.slice(0, 8) + "…" + s.slice(-5);
@@ -473,15 +474,16 @@ async function logs(view, params, ver, enter) {
           commands,
         ]
       : [fmt(row.created_ms), alias, simple(row.intent), cfg, decision, idLink, det];
-    body.append(el("tr", {}, ...cells.map((v) => el("td", {}, v))));
+    body.append(el("tr", {role: "row"}, ...cells.map((v, i) => el("td", {role: "cell"},
+      el("span", {class: "cell-label", "aria-hidden": "true"}, headings[i]), v))));
     if (!sessions && expanded === row.seq)
       body.append(
         el(
           "tr",
-          {},
+          {role: "row"},
           el(
             "td",
-            { colspan: 7, class: "details-cell" },
+            { colspan: 7, class: "details-cell", role: "cell" },
             el(
               "dl",
               { class: "facts" },
@@ -606,6 +608,12 @@ function accountForm(t, c) {
 }
 const quotaText = (q) =>
   q.loading ? "Checking quota" : q.stale ? "Stale" : quotaStates[q.status] || "Unavailable";
+function quotaMeter(w, stale) {
+  const value = 100 - w.used_pct;
+  const expired = w.reset_at_ms != null && w.reset_at_ms <= Date.now();
+  return el("progress", {value, max: 100, class: stale || expired ? "stale-meter" : "",
+    "aria-label": w.label + " remaining", title: w.label + ": " + percent(value) + " left"});
+}
 function resetTime(ms) {
   if (ms == null) return text("Reset unknown", "caption");
   const mins = Math.ceil((ms - Date.now()) / 60000);
@@ -625,14 +633,19 @@ function resetTime(ms) {
 }
 function quotaDetails(q, tool) {
   const s = q.snapshot, details = document.createDocumentFragment();
-  details.append(el("p", {class: "caption"}, [
-    (!q.success_ms || q.loading || q.stale || q.status !== "fresh") && quotaText(q),
+  const status = (!q.success_ms || q.loading || q.stale || q.status !== "fresh") && [
+    quotaText(q), q.stale && q.loading && "Stale",
     q.stale && q.status !== "fresh" && (quotaStates[q.status] || "Unavailable"),
+  ].filter(Boolean).join(" · ");
+  const meta = [
     s && tool === "agy" && "Model-pool limits",
     s?.plan,
     q.success_ms && (tool === "claude" ? "CLI checked " : "Last checked ") + fmt(q.success_ms),
     !q.loading && q.status !== "fresh" && q.retry_ms > Date.now() && "Retry after " + new Date(q.retry_ms).toLocaleTimeString(),
-  ].filter(Boolean).join(" · ")));
+  ].filter(Boolean).join(" · ");
+  details.append(el("p", {class: "caption quota-meta"},
+    status && pill(status, q.loading ? "blue" : q.stale || q.status !== "not_checked" ? "amber" : ""),
+    meta));
   for (const w of s?.windows || []) {
     const remaining = 100 - w.used_pct;
     details.append(
@@ -642,9 +655,9 @@ function quotaDetails(q, tool) {
         el("strong", {}, w.label),
         el(
           "div",
-          {},
+          {class: "quota-value"},
           percent(remaining) + " left",
-          el("progress", { value: remaining, max: 100, "aria-label": w.label + " remaining" }),
+          quotaMeter(w, q.stale),
         ),
         resetTime(w.reset_at_ms),
       ),
@@ -863,7 +876,9 @@ function openResetGrants(c) {
 }
 function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   const route = location.hash;
-  const link = showProfile && el("a", {href: "#accounts?tool=" + c.tool + "&id=" + c.id});
+  const accountName = showProfile && el("span", {class: "quota-name"});
+  const link = showProfile && el("a", {class: "quota-link", href: "#accounts?tool=" + c.tool + "&id=" + c.id},
+    text(names[c.tool], "provider-name"), accountName);
   const badge = showProfile && pill("Disabled");
   let submitting = false, loading = false;
   // Keep keyboard focus while either the request or the daemon's quota check is pending.
@@ -890,8 +905,10 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   function update(profile) {
     c = profile;
     if (link) {
-      const label = names[profile.tool] + " / " + profile.label;
-      if (link.textContent !== label) link.textContent = label;
+      if (accountName.textContent !== profile.label) {
+        accountName.textContent = profile.label;
+        link.setAttribute("aria-label", names[profile.tool] + " / " + profile.label);
+      }
       badge.hidden = profile.enabled;
     }
     loading = !!profile.quota.loading;
@@ -1131,9 +1148,7 @@ async function accounts(params, ver, enter) {
           a.current && pill("Default", "blue"),
           pill(a.enabled ? "Enabled" : "Disabled", a.enabled ? "green" : ""),
         ),
-        windows.length > 0 && el("span", {class: "quota-bars"}, windows.map((w) =>
-          el("progress", {max: 100, value: 100 - w.used_pct, "aria-label": w.label + " remaining",
-            title: w.label + ": " + percent(100 - w.used_pct) + " left"}))),
+        windows.length > 0 && el("span", {class: "quota-bars"}, windows.map((w) => quotaMeter(w, q.stale))),
         text(
           summary
             ? (q.stale ? "Stale · " : "") + summary
