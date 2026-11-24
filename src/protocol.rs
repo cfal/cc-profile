@@ -8,6 +8,10 @@ pub const ACP_LAUNCH: &str = "/v4/agy-acp/launch";
 pub const ACP_CHECK: &str = "/v4/agy-acp/check";
 pub const ACP_LIST: &str = "/v4/agy-acp/list";
 pub const ACP_LISTED: &str = "/v4/agy-acp/listed";
+pub const CODEX_CHECK: &str = "/v4/codex-stdio/check";
+pub const CODEX_LAUNCH: &str = "/v4/codex-stdio/launch";
+pub const CODEX_OWNER: &str = "/v4/codex-stdio/owner";
+pub const CODEX_BROWSE: &str = "/v4/codex-stdio/browse";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingMode {
@@ -63,7 +67,7 @@ pub fn profile_login_args(tool: &str, status: bool) -> Option<&'static [&'static
         _ => None,
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub request_id: String,
@@ -77,6 +81,12 @@ pub struct Request {
     pub override_names: Vec<String>,
 }
 impl Request {
+    pub fn managed_codex_stdio(&self) -> bool {
+        self.tool == "codex"
+            && self.login_profile.is_none()
+            && self.argv.first().is_some_and(|a| a == "app-server")
+            && !matches!(self.argv.get(1).map(String::as_str), Some("-h" | "--help"))
+    }
     pub fn managed_agy_acp(&self) -> bool {
         self.tool == "agy"
             && self.login_profile.is_none()

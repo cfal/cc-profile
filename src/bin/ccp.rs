@@ -90,7 +90,7 @@ fn invalid() -> Error {
 fn utf8() -> Error {
     Error::bad("encoding", "Arguments and working directory must be UTF-8.")
 }
-fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invocation>)> {
+fn validate_patch<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
     let home = if req.tool == "agy" {
         "HOME"
     } else if req.tool == "codex" {
@@ -121,6 +121,10 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
     {
         return Err(invalid());
     }
+    Ok(path)
+}
+fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invocation>)> {
+    let path = validate_patch(plan, req)?;
     let mut managed = None;
     if req.login_profile.is_none()
         && (req.tool != "claude"
@@ -383,6 +387,12 @@ async fn run() -> Result<ExitCode> {
         binary,
         override_names,
     };
+    if req.managed_codex_stdio()
+        && req.override_names.is_empty()
+        && classify(tool, &req.argv, &req.cwd).is_ok_and(|i| i.intent == Intent::New)
+    {
+        return codex::lazy::run(req).await;
+    }
     if tool == "agy"
         && req.login_profile.is_none()
         && req.override_names.is_empty()
@@ -430,6 +440,8 @@ async fn launch(req: &Request, deadline: Instant) -> Result<Plan> {
     request(
         if req.managed_agy_acp() {
             ccpd::protocol::ACP_LAUNCH
+        } else if req.managed_codex_stdio() {
+            ccpd::protocol::CODEX_LAUNCH
         } else {
             "/v3/launch"
         },

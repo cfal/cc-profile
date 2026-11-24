@@ -13,6 +13,8 @@ use serde_json::json;
 use std::{io, path::Path, process::ExitCode, time::Duration};
 use tokio::{process::Command, time::timeout};
 
+#[path = "codex/lazy.rs"]
+pub(super) mod lazy;
 #[path = "stdio.rs"]
 mod stdio;
 

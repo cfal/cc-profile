@@ -497,6 +497,56 @@ pub struct Admission {
 pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
     admit(store, build, req)?.plan
 }
+pub fn codex_owner(store: &Store, build: &Build, req: &Request) -> Result<i64> {
+    check_req(req)?;
+    let i = classify(&req.tool, &req.argv, &req.cwd)?;
+    let Intent::Resume(id) = &i.intent else {
+        return Err(Error::denied());
+    };
+    if !req.managed_codex_stdio() {
+        return Err(Error::denied());
+    }
+    let uuid = Uuid::parse_str(id).map_err(|_| Error::denied())?;
+    let proof = crate::rollout::probe(store, uuid)?;
+    store.write(
+        |db| match choose(db, build, req, &i, RoutingMode::RoundRobin, Some(&proof))? {
+            Selection::Allow(c, _) => Ok(c.id),
+            Selection::Refuse(_, e) => Err(e),
+        },
+    )
+}
+
+pub fn codex_browse_plans(
+    store: &Store,
+    build: &Build,
+    req: &Request,
+    all: bool,
+) -> Result<Vec<Plan>> {
+    check_req(req)?;
+    let i = classify(&req.tool, &req.argv, &req.cwd)?;
+    if !req.managed_codex_stdio() || i.intent != Intent::New || !req.override_names.is_empty() {
+        return Err(Error::denied());
+    }
+    validate_binary(build, req.binary.as_deref())?;
+    let profiles = configs(&*store.db()?, "codex")?;
+    let mut plans = Vec::new();
+    for c in profiles
+        .into_iter()
+        .filter(|c| c.enabled && (all || c.is_default_account))
+    {
+        if !c.present() {
+            return Err(denial("owner_missing", Some(&c), None));
+        }
+        if plans.len() >= 32 {
+            return Err(Error::bad("browse_limit", "Too many profiles to browse."));
+        }
+        plans.push(plan(req, &c, &i, None, "browse"));
+    }
+    if !all && plans.is_empty() {
+        return Err(denial("no_current", None, None));
+    }
+    Ok(plans)
+}
 pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
     check_req(req)?;
     let fingerprint =

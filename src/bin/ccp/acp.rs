@@ -1,4 +1,4 @@
-use super::child::{Signals, status, stop};
+use super::child::{Incoming, Signals, status, stop};
 use ccpd::{
     agy,
     invocation::Invocation,
@@ -9,7 +9,7 @@ use ccpd::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io::{self, BufRead, IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::Path,
     process::{ExitCode, Stdio},
     sync::Mutex,
@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{mpsc, oneshot},
+    sync::oneshot,
 };
 
 use agy::acp::{self as wire, FRAME};
@@ -142,33 +142,8 @@ async fn confirm_page(req: &Request, result: &Value) -> Result<()> {
 }
 
 // A blocking terminal read must not keep the Tokio runtime alive after the agent exits.
-type Incoming = mpsc::Receiver<io::Result<Vec<u8>>>;
 fn incoming() -> Result<Incoming> {
-    let (tx, rx) = mpsc::channel(1);
-    std::thread::Builder::new()
-        .name("acp-stdin".into())
-        .spawn(move || {
-            let mut reader = io::stdin().lock();
-            loop {
-                let mut line = Vec::new();
-                match (&mut reader)
-                    .take(FRAME as u64 + 1)
-                    .read_until(b'\n', &mut line)
-                {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if tx.blocking_send(Ok(line)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.blocking_send(Err(e));
-                        break;
-                    }
-                }
-            }
-        })?;
-    Ok(rx)
+    Ok(super::child::incoming("acp-stdin", FRAME)?)
 }
 async fn input(
     req: &Request,

@@ -13,7 +13,10 @@ use axum::{
 use ccpd::{
     native::{Build, Installed},
     paths,
-    protocol::{ACP_CHECK, ACP_LAUNCH, ACP_LIST, ACP_LISTED, RoutingMode},
+    protocol::{
+        ACP_CHECK, ACP_LAUNCH, ACP_LIST, ACP_LISTED, CODEX_BROWSE, CODEX_CHECK, CODEX_LAUNCH,
+        CODEX_OWNER, RoutingMode,
+    },
     routing::{self, Failure, Observation},
     store::{Page, Store, config, configs, routing_mode},
     types::{Error, Result, tool},
@@ -77,6 +80,18 @@ async fn same_uid(req: Request, next: Next) -> Response {
 pub fn private(s: Shared) -> Router {
     Router::new()
         .route(ACP_CHECK, post(super::acp_list::check))
+        .route(CODEX_CHECK, post(|State(s): State<Shared>, Json(bin): Json<PathBuf>| async move {
+            ccpd::native::validate_binary(&s.build("codex").await, Some(&bin))?;
+            Ok::<_, Error>(Json(()))
+        }))
+        .route(CODEX_OWNER, post(|State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
+            let build = s.build("codex").await;
+            blocking(move || routing::codex_owner(&s.store, &build, &r)).await.map(Json)
+        }))
+        .route(CODEX_BROWSE, post(|State(s): State<Shared>, Json((r,all)): Json<(routing::Request,bool)>| async move {
+            let build = s.build("codex").await;
+            blocking(move || routing::codex_browse_plans(&s.store, &build, &r, all)).await.map(Json)
+        }))
         .route(ACP_LIST, post(super::acp_list::list))
         .route(ACP_LISTED, post(super::acp_list::listed))
         .route("/v3/agy-acp/check", post(|| async { acp_upgrade() }))
@@ -96,6 +111,7 @@ pub fn private(s: Shared) -> Router {
         )
         .route("/v3/launch", post(launch))
         .route(ACP_LAUNCH, post(launch))
+        .route(CODEX_LAUNCH, post(launch))
         .route(
             "/v2/observations",
             post(
@@ -134,6 +150,14 @@ async fn launch(
 ) -> Result<Json<ccpd::protocol::Plan>> {
     if r.managed_agy_acp() != (uri.path() == ACP_LAUNCH) {
         return Err(acp_upgrade());
+    }
+    if r.managed_codex_stdio() != (uri.path() == CODEX_LAUNCH) {
+        return Err(Error(
+            StatusCode::UPGRADE_REQUIRED,
+            "codex_stdio_version",
+            "Managed Codex stdio requires matching ccp and ccpd. Update both and restart ccpd."
+                .into(),
+        ));
     }
     let app = s.clone();
     let tool = r.tool.clone();

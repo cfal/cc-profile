@@ -52,7 +52,7 @@ impl Frame {
 }
 #[derive(Deserialize, Eq, PartialEq, Hash)]
 #[serde(untagged)]
-enum Id {
+pub(super) enum Id {
     Number(i64),
     Text(String),
 }
@@ -74,7 +74,20 @@ struct Started {
 struct StartedResult {
     thread: Thread,
 }
-type Starts = Arc<Mutex<HashSet<Id>>>;
+pub(super) type Starts = Arc<Mutex<HashSet<Id>>>;
+
+pub(super) fn track(line: &[u8], starts: &Starts) {
+    if let Ok(call) = serde_json::from_slice::<Call>(line) {
+        let mut ids = starts.lock().unwrap();
+        ids.remove(&call.id);
+        if call.method == "thread/start"
+            && ids.len() < 1024
+            && !matches!(&call.id, Id::Text(s) if s.len()>256)
+        {
+            ids.insert(call.id);
+        }
+    }
+}
 
 fn input(mut pipe: PipeWriter, starts: Starts) -> io::Result<()> {
     let mut input = io::stdin().lock();
@@ -86,24 +99,15 @@ fn input(mut pipe: PipeWriter, starts: Starts) -> io::Result<()> {
             return Ok(());
         }
         for part in chunk[..n].split_inclusive(|b| *b == b'\n') {
-            if let Some(line) = frame.feed(part, &starts)
-                && let Ok(call) = serde_json::from_slice::<Call>(line)
-            {
-                let mut ids = starts.lock().unwrap();
-                ids.remove(&call.id);
-                if call.method == "thread/start"
-                    && ids.len() < 1024
-                    && !matches!(&call.id, Id::Text(s) if s.len()>256)
-                {
-                    ids.insert(call.id);
-                }
+            if let Some(line) = frame.feed(part, &starts) {
+                track(line, &starts);
             }
             frame.done(part);
         }
         pipe.write_all(&chunk[..n])?;
     }
 }
-fn started(line: &[u8], starts: &Starts) -> Option<Thread> {
+pub(super) fn started(line: &[u8], starts: &Starts) -> Option<Thread> {
     let reply = serde_json::from_slice::<Reply>(line).ok()?;
     if reply.method.is_some() || !starts.lock().unwrap().remove(&reply.id) {
         return None;

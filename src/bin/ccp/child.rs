@@ -10,6 +10,36 @@ use tokio::{
     time::timeout,
 };
 
+pub(super) type Incoming = tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>;
+pub(super) fn incoming(name: &str, limit: usize) -> io::Result<Incoming> {
+    use std::io::{BufRead, Read};
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let mut reader = io::stdin().lock();
+            loop {
+                let mut line = Vec::new();
+                match (&mut reader)
+                    .take(limit as u64 + 1)
+                    .read_until(b'\n', &mut line)
+                {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.blocking_send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(e));
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(rx)
+}
+
 pub(super) struct Signals {
     int: Signal,
     term: Signal,

@@ -55,7 +55,6 @@ pub fn codex_stdio_command(args: &[String]) -> Result<(Intent, Vec<String>)> {
     let mut argv = vec!["app-server".to_owned()];
     let mut intent = Intent::New;
     let mut stdio = false;
-    let mut configured = false;
     while let Some(flag) = it.next() {
         match flag {
             "--stdio" if !stdio => stdio = true,
@@ -81,16 +80,9 @@ pub fn codex_stdio_command(args: &[String]) -> Result<(Intent, Vec<String>)> {
                     return Err(unsupported());
                 }
                 argv.extend([flag.into(), value.into()]);
-                configured = true;
             }
             _ => return Err(unsupported()),
         }
-    }
-    if configured && intent == Intent::New {
-        return Err(Error::bad(
-            "unsupported_invocation",
-            "Configured app-server launches require --for-session <uuid> to select the owner before startup.",
-        ));
     }
     Ok((intent, argv))
 }
@@ -1017,7 +1009,7 @@ mod tests {
         }
     }
     #[test]
-    fn configured_stdio_requires_a_pinned_owner_and_forwards_native_args_only() {
+    fn configured_stdio_forwards_only_native_settings() {
         let id = "60000000-0000-4000-8000-000000000002";
         let parse = |args: &[&str]| {
             codex_stdio_command(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -1033,7 +1025,10 @@ mod tests {
             "--config",
             "features.default_mode_request_user_input=true",
         ];
-        assert!(parse(&flags).is_err());
+        assert_eq!(
+            parse(&flags).unwrap(),
+            (Intent::New, flags.map(str::to_owned).to_vec())
+        );
         let (intent, argv) = parse(&[&flags[..], &["--for-session", id]].concat()).unwrap();
         assert_eq!(intent, Intent::Resume(id.into()));
         assert_eq!(argv, flags);
