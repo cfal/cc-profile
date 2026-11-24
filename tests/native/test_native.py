@@ -1,4 +1,5 @@
 """Opt-in smoke with installed providers, disposable homes, and no real credentials."""
+import asyncio
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,6 +104,66 @@ class Native(unittest.TestCase):
                 return rows[0]
             time.sleep(.1)
         self.fail("Saved thread was not discovered: " + uid)
+
+    @unittest.skipUnless(os.getenv("CCP_TEST_CODEX_OFFLINE") == "1",
+                         "requires the isolated native Codex fixture")
+    def test_codex_deferred_and_explicit_native_handshakes(self):
+        a = self.s.account("codex", "owner")
+        self.s.account("codex", "other")
+        init = {"clientInfo":{"name":"garcon","title":"Garcon","version":"0.1.0"},
+                "capabilities":{"experimentalApi":True,"requestAttestation":False}}
+
+        async def exchange(extra, method, params):
+            proc = await asyncio.create_subprocess_exec(
+                test_service.LAUNCHER, "codex", "app-server", "--listen", "stdio://", *extra,
+                cwd=self.s.root, env=self.s.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL)
+            frames = []
+            def send(frame):
+                proc.stdin.write(json.dumps(frame).encode() + b"\n")
+            async def call(i, op, args):
+                send({"id":i,"method":op,"params":args})
+                while line := await proc.stdout.readline():
+                    msg = json.loads(line)
+                    frames.append(msg)
+                    if msg.get("id") == i:
+                        self.assertNotIn("error", msg)
+                        return msg["result"]
+                self.fail(f"Premature native EOF waiting for {op}")
+            try:
+                async with asyncio.timeout(25):
+                    hello = await call(1, "initialize", init)
+                    send({"method":"initialized"})
+                    result = await call(2, method, params)
+                    proc.stdin.close()
+                    frames.extend(map(json.loads, (await proc.stdout.read()).splitlines()))
+                    self.assertEqual(await proc.wait(), 0)
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+            self.assertEqual([f["id"] for f in frames if "result" in f or "error" in f], [1, 2])
+            return hello, result
+
+        public, new = asyncio.run(exchange([], "thread/start", {"ephemeral":False,"cwd":str(self.s.root)}))
+        uid = new["thread"]["id"]
+        self.assertEqual(self.wait_for_owner(uid)["config_id"], a["id"])
+        rollout = Path(new["thread"]["path"])
+        self.assertTrue(rollout.is_relative_to(Path(a["home"])/"sessions"))
+        if not rollout.exists():
+            # A no-turn start may have only reserved the filename.
+            stamp = "2026-01-01T00:00:00Z"
+            meta = dict(id=uid, timestamp=stamp, cwd=str(self.s.root), originator="codex_cli_rs",
+                        cli_version="0.172.0", source="cli", model_provider="openai")
+            rollout.parent.mkdir(exist_ok=True, parents=True)
+            rollout.write_text(json.dumps(dict(timestamp=stamp, type="session_meta", payload=meta)) + "\n")
+        private, resumed = asyncio.run(exchange(["--for-session", uid], "thread/resume", {"threadId":uid}))
+        self.assertEqual((resumed["thread"]["id"], resumed["thread"]["path"]), (uid, str(rollout)))
+        self.assertEqual(private["codexHome"], a["home"])
+        public_home = Path(public["codexHome"])
+        self.assertTrue(public_home.is_dir() and public_home.is_relative_to(Path(self.s.env["XDG_RUNTIME_DIR"])))
+        self.assertEqual(public | {"codexHome":a["home"]}, private)
+        self.assertRegex(public["userAgent"], r"^garcon/\d+\.\d+\.\d+\b")
 
     def test_default_codex_exec_and_stdio_agree_on_sticky_owner(self):
         c = self.s.account("codex","no-hooks")
