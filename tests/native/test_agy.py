@@ -1,4 +1,4 @@
-"""Optional Linux 1.5.14 smoke: run only the native agent in an offline mount namespace."""
+"""Optional Linux AgY smoke: run only the native agent in an offline mount namespace."""
 import json
 import os
 from pathlib import Path
@@ -15,7 +15,7 @@ import test_service as svc
 
 AGY = os.getenv("CCP_TEST_AGY") or shutil.which("agy")
 
-@unittest.skipUnless(AGY and shutil.which("bwrap"), "set CCP_TEST_AGY to the pinned Linux binary; bwrap required")
+@unittest.skipUnless(AGY and shutil.which("bwrap"), "set CCP_TEST_AGY to a native Linux binary; bwrap required")
 class NativeACP(unittest.TestCase):
     def setUp(self):
         class Service(svc.Service):
@@ -34,6 +34,14 @@ class NativeACP(unittest.TestCase):
         s.api("PATCH",f"accounts/{c['id']}",{"revision":c["revision"],"enabled":True})
         s.env["DBUS_SESSION_BUS_ADDRESS"]="unix:path=/run/not-a-real-desktop-bus"
         self.service, self.profile = s, c
+
+    def test_models_reaches_signed_out_native_cli(self):
+        s, c = self.service, self.profile
+        self.assertEqual(s.api("PUT", "current/agy", {"config_id":c["id"]})[0], 200)
+        p = s.cli("agy", "models")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("sign in", (p.stderr + p.stdout).lower())
+        self.assertNotIn("ccp:", p.stderr)
 
     @unittest.skipUnless(shutil.which("hty"), "hty required for the native terminal UI")
     def test_bare_launch_opens_native_tui_without_creating_a_session(self):
@@ -125,7 +133,7 @@ class NativeACP(unittest.TestCase):
             try:
                 # Keep stdin open until native replies (EOF can stop ACP immediately).
                 info=call(1,"initialize",{"protocolVersion":1,"clientCapabilities":{}})["result"]
-                self.assertEqual(info["agentInfo"]["version"],"1.5.14")
+                self.assertEqual(info["agentInfo"]["version"],s.api("GET","accounts?tool=agy")[1]["version"])
                 self.assertTrue(info["agentCapabilities"]["loadSession"])
                 self.assertEqual(info["authMethods"],[])
                 self.assertIn("list",info["agentCapabilities"]["sessionCapabilities"])

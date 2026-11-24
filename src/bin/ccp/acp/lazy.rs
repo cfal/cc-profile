@@ -28,9 +28,6 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
         deadline(),
     )
     .await?;
-    if version != agy::VERSION {
-        return Err(ccpd::native::unsupported_build());
-    }
     let mut rx = incoming()?;
     let out = Out::new(tokio::io::stdout());
     let mut init: Option<Value> = None;
@@ -69,7 +66,7 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
                 }
                 send(
                     &out,
-                    json!({"jsonrpc":"2.0","id":id,"result":wire::initialize_result()}),
+                    json!({"jsonrpc":"2.0","id":id,"result":wire::initialize_result(&version)}),
                 )
                 .await?;
                 init = Some(v);

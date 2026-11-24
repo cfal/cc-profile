@@ -201,9 +201,6 @@ fn choose(
     if let Err(e) = validate_binary(build, req.binary.as_deref()) {
         return Ok(Selection::Refuse(None, e));
     }
-    if !build.supported && (i.intent != Intent::Misc || req.tool == "agy") {
-        return Ok(reject("unsupported_build"));
-    }
     if let Some(id) = req.login_profile {
         return Ok(
             match configs(db, &req.tool)?
@@ -451,7 +448,6 @@ impl Prior {
             || self.state != "routed"
             || now() - self.created > 30_000
             || validate_binary(build, req.binary.as_deref()).is_err()
-            || (!build.supported && (i.intent != Intent::Misc || req.tool == "agy"))
             || self.workspace != i.workspace
             || ((i.agy_conversation().is_some()
                 || req.tool == "codex" && matches!(i.intent, Intent::Resume(_)))
@@ -496,7 +492,6 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
     };
     // A slow profile filesystem must not hold the router's write transaction.
     let rollout = if req.tool == "codex"
-        && build.supported
         && req.override_names.is_empty()
         && let Ok(i) = &parsed
         && let Intent::Resume(id) = &i.intent

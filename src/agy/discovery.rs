@@ -1,7 +1,6 @@
 use super::{conversation_dir, open_home, saved_in};
 use crate::saved_files::entries as scan_dir;
 use crate::{
-    native::Build,
     store::{Config, Store, configs},
     types::{Result, now},
 };
@@ -248,11 +247,11 @@ fn record(store: &Store, ids: BTreeSet<Uuid>) -> Result<()> {
     Ok(())
 }
 
-pub fn run(store: &Store, build: &Build) {
+pub fn run(store: &Store) {
     let mut watcher = Watcher::new();
     let mut refresh = Instant::now();
     let mut reconcile = refresh + RECONCILE;
-    while build.supported && build.unchanged() {
+    loop {
         let t = Instant::now();
         if t >= refresh {
             if let Ok(profiles) = store.db().and_then(|db| configs(&db, "agy")) {

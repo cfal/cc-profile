@@ -377,23 +377,31 @@ class Antigravity(unittest.TestCase):
         self.assertIn("Conflicting", self.s.cli("agy","--conversation="+seed).stderr)
         self.assertEqual(rows(seed), [first])
 
-    def test_no_discovery_after_native_build_changes_or_on_unsupported_restart(self):
+    def test_native_upgrade_keeps_discovery_models_and_acp_working(self):
         c = self.profile("version")
+        self.login_markers(c)
+        self.s.api("PUT", "current/agy", {"config_id":c["id"]})
         fake = self.s.root/"bin/agy"
-        fake.write_text(fake.read_text().replace('print("1.5.14")', 'print("0.0.0")'))
+        fake.write_text(fake.read_text().replace("1.5.14", "1.5.16"))
         d = Path(c["home"])/".gemini/antigravity-cli/conversations"
         for level in (d.parents[1], d.parent, d):
             level.mkdir(mode=0o700, exist_ok=True)
-        (d/(str(uuid.uuid4())+".pb")).write_bytes(b"inert")
         for restart in (False, True):
             if restart:
                 self.s.stop()
                 self.s.start()
                 self.s.session = self.s.api("POST","login", {"password":self.s.password})[1]["session"]
-            self.assertNotEqual(self.s.cli("agy").returncode, 0)
-            self.assertNotEqual(self.s.cli("agy","acp").returncode,0)
-            time.sleep(1.3)  # Includes a topology refresh with the conversation directory present.
-            self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"], [])
+            sid = str(uuid.uuid4())
+            (d/(sid+".pb")).write_bytes(b"inert")
+            self.assertEqual(self.s.cli("agy").returncode, 0)
+            self.assertIn("fixture-model", self.s.cli("agy", "models").stdout)
+            with self.connection() as call:
+                reply = call(2, "session/new", {"cwd": "/work", "fixtureId": "chat-"+sid})
+                self.assertEqual(reply["result"]["sessionId"], "chat-"+sid)
+            deadline = time.monotonic() + 5
+            while not any(r["native_id"] == sid for r in self.s.api("GET","sessions?tool=agy")[1]["items"]):
+                self.assertLess(time.monotonic(), deadline, sid)
+                time.sleep(.05)
 
     def refresh_quota(self, c=None, stale_only=False):
         route = f"accounts/{c['id']}/quota/refresh" if c else "quota/refresh"
@@ -502,21 +510,21 @@ class Antigravity(unittest.TestCase):
         token.unlink()
         self.assertIsNone(self.wait_quota(c, "not_checked").get("snapshot"))
 
-    def test_quota_worker_never_runs_a_replaced_or_unsupported_binary(self):
+    def test_quota_worker_reprobes_upgrade_and_refuses_a_non_native_replacement(self):
         c = self.profile("pinned")
         self.assertEqual(self.s.cli("login", str(c["id"])).returncode, 0)
         exe = self.s.root/"bin/agy"
         exe.write_text(exe.read_text().replace('print("1.5.14")', 'print("1.5.99")'))
         self.assertEqual(self.refresh_quota(stale_only=True), 1)
-        self.assertIsNone(self.wait_quota(c, "unavailable")["snapshot"])
-        self.s.stop()
-        self.s.start()
-        self.s.session = self.s.api("POST", "login", {"password": self.s.password})[1]["session"]
+        good = self.wait_quota(c, "fresh")
+        calls = Path(c["home"])/"usage-calls"
+        self.assertEqual(len(calls.read_text().splitlines()), 1)
+        exe.write_text(exe.read_text().replace('print("1.5.99")', 'print("not the native tool")'))
         self.assertFalse(self.s.api("GET", "accounts?tool=agy")[1]["supported"])
         self.allow_retry(c)
         self.assertEqual(self.refresh_quota(c), 1)
-        self.assertIsNone(self.wait_quota(c, "unavailable")["snapshot"])
-        self.assertFalse((Path(c["home"])/"usage-calls").exists())
+        self.assertEqual(self.wait_quota(c, "unavailable")["snapshot"], good["snapshot"])
+        self.assertEqual(len(calls.read_text().splitlines()), 1)
 
     def test_bulk_skips_profile_disabled_while_waiting_for_shared_slot(self):
         held = [Path(self.s.account("claude", name)["home"]) for name in ("a", "b")]

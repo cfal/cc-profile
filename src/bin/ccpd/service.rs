@@ -11,7 +11,7 @@ use axum::{
     serve::IncomingStream,
 };
 use ccpd::{
-    native::Build,
+    native::{Build, Installed},
     paths,
     protocol::{ACP_CHECK, ACP_LAUNCH, ACP_LIST, ACP_LISTED, RoutingMode},
     routing::{self, Failure, Observation},
@@ -26,9 +26,9 @@ use tokio::net::UnixListener;
 pub type Shared = Arc<App>;
 pub struct App {
     pub store: Store,
-    pub claude: Build,
-    pub codex: Build,
-    pub agy: Build,
+    pub claude: Installed,
+    pub codex: Installed,
+    pub agy: Installed,
     pub state_dir: PathBuf,
     pub auth: Auth,
     pub quotas: super::quotas::Jobs,
@@ -38,14 +38,15 @@ pub struct App {
     pub reset_write: tokio::sync::Mutex<()>,
 }
 impl App {
-    pub fn build(&self, t: &str) -> &Build {
-        if t == "claude" {
+    pub async fn build(&self, t: &str) -> Build {
+        let installed = if t == "claude" {
             &self.claude
         } else if t == "agy" {
             &self.agy
         } else {
             &self.codex
-        }
+        };
+        installed.current(&self.state_dir).await
     }
 }
 pub async fn blocking<T: Send + 'static>(
@@ -136,7 +137,8 @@ async fn launch(
     }
     let app = s.clone();
     let tool = r.tool.clone();
-    let admission = blocking(move || routing::admit(&app.store, app.build(&r.tool), &r)).await?;
+    let build = s.build(&tool).await;
+    let admission = blocking(move || routing::admit(&app.store, &build, &r)).await?;
     if admission.refresh_quota {
         tokio::spawn(super::quotas::refresh_provider(s, tool));
     }
@@ -147,9 +149,9 @@ pub struct Filter {
     tool: String,
 }
 pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Result<Json<Value>> {
+    let build = s.build(tool(&q.tool)?).await;
     blocking(move || {
         let db = s.store.db()?;
-        let build = s.build(tool(&q.tool)?);
         let mut items = Vec::new();
         for c in configs(&db, &q.tool)? {
             let mut v = c.public();

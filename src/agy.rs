@@ -13,7 +13,6 @@ use std::{
 use tokio::process::Command;
 pub mod acp;
 pub mod discovery;
-pub const VERSION: &str = "1.5.14";
 
 pub const APP_DIR: &str = "antigravity-cli";
 pub const STATUS: &[&str] = &["profile-status"];

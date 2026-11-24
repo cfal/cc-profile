@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
 };
 use ccpd::{
-    native::unsupported_build,
+    native::{Build, unsupported_build},
     quota::inputs,
     rpc::Codex,
     store::{Config, config},
@@ -60,16 +60,16 @@ struct Profile {
     stamp: String,
     input: String,
 }
-fn profile(s: &Shared, db: &Connection, id: i64) -> Result<Profile> {
+fn profile(build: &Build, db: &Connection, id: i64) -> Result<Profile> {
     let c = config(db, id)?;
     if c.tool != "codex" || !c.present() {
         return Err(stale_config());
     }
-    if !s.codex.supported || !s.codex.unchanged() {
+    if !build.supported || !build.unchanged() {
         return Err(unsupported_build());
     }
     let input = inputs(&c).ok_or_else(stale_config)?;
-    let stamp = digest(json!([id, c.revision, input, s.codex.fingerprint]));
+    let stamp = digest(json!([id, c.revision, input, build.fingerprint]));
     Ok(Profile {
         config: c,
         input,
@@ -172,9 +172,9 @@ impl Listing {
     }
 }
 
-async fn inspect(s: &Shared, c: &Config) -> Result<(Codex, Listing)> {
+async fn inspect(s: &Shared, build: &Build, c: &Config) -> Result<(Codex, Listing)> {
     timeout(RPC_TIMEOUT, async {
-        let mut rpc = Codex::open(&s.codex, c, &s.state_dir).await?;
+        let mut rpc = Codex::open(build, c, &s.state_dir).await?;
         let usage = rpc
             .call(
                 2,
@@ -203,12 +203,13 @@ pub async fn list(State(s): State<Shared>, Path(id): Path<i64>, body: Body) -> R
         return Err(Error::bad("bad_request", "Expected an empty JSON object."));
     }
     let _slot = s.identity_slots.try_acquire().map_err(|_| busy())?;
-    let p = profile(&s, &*s.store.db()?, id)?;
-    let (rpc, listing) = inspect(&s, &p.config).await?;
+    let build = s.build("codex").await;
+    let p = profile(&build, &*s.store.db()?, id)?;
+    let (rpc, listing) = inspect(&s, &build, &p.config).await?;
     rpc.close().await;
     s.store.write(|db| {
         let stamp = p.stamp;
-        if profile(&s, db, id)?.stamp != stamp { return Err(stale_config()); }
+        if profile(&build, db, id)?.stamp != stamp { return Err(stale_config()); }
         let mut views = Vec::new();
         for grant in listing.grants {
             if spent(db, &grant.credit)? {
@@ -246,21 +247,22 @@ fn offer(db: &Connection, id: i64, handle: &str) -> Result<Offer> {
 
 async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
     let _slot = s.reset_write.try_lock().map_err(|_| busy())?;
+    let build = s.build("codex").await;
     let (p, offer) = {
         let db = s.store.db()?;
-        (profile(&s, &db, id)?, offer(&db, id, &handle)?)
+        (profile(&build, &db, id)?, offer(&db, id, &handle)?)
     };
     if p.stamp != offer.profile {
         return Err(stale_config());
     }
-    let (mut rpc, listing) = inspect(&s, &p.config).await.map_err(|e| {
+    let (mut rpc, listing) = inspect(&s, &build, &p.config).await.map_err(|e| {
         if e.1 == "sign_in_required" {
             stale_config()
         } else {
             e
         }
     })?;
-    if offer.account != listing.account || profile(&s, &*s.store.db()?, id)?.stamp != p.stamp {
+    if offer.account != listing.account || profile(&build, &*s.store.db()?, id)?.stamp != p.stamp {
         return Err(stale_config());
     }
     if let Some(outcome) = offer.outcome {
@@ -272,7 +274,7 @@ async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
         .find(|g| g.credit == offer.credit && g.details == offer.details)
         .ok_or_else(stale_grant)?;
     let key: String = s.store.write(|db| {
-        if profile(&s, db, id)?.stamp != p.stamp { return Err(stale_config()); }
+        if profile(&build, db, id)?.stamp != p.stamp { return Err(stale_config()); }
         if grant.expires.is_some_and(|t| t <= now()) || spent(db, &offer.credit)? {
             return Err(stale_grant());
         }
@@ -312,7 +314,7 @@ async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
                     params![outcome, now(), offer.credit, key],
                 )?;
             }
-            retire_observations(&s, db, &p, &offer)
+            retire_observations(&s, &build, db, &p, &offer)
         })
         .map_err(|_| unknown())?;
     rpc.close().await;
@@ -323,6 +325,7 @@ async fn consume(s: Shared, id: i64, handle: String) -> Result<Json<Value>> {
 
 fn retire_observations(
     s: &Shared,
+    build: &Build,
     db: &Connection,
     p: &Profile,
     offer: &Offer,
@@ -339,7 +342,7 @@ fn retire_observations(
         r.get::<_, i64>(0)
     })? {
         let id = row?;
-        if let Ok(p) = profile(s, db, id)
+        if let Ok(p) = profile(build, db, id)
             && p.config.enabled
             && bound.exists(params![id, p.stamp, offer.account, offer.credit])?
             && quotas::verified_alias(db, id, &p.input)?

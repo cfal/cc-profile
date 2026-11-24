@@ -75,7 +75,7 @@ async fn claude(c: &Config, build: &Build) -> Result<Identity> {
 
 pub async fn read(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json<Identity>> {
     let c = config(&*s.store.db()?, id)?;
-    let build = s.build(&c.tool);
+    let build = s.build(&c.tool).await;
     if !c.present() || !build.supported || !build.unchanged() {
         return Ok(Json(status("unavailable")));
     }
@@ -92,10 +92,10 @@ pub async fn read(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json<I
         .map_err(|_| Error::conflict("busy", "Another sign-in check is in progress."))?;
     let stamp = auth_stamp(&c);
     let result = if c.tool == "claude" {
-        claude(&c, build).await
+        claude(&c, &build).await
     } else {
         rpc::codex(
-            build,
+            &build,
             &c,
             Dir::new("/"),
             "account/read",

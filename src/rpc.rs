@@ -22,7 +22,7 @@ pub struct Codex {
 }
 impl Codex {
     pub async fn open(build: &Build, home: &Config, cwd: &Path) -> Result<Self> {
-        if !build.unchanged() || !home.present() {
+        if !build.supported || !build.unchanged() || !home.present() {
             return Err(failed());
         }
         let mut child = clean_command(&build.bin, cwd, Some(home))

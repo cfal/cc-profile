@@ -339,7 +339,6 @@ pub async fn fetch(c: &Config, build: &Build, cwd: &Path) -> Result<Value> {
         .map_err(|_| unavailable())??;
         // A failed/unsupported probe does not hide otherwise valid display data.
         let bound = quota.is_ok()
-            && build.supported
             && unmanaged_file(c)
             && no_codex_project_config(cwd)
             && matches!(

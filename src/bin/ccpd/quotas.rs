@@ -197,6 +197,7 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
         tokio::spawn(async move {
             let id = c.id;
             let _slot = a.quotas.slots.acquire().await.unwrap();
+            let build = a.build(&c.tool).await;
             let run = || -> Result<bool> {
                 let current = config(&*a.store.db()?, id)?;
                 Ok((!enabled_only || current.enabled)
@@ -204,7 +205,7 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
                     && a.quotas.active.lock().unwrap().get(&id) == Some(&ticket))
             };
             if run().unwrap_or(false) {
-                let result = quota::fetch(&c, a.build(&c.tool), &a.state_dir).await;
+                let result = quota::fetch(&c, &build, &a.state_dir).await;
                 let a2 = a.clone();
                 let saved = blocking(move || a2.store.write(|db| {
                     if a2.quotas.active.lock().unwrap().get(&id) != Some(&ticket) {

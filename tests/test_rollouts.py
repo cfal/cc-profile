@@ -8,7 +8,7 @@ import test_service as svc
 
 
 class CodexRollouts(unittest.TestCase):
-    def test_worker_starts_for_verified_build_only_and_repairs_offline_saves(self):
+    def test_worker_repairs_offline_saves_across_native_upgrade(self):
         s = svc.Service("test_web_authenticates_reads_and_mutations")
         self.addCleanup(s.doCleanups)
         s.setUp()
@@ -46,14 +46,9 @@ class CodexRollouts(unittest.TestCase):
         (archive / filename(fresh)).write_bytes(b"inert")
         fake = s.root / "bin/codex"
         verified = fake.read_text()
-        fake.write_text(verified.replace("codex-cli 0.171.0", "codex-cli 0.0.0"))
+        fake.write_text(verified.replace("codex-cli 0.171.0", "codex-cli 2.0.0"))
         restart()
-        self.assertFalse(s.api("GET", "accounts?tool=codex")[1]["supported"])
-        time.sleep(.4)
-        self.assertEqual(rows(), [row])
-        s.stop()
-        fake.write_text(verified)
-        restart()
+        self.assertTrue(s.api("GET", "accounts?tool=codex")[1]["supported"])
         self.assertEqual(wait(fresh)["config_id"], profile["id"])
         self.assertIn(row, rows())
         self.assertEqual(s.api("GET", "startups?tool=codex")[1]["items"], [])

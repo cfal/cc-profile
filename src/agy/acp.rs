@@ -13,10 +13,13 @@ pub fn workspace(s: &str) -> bool {
     Path::new(s).is_absolute() && s.len() <= 4096 && !s.chars().any(char::is_control)
 }
 
-pub fn initialize_result() -> Value {
-    json!({"protocolVersion":1,"agentInfo":{"name":"CCP managed Antigravity","version":super::VERSION},
-        "agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{},"list":{},"close":{}},
-            "promptCapabilities":{"image":true,"embeddedContext":true}},"authMethods":[]})
+fn capabilities() -> Value {
+    json!({"loadSession":true,"sessionCapabilities":{"resume":{},"list":{},"close":{}},
+            "promptCapabilities":{"image":true,"embeddedContext":true}})
+}
+pub fn initialize_result(version: &str) -> Value {
+    json!({"protocolVersion":1,"agentInfo":{"name":"CCP managed Antigravity","version":version},
+        "agentCapabilities":capabilities(),"authMethods":[]})
 }
 
 fn supports(native: &Value, promised: &Value) -> bool {
@@ -27,13 +30,7 @@ fn supports(native: &Value, promised: &Value) -> bool {
 }
 
 pub fn check_initialize(reply: &Value) -> Result<()> {
-    if reply["protocolVersion"] != 1
-        || reply["agentInfo"]["version"] != super::VERSION
-        || !supports(
-            &reply["agentCapabilities"],
-            &initialize_result()["agentCapabilities"],
-        )
-    {
+    if reply["protocolVersion"] != 1 || !supports(&reply["agentCapabilities"], &capabilities()) {
         return Err(Error::conflict(
             "acp_version",
             "Native AgY does not support the managed ACP handshake.",

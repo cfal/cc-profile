@@ -2,7 +2,7 @@ use super::service::{Shared, blocking};
 use axum::{Json, extract::State};
 use ccpd::{
     agy::{self, acp},
-    native::{clean_command, unsupported_build, validate_binary},
+    native::{Build, clean_command, validate_binary},
     protocol::ListedPage,
     routing::acp_owner,
     store::{Config, Store, config, configs},
@@ -31,15 +31,10 @@ pub struct Query {
     cwd: Option<String>,
 }
 
-fn pinned(app: &Shared, path: &Path) -> Result<()> {
-    if !app.agy.supported {
-        return Err(unsupported_build());
-    }
-    validate_binary(&app.agy, Some(path))
-}
 pub async fn check(State(s): State<Shared>, Json(path): Json<PathBuf>) -> Result<Json<String>> {
-    pinned(&s, &path)?;
-    Ok(Json(s.agy.version.clone()))
+    let build = s.build("agy").await;
+    validate_binary(&build, Some(&path))?;
+    Ok(Json(build.version))
 }
 
 fn unavailable() -> Error {
@@ -270,7 +265,7 @@ async fn read_profile(binary: &Path, c: &Config, catalog: &mut Catalog) -> Resul
 
 async fn collect(
     s: &Shared,
-    binary: &Path,
+    build: &Build,
     profiles: &Roster,
     slot: &Arc<OwnedSemaphorePermit>,
 ) -> Result<Catalog> {
@@ -278,9 +273,9 @@ async fn collect(
     for (c, stamp) in profiles {
         let app = s.clone();
         let id = c.id;
-        let bin = binary.to_owned();
+        let native = build.clone();
         let (current, current_stamp) = browse_task(slot, move || {
-            pinned(&app, &bin)?;
+            validate_binary(&native, Some(&native.bin))?;
             let current = config(&*app.store.db()?, id)?;
             if !current.enabled {
                 return Err(unavailable());
@@ -294,7 +289,7 @@ async fn collect(
         }
         match timeout(
             Duration::from_secs(8),
-            read_profile(binary, c, &mut catalog),
+            read_profile(&build.bin, c, &mut catalog),
         )
         .await
         {
@@ -335,16 +330,13 @@ async fn browse(
     slot: Arc<OwnedSemaphorePermit>,
     end: Instant,
 ) -> Result<Json<Value>> {
+    let build = s.build("agy").await;
+    validate_binary(&build, Some(&q.binary))?;
     let app = s.clone();
-    let bin = q.binary.clone();
-    let profiles = browse_task(&slot, move || {
-        pinned(&app, &bin)?;
-        snapshot(&app.store, saved_login)
-    })
-    .await?;
-    let catalog = collect(&s, &q.binary, &profiles, &slot).await?;
+    let profiles = browse_task(&slot, move || snapshot(&app.store, saved_login)).await?;
+    let catalog = collect(&s, &build, &profiles, &slot).await?;
     browse_task(&slot, move || {
-        pinned(&s, &q.binary)?;
+        validate_binary(&build, Some(&q.binary))?;
         if snapshot(&s.store, saved_login)? != profiles {
             return Err(unavailable());
         }

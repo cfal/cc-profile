@@ -1,6 +1,8 @@
 # Antigravity on Linux
 
-This adapter targets the unmodified `agy` **1.5.14** CLI. The router launches it on the execution machine; it does not run a replacement inference service, copy tokens, or implement Google's OAuth exchange.
+This adapter uses the installed native `agy` CLI. Version 1.5.14 was the original test baseline, not an admission requirement. The router launches it on the execution machine; it does not run a replacement inference service, copy tokens, or implement Google's OAuth exchange.
+
+On Linux 1.5.16, offline tests with disposable signed-out profiles also confirmed the TUI, print, and ACP initialization paths. Managed `agy models` reached the native sign-in check; that test does not verify a signed-in catalog.
 
 ## Set up a profile
 
@@ -22,7 +24,7 @@ The bridge correlates successful `session/new` responses by request ID and recor
 
 For the native terminal UI, run `ccp agy` in the workspace. It inherits the terminal and uses the selected profile's private HOME, bus-less runtime and proxy. The startup log records the profile, not an ID for a new chat.
 
-With the verified native build, ccpd watches each registered profile's `.gemini/antigravity-cli/conversations` directory. **Sessions** records a unique owner when a nonempty, user-owned regular file named `<uuid>.db` or `<uuid>.pb` appears. The UUID must be lowercase and hyphenated. Both extensions count once. The watcher checks metadata only, including disabled profiles for conflicts; it does not open transcripts or follow symlinks. It reconciles existing files at startup and periodically, and picks up newly registered profiles and directories created later. A file removed before ccpd can verify it may never be recorded.
+Independently of the installed CLI version, ccpd watches each registered profile's `.gemini/antigravity-cli/conversations` directory. **Sessions** records a unique owner when a nonempty, user-owned regular file named `<uuid>.db` or `<uuid>.pb` appears. The UUID must be lowercase and hyphenated. Both extensions count once. The watcher checks metadata only, including disabled profiles for conflicts; it does not open transcripts or follow symlinks. It reconciles existing files at startup and periodically, and picks up newly registered profiles and directories created later. A file removed before ccpd can verify it may never be recorded.
 
 **Saved file** is evidence of a file in a profile, not of a TUI, print, or ACP launch that created it. Concurrent starts are never matched to files by time. The copied terminal command is `ccp agy --conversation=<uuid>` without a guessed `cd`; an admitted explicit terminal resume supplies its workspace. Every terminal resume still checks for the file. If it was pruned, its recorded owner remains; duplicate or different owners and disabled owners are refused. A file alone never authorizes an ACP load.
 

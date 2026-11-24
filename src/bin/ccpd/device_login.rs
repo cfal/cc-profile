@@ -67,6 +67,7 @@ pub async fn start(
     Path(id): Path<i64>,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>> {
+    let build = s.build("codex").await;
     let c = config(&*s.store.db()?, id)?;
     revision(&v, &c)?;
     if c.tool != "codex" || !c.present() {
@@ -75,7 +76,7 @@ pub async fn start(
             "Choose a present Codex profile.",
         ));
     }
-    if !s.codex.supported || !s.codex.unchanged() {
+    if !build.supported || !build.unchanged() {
         return Err(unsupported_build());
     }
     let mut slot = s.logins.0.lock().unwrap();
@@ -98,7 +99,7 @@ pub async fn start(
     };
     let result = a.view();
     *slot = Some(a);
-    tokio::spawn(s.logins.clone().run(s.codex.clone(), c, attempt, rx));
+    tokio::spawn(s.logins.clone().run(build, c, attempt, rx));
     Ok(Json(result))
 }
 pub async fn cancel(

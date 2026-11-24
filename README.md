@@ -4,7 +4,7 @@
 
 ## Install
 
-The launcher and daemon are Rust executables for Linux. A native build requires stable Rust, `pkg-config`, and SQLite development headers, and the resulting daemon uses system SQLite. The static build below needs only Docker on the build machine and includes SQLite. Neither build needs Python or uv at runtime. The verified launch grammar is for **Claude Code 2.1.329**, **Codex CLI 0.171.0**, and **Antigravity CLI 1.5.14**. Other Claude or Codex builds can be used for maintenance, not trusted chat routing. Antigravity's filesystem login behavior is version-specific; even setup requires the verified version.
+The launcher and daemon are Rust executables for Linux. A native build requires stable Rust, `pkg-config`, and SQLite development headers, and the resulting daemon uses system SQLite. The static build below needs only Docker on the build machine and includes SQLite. Neither build needs Python or uv at runtime. The adapters were originally tested with **Claude Code 2.1.329**, **Codex CLI 0.171.0**, and **Antigravity CLI 1.5.14**. These are test baselines, not required versions. CCP uses the installed CLI and validates the actual protocol replies for managed features.
 
 ```sh
 CARGO_BUILD_JOBS=1 cargo install --locked --path . --root "$HOME/.local"
@@ -22,7 +22,7 @@ For distribution, build stripped, static Linux executables from the repository r
 
 On x86-64 the outputs are `target/x86_64-unknown-linux-musl/release/{ccp,ccpd}`. Ship both binaries to a Linux machine of the same architecture. The panel assets are embedded in `ccpd`.
 
-Ensure `~/.local/bin` and the native tools are on PATH. The service resolves its own trusted executables at startup; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path --agy-bin /absolute/path` if its PATH differs from your shell. Restart after changing native binaries.
+Ensure `~/.local/bin` and the native tools are on PATH. The service resolves native executables using its own PATH; use `ccpd --claude-bin /absolute/path --codex-bin /absolute/path --agy-bin /absolute/path` if its PATH differs from your shell. Replacing a native executable or retargeting its installation symlink triggers a new version probe on the next operation; no daemon restart is needed.
 
 To route interactive shell commands, add these to your shell startup file:
 
@@ -67,7 +67,7 @@ Stop any foreground instance first. The user unit does not source shell startup 
 Environment=PATH=/absolute/node/installation/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-Restart with `systemctl --user restart ccpd` after changing PATH or updating a native executable. A verified build is required for new chats and resumes; a provider auto-update can require a cc-profile adapter update.
+Restart with `systemctl --user restart ccpd` after changing the service's environment or updating CCP itself. A provider version change alone does not block chats, resumes or model discovery. If a provider changes a command, protocol or storage layout, the affected feature may still need an adapter update. A reset grant listed before the Codex executable changed must be listed again before redemption.
 
 ## Accounts
 
@@ -111,7 +111,7 @@ Ordinary TUI, exec and exact resume commands run native Codex in the selected `C
 
 Codex handles folder trust, Git repository checks and its local client options. Use `-C` for the workspace and `-m` for the model. Routing-sensitive arguments such as arbitrary remote endpoints, identity or profile overrides, and implicit resume selectors remain unsupported.
 
-When Codex saves a rollout, the daemon uses its filename to record the thread ID and profile, including forks and subagents. It watches the pinned version's active and archived session directories and reconciles missed changes. It does not open transcripts or infer a workspace, root chat or startup. Two concurrent launches may therefore both show **Unknown** in Startup logs while both saved IDs appear in **Sessions**. Files removed before observation can be missed. A file-only resume with a pruned rollout, conflicting owners or incomplete verification is refused, never routed to an arbitrary profile.
+When Codex saves a rollout, the daemon uses its filename to record the thread ID and profile, including forks and subagents. It watches the known active and archived session directories and reconciles missed changes. It does not open transcripts or infer a workspace, root chat or startup. Two concurrent launches may therefore both show **Unknown** in Startup logs while both saved IDs appear in **Sessions**. Files removed before observation can be missed. A file-only resume with a pruned rollout, conflicting owners or incomplete verification is refused, never routed to an arbitrary profile.
 
 Exact-owner checks include disabled profiles and use a bounded filename index. If an initial import is still running, retry after indexing. Histories exceeding 128 registered Codex profiles, 16,384 directory traversal steps, or 256 candidate filenames for one thread can exceed the verification limits. A slow filesystem can also exhaust the lookup time budget. None of these checks runs synchronously for a new chat.
 
@@ -173,7 +173,7 @@ Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while
 
 - Codex: native `account/rateLimits/read` in the selected `CODEX_HOME`. Subscription authentication is required; no model turn is started.
 - Antigravity: Dashboard and Accounts show remaining percentages and reset times for recognized model pools inline. These are not account-wide limits: even an empty pool does not affect routing, and launches never refresh them. `ccp usage <id>` still prints the native human-readable report.
-- Claude: the pinned CLI handles OAuth, including token renewal, in the selected file-backed `CLAUDE_CONFIG_DIR`. The daemon sends `get_usage` with `skip_behaviors: true`: no prompt, transcript scan or model turn. The CLI can make account and usage requests through the profile's proxy settings. The daemon checks only credential-file metadata; it does not read tokens or fall back to direct HTTP. If the file changes during the check, the daemon discards that result; use **Refresh quota** to read it again. **CLI checked** is when the CLI reported the numbers, not when the provider last updated them.
+- Claude: the native CLI handles OAuth, including token renewal, in the selected file-backed `CLAUDE_CONFIG_DIR`. The daemon sends `get_usage` with `skip_behaviors: true`: no prompt, transcript scan or model turn. The CLI can make account and usage requests through the profile's proxy settings. The daemon checks only credential-file metadata; it does not read tokens or fall back to direct HTTP. If the file changes during the check, the daemon discards that result; use **Refresh quota** to read it again. **CLI checked** is when the CLI reported the numbers, not when the provider last updated them.
 - Even with the panel closed, `ccpd` checks enabled profiles for all three providers when their last successful quota read is 24 hours old. It catches up on unchecked or overdue profiles at daemon startup and notices newly enabled profiles within a minute. Any successful read recorded by the daemon starts that profile's next 24 hours. A cache hit or failed attempt does not; failures respect retry backoff.
 - Opening Dashboard or Accounts still refreshes stale enabled profiles using a five-minute cache; a profile's own refresh button can also check it while disabled. The daily, panel and routing checks share the same workers: at most two upstream jobs and one check per profile at a time. Stale last-good values are labelled. A changed login or proxy can retry an authentication or connection failure immediately; provider rate limits still apply. For Codex, usage-based routing also requests a stale-data refresh in the background when admitting a new launch. The launch uses already-cached observations; it never waits for a provider quota check. Inherit uses the service environment for quota, the caller's environment for launches.
 
@@ -193,7 +193,7 @@ The root Cargo package builds both executables: [the launcher](src/bin/ccp.rs) a
 CARGO_BUILD_JOBS=1 cargo test --locked
 CARGO_BUILD_JOBS=1 cargo build --locked --bins
 python3 -m unittest discover -s tests -v
-python3 tests/native/test_native.py -v  # optional: requires the verified native versions
+python3 tests/native/test_native.py -v  # optional: requires installed native CLIs
 CCP_TEST_AGY=/path/to/agy python3 tests/native/test_agy.py -v  # optional: requires Linux bwrap
 uv run --no-project --with playwright python -m playwright install chromium --only-shell
 uv run --no-project --with playwright python tests/panel/test_panel.py

@@ -1,5 +1,4 @@
 use super::*;
-use crate::native::Build;
 use rustix::fs::{Dir, inotify};
 use std::{collections::VecDeque, mem::MaybeUninit, os::fd::AsRawFd};
 
@@ -442,9 +441,9 @@ fn record_with(
     Ok(())
 }
 
-pub fn run(store: &Store, build: &Build) {
+pub fn run(store: &Store) {
     let mut worker = Worker::new();
-    while build.supported && build.unchanged() {
+    loop {
         if worker.tick(store).is_err() {
             worker.scan = None;
             worker.refresh = Instant::now();

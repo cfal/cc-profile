@@ -289,6 +289,41 @@ class Service(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("Native tool", p.stderr)
 
+    def test_versioned_install_symlink_upgrades_without_restart(self):
+        for tool, previous, version, args in [
+            ("claude", "2.1.329", "3.0.0", ["-p", "hello"]),
+            ("codex", "0.171.0", "1.0.0-beta.2", ["exec", "--ephemeral", "hello"]),
+        ]:
+            with self.subTest(tool=tool):
+                c = self.account(tool, "upgrade-" + tool)
+                entry = self.root/"bin"/tool
+                old = self.root/"previous"/tool
+                old.parent.mkdir(exist_ok=True)
+                entry.rename(old)
+                entry.symlink_to(old)
+                self.assertEqual(self.cli(tool, *args).returncode, 0)
+                new = self.root/version/tool
+                new.parent.mkdir()
+                source = old.read_text().replace(previous, version)
+                new.write_text(source.replace('if sys.argv[1:] == ["--version"]:',
+                    'if sys.argv[1:] == ["--version"]:\n    with pathlib.Path(__file__).with_name("probes").open("a") as f: f.write("v\\n")'))
+                new.chmod(0o700)
+                replacement = entry.with_suffix(".new")
+                replacement.symlink_to(new)
+                replacement.replace(entry)  # The old target still exists and is executable.
+                p = self.cli(tool, *args)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(json.loads(p.stdout)["home"], c["home"])
+                data = self.api("GET", "accounts?tool=" + tool)[1]
+                self.assertTrue(data["supported"])
+                self.assertIn(version, data["version"])
+                self.assertEqual(new.with_name("probes").read_text(), "v\n")
+                new.write_text('#!/bin/sh\nexit 1\n')
+                self.assertFalse(self.api("GET", "accounts?tool=" + tool)[1]["supported"])
+                self.assertNotEqual(self.cli(tool, *args).returncode, 0)
+                new.write_text(source)
+                self.assertEqual(self.cli(tool, *args).returncode, 0)
+
     def test_creating_and_signing_in_a_second_claude_profile(self):
         work = self.account("claude", "work")
         self.assertEqual(self.api("PUT", "current/claude", {"config_id": work["id"]})[0], 200)
@@ -820,8 +855,10 @@ class Service(unittest.TestCase):
         error("stale_grant")
         self.assertEqual(self.api("PATCH",f"accounts/{c['id']}",{"revision":c["revision"],"label":"changed"})[0],200)
         error("stale_config")
+        handle = self.reset_list(r)["grants"][0]["handle"]
         (self.root/"bin/codex").touch()
-        error("unsupported_build")
+        error("stale_config")
+        self.assertNotEqual(self.reset_list(r)["grants"][0]["handle"], handle)
         self.assertFalse((h/"reset-consumes.jsonl").exists())
 
     def test_reset_retries_share_durable_keys_and_serialize_consumes(self):
@@ -1165,8 +1202,8 @@ class Service(unittest.TestCase):
         with (self.root/"bin/claude").open("a") as f: f.write("\n# replaced\n")
         (home/"raw-output").unlink()
         self.assertEqual(self.api("POST",route,{})[1]["queued"],1)
-        self.assertEqual(check(lambda q:not q["loading"])["status"],"unavailable")
-        self.assertEqual((home/"quota-count").read_text(),"fetch\n"*2)
+        self.assertEqual(check(lambda q:not q["loading"])["status"],"fresh")
+        self.assertEqual((home/"quota-count").read_text(),"fetch\n"*3)
 
     def test_codex_quota_follows_verified_store_not_a_leftover_auth_file(self):
         import sqlite3

@@ -7,7 +7,7 @@ mod quotas;
 mod resets;
 mod service;
 use ccpd::{
-    native::Build,
+    native::Installed,
     paths,
     store::Store,
     types::{Error, Result},
@@ -88,9 +88,12 @@ async fn run() -> Result<()> {
     }
     let unix = UnixListener::bind(&sock)?;
     fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
-    let claude = Build::detect("claude", claude.as_deref(), &state).await;
-    let codex = Build::detect("codex", codex.as_deref(), &state).await;
-    let agy = Build::detect("agy", agy.as_deref(), &state).await;
+    let claude = Installed::new("claude", claude);
+    let codex = Installed::new("codex", codex);
+    let agy = Installed::new("agy", agy);
+    for installed in [&claude, &codex, &agy] {
+        installed.current(&state).await;
+    }
     let app = Arc::new(service::App {
         store,
         claude,
@@ -119,20 +122,20 @@ async fn run() -> Result<()> {
         Store::user_db_path(&app.state_dir).display(),
         sock.display()
     );
-    if app.agy.supported {
+    {
         let a = app.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("agy-saved-files".into())
-            .spawn(move || ccpd::agy::discovery::run(&a.store, &a.agy))
+            .spawn(move || ccpd::agy::discovery::run(&a.store))
         {
             eprintln!("Antigravity saved-file discovery unavailable: {e}");
         }
     }
-    if app.codex.supported {
+    {
         let a = app.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("codex-rollouts".into())
-            .spawn(move || ccpd::rollout::run(&a.store, &a.codex))
+            .spawn(move || ccpd::rollout::run(&a.store))
         {
             eprintln!("Codex rollout discovery unavailable: {e}");
         }

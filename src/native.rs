@@ -10,7 +10,7 @@ use std::{
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::process::Command;
 
@@ -233,41 +233,77 @@ async fn probe(bin: &Path, cwd: &Path, fingerprint: &str) -> Probe {
         Probe::Version(String::new())
     }
 }
-impl Build {
-    pub async fn detect(tool: &str, configured: Option<&str>, cwd: &Path) -> Self {
+type Candidates = Vec<(PathBuf, bool, String)>;
+
+pub struct Installed {
+    tool: &'static str,
+    configured: Option<String>,
+    cached: tokio::sync::Mutex<Option<(Candidates, Build, Instant)>>,
+}
+impl Installed {
+    pub fn new(tool: &'static str, configured: Option<String>) -> Self {
+        Self {
+            tool,
+            configured,
+            cached: Default::default(),
+        }
+    }
+    pub async fn current(&self, cwd: &Path) -> Build {
+        let mut cache = self.cached.lock().await;
+        let candidates: Candidates =
+            match native_candidates(self.configured.as_deref().unwrap_or(self.tool)) {
+                Ok(paths) => paths
+                    .map(|(p, alias)| {
+                        let fp = stamp(&p);
+                        (p, alias, fp)
+                    })
+                    .collect(),
+                Err(e) => {
+                    eprintln!("ccpd: {e}");
+                    return Build::default();
+                }
+            };
+        if let Some((previous, build, checked)) = &*cache
+            && previous == &candidates
+            && (build.supported || checked.elapsed() < Duration::from_secs(5))
+        {
+            return build.clone();
+        }
+        let build = self.detect(&candidates, cwd).await;
+        *cache = Some((candidates, build.clone(), Instant::now()));
+        build
+    }
+    async fn detect(&self, candidates: &Candidates, cwd: &Path) -> Build {
         let mut alias = None;
-        let candidates = match native_candidates(configured.unwrap_or(tool)) {
-            Ok(candidates) => candidates,
-            Err(e) => {
-                eprintln!("ccpd: {e}");
-                return Self::default();
-            }
-        };
-        for (bin, known_alias) in candidates {
-            if !known_alias {
-                let fingerprint = stamp(&bin);
-                match probe(&bin, cwd, &fingerprint).await {
-                    Probe::Version(v) => return Self::from_version(tool, bin, fingerprint, v),
+        let tool = self.tool;
+        for (bin, known_alias, fingerprint) in candidates {
+            if !*known_alias {
+                match probe(bin, cwd, fingerprint).await {
+                    Probe::Version(v) => {
+                        return Build::from_version(tool, bin.clone(), fingerprint.clone(), v);
+                    }
                     Probe::Forwarder => {
                         eprintln!(
                             "ccpd: {tool} at {} invokes the launcher, not a native executable.",
                             bin.display()
                         );
-                        return Self::default();
+                        return Build::default();
                     }
                     Probe::Launcher => {}
                 }
             }
             alias = Some(bin);
-            if configured.is_some() {
+            if self.configured.is_some() {
                 break;
             }
         }
         if let Some(p) = alias {
-            eprintln!("ccpd: {}", alias_error(tool, &p));
+            eprintln!("ccpd: {}", alias_error(tool, p));
         }
-        Self::default()
+        Build::default()
     }
+}
+impl Build {
     fn from_version(tool: &str, bin: PathBuf, fingerprint: String, version: String) -> Self {
         if version.is_empty() {
             eprintln!(
@@ -275,12 +311,22 @@ impl Build {
                 bin.display()
             );
         }
-        let supported = match tool {
-            "claude" => version.split_whitespace().next() == Some("2.1.329"),
-            "codex" => version == "codex-cli 0.171.0",
-            "agy" => version == crate::agy::VERSION,
-            _ => false,
+        // Identify the CLI's version report, not a particular release number.
+        let release = match tool {
+            // Some Claude packages report the bare version without the product label.
+            "claude" => Some(version.strip_suffix(" (Claude Code)").unwrap_or(&version)),
+            "codex" => version
+                .strip_prefix("codex-cli ")
+                .and_then(|s| s.split_whitespace().next()),
+            "agy" => Some(version.strip_prefix("agy ").unwrap_or(&version)),
+            _ => None,
         };
+        let supported = release.is_some_and(|v| {
+            let v = v.strip_prefix('v').unwrap_or(v);
+            v.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && v.contains('.')
+                && !v.contains(char::is_whitespace)
+        });
         Self {
             bin,
             fingerprint,
@@ -304,11 +350,11 @@ impl Build {
 pub fn unsupported_build() -> Error {
     Error::conflict(
         "unsupported_build",
-        "Native tool is missing, changed, or not a verified version. Check Accounts and restart ccpd after updating.",
+        "Native tool is unavailable or does not match the daemon's executable. Check Accounts and the native binary on PATH.",
     )
 }
 pub fn validate_binary(build: &Build, reported: Option<&Path>) -> Result<()> {
-    if reported.is_none() || reported != Some(build.bin.as_path()) || !build.unchanged() {
+    if !build.supported || reported != Some(build.bin.as_path()) || !build.unchanged() {
         return Err(unsupported_build());
     }
     Ok(())

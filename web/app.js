@@ -40,7 +40,7 @@ const states = {
 const ready = {
   ready: "Ready",
   path_missing: "Directory missing or replaced",
-  unsupported_build: "Native build unavailable or unsupported",
+  unsupported_build: "Native executable unavailable or mismatched",
 };
 const quotaStates = {
   not_checked: "Not checked",
@@ -677,7 +677,7 @@ const resetErrors = {
   stale_config: "This profile or its sign-in changed. Reopen its grant list.",
   busy: "Another request is in progress. Try again shortly.",
   sign_in_required: "Sign in to this Codex profile first.",
-  unsupported_build: "The installed Codex version does not support this action.",
+  unsupported_build: "Could not verify the native Codex executable. Check Accounts.",
   unavailable: "Grant details are unavailable right now.",
 };
 const resetOutcomes = {
