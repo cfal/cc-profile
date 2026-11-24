@@ -9,6 +9,10 @@ use std::{
 };
 use uuid::Uuid;
 
+pub fn workspace(s: &str) -> bool {
+    Path::new(s).is_absolute() && s.len() <= 4096 && !s.chars().any(char::is_control)
+}
+
 pub fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }

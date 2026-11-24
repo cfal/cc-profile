@@ -2,13 +2,14 @@ use super::service::{Shared, blocking};
 use axum::{Json, extract::State};
 use ccpd::{
     agy::{self, acp},
+    listed::Source,
     native::{Build, clean_command, validate_binary},
     protocol::ListedPage,
     routing::acp_owner,
     store::{Config, Store, config, configs},
-    types::{Error, Result, now},
+    types::{Error, Result},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -149,36 +150,13 @@ impl Catalog {
         for (id, (owner, row)) in self.rows {
             let cwd = row["cwd"].as_str().unwrap();
             let matches = filter.is_none_or(|wanted| wanted == cwd);
-            record_listed(db, owner, &id, cwd, matches)?;
+            Source::Acp.record(db, owner, &id, cwd, matches)?;
             if matches {
                 rows.push(row);
             }
         }
         Ok(rows)
     }
-}
-
-fn record_listed(db: &Connection, owner: i64, id: &str, cwd: &str, publish: bool) -> Result<()> {
-    let binding: Option<(i64, String)> = db
-        .prepare_cached("SELECT owner,evidence FROM sessions WHERE tool='agy' AND native_id=?")?
-        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?;
-    match binding {
-        Some((old, _)) if old != owner => {
-            return Err(Error::conflict(
-                "ambiguous_session",
-                "AgY session conflicts with its recorded owner; no browse results were published.",
-            ));
-        }
-        None if publish => {
-            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms) VALUES('agy',?,?,'acp_listed',?,?)",params![id,owner,cwd,now()])?;
-        }
-        Some((_, e)) if publish && e == "saved_file" => {
-            db.execute("UPDATE sessions SET evidence='acp_listed',workspace=? WHERE tool='agy' AND native_id=?",params![cwd,id])?;
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 pub async fn listed(State(s): State<Shared>, Json(page): Json<ListedPage>) -> Result<Json<usize>> {
@@ -206,7 +184,7 @@ pub async fn listed(State(s): State<Shared>, Json(page): Json<ListedPage>) -> Re
                 return Err(Error::denied());
             }
             for (id, cwd) in &page.sessions {
-                record_listed(db, before.id, id, cwd, true)?;
+                Source::Acp.record(db, before.id, id, cwd, true)?;
             }
             if Instant::now() >= end {
                 return Err(unavailable());

@@ -4,6 +4,66 @@ use common::Fixture;
 use serde_json::json;
 
 #[test]
+fn v18_preserves_all_session_evidence_and_allows_only_codex_threads_to_be_codex_listed() {
+    let f = Fixture::new();
+    {
+        let db = f.store.db().unwrap();
+        db.execute_batch(include_str!("../src/acp_listed_sessions.sql"))
+            .unwrap();
+        db.execute_batch("PRAGMA user_version=17;
+            INSERT INTO configs(id,tool,label,home,dev,ino,birth_ns) VALUES
+              (1,'claude','c','/c',1,1,1),(2,'codex','x','/x',2,2,2),(3,'agy','a','/a',3,3,3);
+            INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms,tui_workspace,saved_file_seen_ms) VALUES
+              ('claude','assigned',1,'assigned','/c',1,2,NULL,NULL),
+              ('codex','observed',2,'observed','/x',3,4,NULL,5),
+              ('codex','rollout',2,'saved_file',NULL,6,NULL,NULL,7),
+              ('agy','dual',3,'observed','/acp',8,9,'/tui',10),
+              ('agy','listed',3,'acp_listed','/list',11,NULL,NULL,NULL);
+            UPDATE sqlite_sequence SET seq=98 WHERE name='sessions';").unwrap();
+        assert!(
+            db.execute(
+                "INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms)
+            VALUES('codex','new',2,'codex_listed','/list',12)",
+                []
+            )
+            .is_err()
+        );
+    }
+    let before = f.store.page(true, &Page::default()).unwrap();
+    let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
+    assert_eq!(upgraded.page(true, &Page::default()).unwrap(), before);
+    let db = upgraded.db().unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        18
+    );
+    let add = "INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms) VALUES(?,'new',?,'codex_listed','/list',12)";
+    for (tool, owner) in [("agy", 3), ("claude", 1), ("codex", 3)] {
+        assert!(db.execute(add, rusqlite::params![tool, owner]).is_err());
+    }
+    db.execute(add, rusqlite::params!["codex", 2]).unwrap();
+    assert_eq!(db.last_insert_rowid(), 99);
+    assert!(db.execute("UPDATE sessions SET owner=owner", []).is_err());
+    assert!(
+        !db.prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM pragma_index_list('sessions')
+        WHERE name IN ('sessions_page','sessions_tool','sessions_config')",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        3
+    );
+}
+
+#[test]
 fn v16_allows_native_agy_list_evidence_without_inventing_a_launch() {
     let f = Fixture::new();
     use std::os::unix::fs::DirBuilderExt;

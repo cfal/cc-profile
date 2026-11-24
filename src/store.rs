@@ -123,6 +123,14 @@ pub fn configs(db: &Connection, t: &str) -> Result<Vec<Config>> {
         .query_map([tool(t)?], row)?
         .collect::<rusqlite::Result<_>>()?)
 }
+pub(crate) fn enabled_configs(db: &Connection, tool: &str, limit: usize) -> Result<Vec<Config>> {
+    Ok(db
+        .prepare_cached(&format!(
+            "SELECT {FIELDS} FROM configs WHERE tool=? AND enabled=1 ORDER BY id LIMIT ?"
+        ))?
+        .query_map(params![tool, limit], row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
 fn label(raw: &str) -> Result<&str> {
     let s = raw.trim();
     if s.is_empty() || s.len() > 100 || s.chars().any(char::is_control) {
@@ -282,7 +290,7 @@ impl Store {
                 ));
             }
             tx.execute_batch(include_str!("schema.sql"))?;
-        } else if !(1..=17).contains(&v)
+        } else if !(1..=18).contains(&v)
             || !tx
                 .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='proxy_url'")?
                 .exists([])?
@@ -368,6 +376,9 @@ impl Store {
         }
         if v < 17 {
             tx.execute_batch(include_str!("split_expiry.sql"))?;
+        }
+        if v < 18 {
+            tx.execute_batch(include_str!("codex_listed_sessions.sql"))?;
         }
         // Older databases know only the device and inode. Pin creation time once,
         // including when an original home was offline during the upgrade.

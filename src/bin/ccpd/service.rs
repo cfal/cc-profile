@@ -15,7 +15,7 @@ use ccpd::{
     paths,
     protocol::{
         ACP_CHECK, ACP_LAUNCH, ACP_LIST, ACP_LISTED, CODEX_BROWSE, CODEX_CHECK, CODEX_LAUNCH,
-        CODEX_OWNER, RoutingMode,
+        CODEX_LISTED, CODEX_OWNER, CodexListed, RoutingMode,
     },
     routing::{self, Failure, Observation},
     store::{Page, Store, config, configs, routing_mode},
@@ -91,6 +91,10 @@ pub fn private(s: Shared) -> Router {
         .route(CODEX_BROWSE, post(|State(s): State<Shared>, Json((r,all)): Json<(routing::Request,bool)>| async move {
             let build = s.build("codex").await;
             blocking(move || routing::codex_browse_plans(&s.store, &build, &r, all)).await.map(Json)
+        }))
+        .route(CODEX_LISTED, post(|State(s): State<Shared>, Json(list): Json<CodexListed>| async move {
+            let build = s.build("codex").await;
+            blocking(move || ccpd::listed::codex(&s.store, &build, list)).await.map(Json)
         }))
         .route(ACP_LIST, post(super::acp_list::list))
         .route(ACP_LISTED, post(super::acp_list::listed))

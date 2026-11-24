@@ -351,6 +351,27 @@ class Panel(unittest.TestCase):
             expect(logs.get_by_role("cell", name="Unknown", exact=True)).to_be_visible()
             expect(logs.get_by_role("cell", name="Unknown", exact=True).get_by_role("button")).to_have_count(0)
 
+    def test_codex_listed_workspace_and_resume_command(self):
+        service = self.start_service()
+        profile = service.account("codex", "work")
+        thread = str(uuid.uuid4())
+        cwd = "/native/workspace's name"
+        with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms) "
+                       "VALUES('codex',?,?,'codex_listed',?,1)", (thread, profile["id"], cwd))
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(permissions=["clipboard-read", "clipboard-write"])
+            page.goto(f"http://127.0.0.1:{service.port}/#sessions")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in", exact=True).click()
+            page.get_by_role("navigation").get_by_text("Sessions").click()
+            row = page.get_by_role("row").filter(has_text="Listed by Codex")
+            expect(row).to_contain_text("Not routed")
+            expect(row).to_contain_text(cwd)
+            row.get_by_role("button", name="Copy resume command").click()
+            self.assertEqual(shlex.split(page.evaluate("navigator.clipboard.readText()")),
+                             ["cd", cwd, "&&", "ccp", "codex", "resume", thread])
+
     def test_antigravity_session_id_copy_over_http(self):
         service = self.start_service()
         status, profile, _ = service.api("POST","accounts",{"tool":"agy","label":"Offline","create":True})

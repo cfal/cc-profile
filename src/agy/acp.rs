@@ -1,6 +1,6 @@
+pub use crate::paths::workspace;
 use crate::types::{Error, Result};
 use serde_json::{Value, json};
-use std::path::Path;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout},
@@ -8,10 +8,6 @@ use tokio::{
 
 pub const FRAME: usize = 8 << 20;
 pub const MAX_LIST_ROWS: usize = 2048;
-
-pub fn workspace(s: &str) -> bool {
-    Path::new(s).is_absolute() && s.len() <= 4096 && !s.chars().any(char::is_control)
-}
 
 fn capabilities() -> Value {
     json!({"loadSession":true,"sessionCapabilities":{"resume":{},"list":{},"close":{}},

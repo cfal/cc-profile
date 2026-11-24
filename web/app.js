@@ -523,7 +523,8 @@ async function logs(view, params, ver, enter) {
           alias,
           el("div", {}, cfg, row.enabled === false && el("div", {}, pill("Disabled"))),
           el("span", {class:"wrap"}, (row.evidence === "saved_file" && row.tui_workspace) || row.workspace || "Unknown"),
-          pill(row.evidence === "acp_listed" ? "Listed by ACP" : simple(row.evidence)),
+          pill(row.evidence === "acp_listed" ? "Listed by ACP" :
+            row.evidence === "codex_listed" ? "Listed by Codex" : simple(row.evidence)),
           row.last_routed_ms == null ? "Not routed" : fmt(row.last_routed_ms),
           commands,
         ]

@@ -721,6 +721,20 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
         }
     })
 }
+pub(crate) fn codex_admission(
+    db: &Connection,
+    request_id: &str,
+    ticket: &str,
+) -> Result<(i64, Option<i64>, String)> {
+    db.query_row(
+        "SELECT config_id,revision,workspace FROM launches WHERE tool='codex' AND state='routed'
+         AND intent='app_server' AND request_id=? AND ticket_digest=?",
+        params![request_id, digest(ticket)],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()?
+    .ok_or_else(Error::denied)
+}
 pub fn observe(store: &Store, o: &Observation) -> Result<()> {
     if o.source == "acp" {
         return acp_event(store, o);
@@ -738,15 +752,7 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
         return Err(Error::bad("bad_cwd", "Invalid thread workspace."));
     }
     store.write(|db| {
-        let (owner, ws): (i64, String) = db
-            .query_row(
-                "SELECT config_id,workspace FROM launches WHERE tool='codex' AND state='routed'
-             AND intent='app_server' AND request_id=? AND ticket_digest=?",
-                params![o.request_id, digest(&o.ticket)],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(Error::denied)?;
+        let (owner, _, ws) = codex_admission(db, &o.request_id, &o.ticket)?;
         let ws = o.workspace.as_deref().unwrap_or(&ws);
         let existing: Option<(i64, String)> = db
             .query_row(
@@ -761,7 +767,7 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
                 "observation_conflict",
                 "Thread already belongs to a different profile.",
             )),
-            Some((_, e)) if e == "saved_file" => {
+            Some((_, e)) if e == "saved_file" || e == "codex_listed" => {
                 db.execute(
                     "UPDATE sessions SET evidence='observed',workspace=?,last_routed_ms=?
                             WHERE tool='codex' AND native_id=?",

@@ -12,6 +12,7 @@ pub const CODEX_CHECK: &str = "/v4/codex-stdio/check";
 pub const CODEX_LAUNCH: &str = "/v4/codex-stdio/launch";
 pub const CODEX_OWNER: &str = "/v4/codex-stdio/owner";
 pub const CODEX_BROWSE: &str = "/v4/codex-stdio/browse";
+pub const CODEX_LISTED: &str = "/v4/codex-stdio/listed";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingMode {
@@ -102,6 +103,16 @@ pub struct ListedPage {
     pub ticket: String,
     // Only native IDs and workspaces cross the socket; titles stay on the ACP stream.
     pub sessions: Vec<(String, String)>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexListed {
+    pub binary: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<(String, String)>,
+    pub profiles: Vec<(i64, i64)>,
+    pub threads: Vec<(i64, String, String)>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
