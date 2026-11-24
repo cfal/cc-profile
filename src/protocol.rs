@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub const VERSION: u8 = 3;
+pub const PRIVATE_REQUEST_MAX_BYTES: usize = 256 * 1024;
 // Keep this value compatible with existing launchers and startup history.
 pub const DEFAULT_ACCOUNT_DECISION: &str = "current";
 pub const ACP_LAUNCH: &str = "/v4/agy-acp/launch";
@@ -13,6 +14,8 @@ pub const CODEX_LAUNCH: &str = "/v4/codex-stdio/launch";
 pub const CODEX_OWNER: &str = "/v4/codex-stdio/owner";
 pub const CODEX_BROWSE: &str = "/v4/codex-stdio/browse";
 pub const CODEX_LISTED: &str = "/v4/codex-stdio/listed";
+pub const CODEX_BROWSE_MAX_PROFILES: usize = 32;
+pub const CODEX_BROWSE_MAX_THREADS: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingMode {

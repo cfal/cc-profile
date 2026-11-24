@@ -132,6 +132,18 @@ pub(crate) fn enabled_configs(db: &Connection, tool: &str, limit: usize) -> Resu
         .query_map(params![tool, limit], row)?
         .collect::<rusqlite::Result<_>>()?)
 }
+pub(crate) fn session_binding(
+    db: &Connection,
+    tool: &str,
+    native_id: &str,
+) -> Result<Option<(i64, String)>> {
+    Ok(db
+        .prepare_cached("SELECT owner,evidence FROM sessions WHERE tool=? AND native_id=?")?
+        .query_row(params![tool, native_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?)
+}
 fn label(raw: &str) -> Result<&str> {
     let s = raw.trim();
     if s.is_empty() || s.len() > 100 || s.chars().any(char::is_control) {
@@ -505,41 +517,57 @@ impl Store {
             config(db,db.last_insert_rowid())
         })
     }
-    pub fn edit(&self, id: i64, v: &Value) -> Result<Config> {
-        let moved = if let Some(value) = v.get("home") {
-            let c = config(&*self.db()?, id)?;
-            revision(v, &c)?;
-            let path = Path::new(value.as_str().ok_or_else(bad_home)?);
-            let (dev, ino, birth) = directory(path, &self.state_dir, &self.accounts_dir, &c.tool)?;
-            if (dev, ino, Some(birth)) != (c.dev, c.ino, c.birth_ns) {
-                return Err(Error::conflict(
-                    "different_directory",
-                    "Choose the original account directory at its new path. A copy or a different directory cannot keep this account's sessions.",
-                ));
-            }
-            if c.tool == "agy" {
-                crate::agy::has_login(path)?;
-            }
-            Some(path.components().collect::<PathBuf>())
-        } else {
-            None
+    fn verified_home_edit(&self, id: i64, edit: &Value) -> Result<Option<PathBuf>> {
+        let Some(value) = edit.get("home") else {
+            return Ok(None);
         };
-        self.write(|db|{
-            let c=config(db,id)?; revision(v,&c)?;
+        let account = config(&*self.db()?, id)?;
+        revision(edit, &account)?;
+        let path = Path::new(value.as_str().ok_or_else(bad_home)?);
+        let (dev, ino, birth) =
+            directory(path, &self.state_dir, &self.accounts_dir, &account.tool)?;
+        if (dev, ino, Some(birth)) != (account.dev, account.ino, account.birth_ns) {
+            return Err(Error::conflict(
+                "different_directory",
+                "Choose the original account directory at its new path. A copy or a different directory cannot keep this account's sessions.",
+            ));
+        }
+        if account.tool == "agy" {
+            crate::agy::has_login(path)?;
+        }
+        Ok(Some(path.components().collect()))
+    }
+
+    pub fn edit(&self, id: i64, v: &Value) -> Result<Config> {
+        // Check filesystem identity outside the write transaction; recheck the revision inside.
+        let moved = self.verified_home_edit(id, v)?;
+        self.write(|db| {
+            let c = config(db, id)?;
+            revision(v, &c)?;
             if let Some(home) = &moved {
                 for t in crate::types::TOOLS {
-                    if configs(db,t)?.iter().any(|other| other.id != id && other.home == *home) {
+                    if configs(db, t)?.iter().any(|other| other.id != id && other.home == *home) {
                         return Err(Error::conflict("directory_in_use", "This path is already registered to another account."));
                     }
                 }
             }
-            let name=label(v.get("label").map(|s|s.as_str().unwrap_or("")).unwrap_or(&c.label))?;
-            let enabled=match v.get("enabled"){Some(v)=>v.as_bool().ok_or_else(||Error::bad("bad_enabled","Expected a boolean."))?,None=>c.enabled};
-            let (mode,url)=proxy_settings(v,Some(&c))?;
-            let priority=priority(v,c.priority)?;
-            db.execute("UPDATE configs SET home=COALESCE(?,home),label=?,enabled=?,current=current AND ?,proxy_mode=?,proxy_url=?,priority=?,revision=revision+1 WHERE id=?",
-                params![moved.as_deref().and_then(Path::to_str),name,enabled,enabled,mode,url,priority,id])?;
-            config(db,id)
+            let name = match v.get("label") {
+                Some(value) => label(value.as_str().unwrap_or(""))?,
+                None => label(&c.label)?,
+            };
+            let enabled = match v.get("enabled") {
+                Some(value) => value.as_bool().ok_or_else(|| Error::bad("bad_enabled", "Expected a boolean."))?,
+                None => c.enabled,
+            };
+            let (mode, url) = proxy_settings(v, Some(&c))?;
+            let priority = priority(v, c.priority)?;
+            let home = moved.as_deref().and_then(Path::to_str);
+            db.execute(
+                "UPDATE configs SET home=COALESCE(?,home), label=?, enabled=?, current=current AND ?,
+                 proxy_mode=?, proxy_url=?, priority=?, revision=revision+1 WHERE id=?",
+                params![home, name, enabled, enabled, mode, url, priority, id],
+            )?;
+            config(db, id)
         })
     }
     pub fn set_default_account(&self, t: &str, id: Option<i64>) -> Result<()> {
@@ -570,14 +598,14 @@ impl Store {
             (
                 "sessions",
                 "owner",
-                "SELECT s.seq,s.tool,s.native_id,s.owner,c.label,c.enabled,s.evidence,s.bound_ms,s.last_routed_ms,s.workspace,s.tui_workspace,s.saved_file_seen_ms",
+                "SELECT s.seq,s.tool,s.native_id,s.owner AS config_id,c.label,c.enabled,s.evidence,s.bound_ms,s.last_routed_ms,s.workspace,s.tui_workspace,s.saved_file_seen_ms",
             )
         } else {
             (
                 "launches",
                 "config_id",
                 "SELECT s.seq,s.tool,s.native_id,s.config_id,c.label,c.enabled,s.intent,s.state,s.reason,s.created_ms,s.workspace,s.request_id,s.observed_ms,
-                 EXISTS(SELECT 1 FROM sessions m WHERE m.tool=s.tool AND m.native_id=s.native_id AND m.owner=s.config_id)",
+                 EXISTS(SELECT 1 FROM sessions m WHERE m.tool=s.tool AND m.native_id=s.native_id AND m.owner=s.config_id) AS mapped",
             )
         };
         let mut sql =
@@ -604,15 +632,10 @@ impl Store {
         sql.push_str(" ORDER BY s.seq DESC LIMIT ?");
         args.push((count + 1).into());
         let db = self.db()?;
-        let mut items=db.prepare(&sql)?.query_map(params_from_iter(args),|r|{
-            let mut v=json!({"seq":r.get::<_,i64>(0)?,"tool":r.get::<_,String>(1)?,"native_id":r.get::<_,Option<String>>(2)?,
-                "config_id":r.get::<_,Option<i64>>(3)?,"label":r.get::<_,Option<String>>(4)?,"enabled":r.get::<_,Option<bool>>(5)?});
-            if sessions {v["evidence"]=r.get::<_,String>(6)?.into();v["bound_ms"]=r.get::<_,i64>(7)?.into();v["last_routed_ms"]=r.get::<_,Option<i64>>(8)?.into();v["workspace"]=r.get::<_,Option<String>>(9)?.into();v["tui_workspace"]=r.get::<_,Option<String>>(10)?.into();
-                if v["tool"]=="agy" || v["tool"]=="codex" {v["saved_file_seen_ms"]=r.get::<_,Option<i64>>(11)?.into();}}
-            else{for (i,k) in [(6,"intent"),(7,"state"),(8,"reason"),(10,"workspace"),(11,"request_id")]{v[k]=r.get::<_,Option<String>>(i)?.into();}
-                 v["created_ms"]=r.get::<_,i64>(9)?.into();v["observed_ms"]=r.get::<_,Option<i64>>(12)?.into();v["mapped"]=r.get::<_,bool>(13)?.into();}
-            Ok(v)
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut items = db
+            .prepare(&sql)?
+            .query_map(params_from_iter(args), |r| history_row(r, sessions))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let cursor = if items.len() > count as usize {
             items.pop();
             items.last().map(|v| v["seq"].clone())
@@ -621,6 +644,34 @@ impl Store {
         };
         Ok(json!({"items":items,"next_cursor":cursor}))
     }
+}
+fn history_row(r: &Row, sessions: bool) -> rusqlite::Result<Value> {
+    let mut record = json!({
+        "seq": r.get::<_, i64>("seq")?,
+        "tool": r.get::<_, String>("tool")?,
+        "native_id": r.get::<_, Option<String>>("native_id")?,
+        "config_id": r.get::<_, Option<i64>>("config_id")?,
+        "label": r.get::<_, Option<String>>("label")?,
+        "enabled": r.get::<_, Option<bool>>("enabled")?,
+    });
+    if sessions {
+        record["evidence"] = r.get::<_, String>("evidence")?.into();
+        record["bound_ms"] = r.get::<_, i64>("bound_ms")?.into();
+        record["last_routed_ms"] = r.get::<_, Option<i64>>("last_routed_ms")?.into();
+        record["workspace"] = r.get::<_, Option<String>>("workspace")?.into();
+        record["tui_workspace"] = r.get::<_, Option<String>>("tui_workspace")?.into();
+        if record["tool"] == "agy" || record["tool"] == "codex" {
+            record["saved_file_seen_ms"] = r.get::<_, Option<i64>>("saved_file_seen_ms")?.into();
+        }
+    } else {
+        for key in ["intent", "state", "reason", "workspace", "request_id"] {
+            record[key] = r.get::<_, Option<String>>(key)?.into();
+        }
+        record["created_ms"] = r.get::<_, i64>("created_ms")?.into();
+        record["observed_ms"] = r.get::<_, Option<i64>>("observed_ms")?.into();
+        record["mapped"] = r.get::<_, bool>("mapped")?.into();
+    }
+    Ok(record)
 }
 #[derive(Default, Deserialize)]
 pub struct Page {

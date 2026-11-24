@@ -402,6 +402,37 @@ async function loadProfiles(filter) {
   const registries = await Promise.all(tools.map((tool) => api("accounts?tool=" + tool)));
   return registries.flatMap((r) => r.items);
 }
+function resumeCommands(row) {
+  const buttons = el("div", {class: "row"});
+  function add(label, glyph, cwd, args) {
+    buttons.append(ib(label, glyph, () => {
+      const cd = cwd ? "cd " + shell(cwd) + " && " : "";
+      return copy(cd + "ccp " + row.tool + " " + args);
+    }));
+  }
+  const label = "Copy resume command";
+  if (row.tool !== "agy") {
+    const arg = row.tool === "claude" ? "--resume " : "resume ";
+    add(label, "copy", row.workspace, arg + row.native_id);
+    return buttons;
+  }
+
+  const id = shell(row.native_id);
+  const terminalArgs = "--conversation=" + id;
+  if (row.evidence === "saved_file") {
+    add(label, "copy", row.tui_workspace || row.workspace, terminalArgs);
+    return buttons;
+  }
+  const hasTerminal = row.tui_workspace != null || row.saved_file_seen_ms != null;
+  add(hasTerminal ? "Copy ACP resume command" : label, "copy", row.workspace, "acp --for-session " + id);
+  if (hasTerminal) add("Copy terminal resume command", "square-terminal", row.tui_workspace, terminalArgs);
+  return buttons;
+}
+function evidenceLabel(evidence) {
+  if (evidence === "acp_listed") return "Listed by ACP";
+  if (evidence === "codex_listed") return "Listed by Codex";
+  return simple(evidence);
+}
 async function logs(view, params, ver, enter) {
   const sessions = view === "sessions",
     t = params.get("tool") || "",
@@ -500,18 +531,6 @@ async function logs(view, params, ver, enter) {
       ),
       el("div", { class: "caption" }, decisionLabels[row.reason] || simple(row.reason || "")),
     );
-    let commands;
-    if (sessions) {
-      const resume = (label, glyph, cwd, args) => ib(label, glyph, () =>
-        copy((cwd ? "cd " + shell(cwd) + " && " : "") + "ccp " + row.tool + args));
-      const agyFile = row.tool === "agy" && row.evidence === "saved_file";
-      const both = row.tool === "agy" && !agyFile && (row.tui_workspace != null || row.saved_file_seen_ms != null);
-      commands = el("div", {class: "row"},
-        !agyFile && resume(both ? "Copy ACP resume command" : "Copy resume command", "copy", row.workspace,
-          row.tool === "agy" ? " acp --for-session " + shell(uid) : (row.tool === "claude" ? " --resume " : " resume ") + uid),
-        (agyFile || both) && resume(both ? "Copy terminal resume command" : "Copy resume command",
-          both ? "square-terminal" : "copy", row.tui_workspace || (agyFile && row.workspace), " --conversation=" + shell(uid)));
-    }
     const det = ib("Startup details", "chevron-right", async () => {
       expanded = expanded === row.seq ? null : row.seq;
       await render();
@@ -523,10 +542,9 @@ async function logs(view, params, ver, enter) {
           alias,
           el("div", {}, cfg, row.enabled === false && el("div", {}, pill("Disabled"))),
           el("span", {class:"wrap"}, (row.evidence === "saved_file" && row.tui_workspace) || row.workspace || "Unknown"),
-          pill(row.evidence === "acp_listed" ? "Listed by ACP" :
-            row.evidence === "codex_listed" ? "Listed by Codex" : simple(row.evidence)),
+          pill(evidenceLabel(row.evidence)),
           row.last_routed_ms == null ? "Not routed" : fmt(row.last_routed_ms),
-          commands,
+          resumeCommands(row),
         ]
       : [fmt(row.created_ms), alias, simple(row.intent), cfg, decision, idLink, det];
     body.append(el("tr", {role: "row"}, ...cells.map((v, i) => el("td", {role: "cell"},
@@ -650,8 +668,11 @@ function accountForm(filter, c) {
   const toggle = () => (fields.hidden = mode.value !== "custom");
   mode.onchange = toggle;
   toggle();
+  let heading = "Add profile";
+  if (c) heading = "Edit config";
+  else if (filter) heading = "Add " + names[filter] + " profile";
   modal(
-    c ? "Edit config" : filter ? "Add " + names[filter] + " profile" : "Add profile",
+    heading,
     [
       ...(provider ? [field("Provider", provider)] : []),
       field("Label", label),
@@ -671,14 +692,18 @@ function accountForm(filter, c) {
         : await api("accounts", "POST", { tool: t, ...(source.value === "new" ? {create: true} : {home: home.value.trim()}), ...v });
       go("accounts", { tool: filter, id: saved.id });
       const proxyChanged = c && (mode.value !== c.proxy_mode || (mode.value === "custom" && proxy.value));
-      notice(t === "codex" && proxyChanged
-        ? "Config updated. A running Codex TUI daemon may keep its previous proxy until it restarts."
-        : c ? "Config updated." : "Profile added. Not enabled for chats.");
+      if (!c) notice("Profile added. Not enabled for chats.");
+      else if (t === "codex" && proxyChanged)
+        notice("Config updated. A running Codex TUI daemon may keep its previous proxy until it restarts.");
+      else notice("Config updated.");
     },
   );
 }
-const quotaText = (q) =>
-  q.loading ? "Checking quota" : q.stale ? "Stale" : quotaStates[q.status] || "Unavailable";
+function quotaText(q) {
+  if (q.loading) return "Checking quota";
+  if (q.stale) return "Stale";
+  return quotaStates[q.status] || "Unavailable";
+}
 function quotaMeter(w, stale) {
   const value = 100 - w.used_pct;
   const expired = w.reset_at_ms != null && w.reset_at_ms <= Date.now();
@@ -688,14 +713,11 @@ function quotaMeter(w, stale) {
 function resetTime(ms) {
   if (ms == null) return text("Reset unknown", "caption");
   const mins = Math.ceil((ms - Date.now()) / 60000);
-  const delta =
-    mins <= 0
-      ? "reset time passed"
-      : mins >= 1440
-        ? "in " + Math.ceil(mins / 1440) + "d"
-        : mins >= 60
-          ? "in " + Math.ceil(mins / 60) + "h"
-          : "in " + mins + " min";
+  let delta;
+  if (mins <= 0) delta = "reset time passed";
+  else if (mins >= 1440) delta = "in " + Math.ceil(mins / 1440) + "d";
+  else if (mins >= 60) delta = "in " + Math.ceil(mins / 60) + "h";
+  else delta = "in " + mins + " min";
   const d = new Date(ms);
   return Number.isNaN(d.getTime())
     ? text("Reset unknown")
@@ -714,9 +736,10 @@ function quotaDetails(q, tool) {
     q.success_ms && (tool === "claude" ? "CLI checked " : "Last checked ") + fmt(q.success_ms),
     !q.loading && q.status !== "fresh" && q.retry_ms > Date.now() && "Retry after " + new Date(q.retry_ms).toLocaleTimeString(),
   ].filter(Boolean).join(" · ");
-  details.append(el("p", {class: "caption quota-meta"},
-    status && pill(status, q.loading ? "blue" : q.stale || q.status !== "not_checked" ? "amber" : ""),
-    meta));
+  let statusColor = "";
+  if (q.loading) statusColor = "blue";
+  else if (q.stale || q.status !== "not_checked") statusColor = "amber";
+  details.append(el("p", {class: "caption quota-meta"}, status && pill(status, statusColor), meta));
   for (const w of s?.windows || []) {
     const remaining = 100 - w.used_pct;
     details.append(
@@ -737,29 +760,25 @@ function quotaDetails(q, tool) {
   if (s && !s.windows.length) details.append(el("p", {}, "No windows reported"));
   if (s?.earned_resets != null)
     details.append(el("p", {}, "Earned resets available: " + s.earned_resets));
-  if (s?.credits)
-    details.append(
-      el(
-        "p",
-        {},
-        "Credits: " +
-          (s.credits.unlimited
-            ? "Unlimited"
-            : (s.credits.balance ?? (s.credits.has_credits ? "Available" : "Not available"))),
-      ),
-    );
+  if (s?.credits) {
+    const credits = s.credits;
+    let balance;
+    if (credits.unlimited) balance = "Unlimited";
+    else if (credits.balance != null) balance = credits.balance;
+    else balance = credits.has_credits ? "Available" : "Not available";
+    details.append(el("p", {}, "Credits: " + balance));
+  }
   if (s?.spend_control) {
     const v = s.spend_control;
+    let remaining;
+    if (v.remaining_pct != null) remaining = percent(v.remaining_pct) + " left";
+    else remaining = v.reached ? "Limit reached" : "Reported";
     details.append(
       el(
         "p",
         {},
         "Spend control: ",
-        v.remaining_pct != null
-          ? percent(v.remaining_pct) + " left"
-          : v.reached
-            ? "Limit reached"
-            : "Reported",
+        remaining,
         v.reset_at_ms != null ? " · " : "",
         v.reset_at_ms != null && resetTime(v.reset_at_ms),
       ),

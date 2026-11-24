@@ -1,9 +1,12 @@
 use crate::{
-    invocation::{Intent, Invocation, classify, native_id},
+    invocation::{Intent, Invocation, classify, exact_id_required, native_id},
     native::{Build, env_patch, validate_binary},
-    protocol::{DEFAULT_ACCOUNT_DECISION, Plan, RoutingMode, VERSION, profile_login_args},
-    quota::{WindowExpiry::Unknown, cached_allowance},
-    store::{Config, Store, config, configs, routing_mode},
+    protocol::{
+        CODEX_BROWSE_MAX_PROFILES, DEFAULT_ACCOUNT_DECISION, Plan, RoutingMode, VERSION,
+        profile_login_args,
+    },
+    quota::{Allowance, WindowExpiry, cached_allowance},
+    store::{Config, Store, config, configs, routing_mode, session_binding},
     types::{Error, Result, now, tool},
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -149,7 +152,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
             "identity_override",
             "Unset inherited authentication or storage overrides before launching.",
         ),
-        "exact_id_required" => native_id("").unwrap_err(),
+        "exact_id_required" => exact_id_required(),
         "git_required" => crate::invocation::git_required(),
         "bad_cwd" => Error::bad("bad_cwd", "Working directory is unavailable."),
         _ => Error::bad(
@@ -191,6 +194,32 @@ fn insert_binding(
 enum Selection {
     Allow(Config, &'static str),
     Refuse(Option<Config>, Error),
+}
+
+// Lower keys win. In expiry modes an unknown expiry rotates without a quota tie-break.
+fn routing_rank(
+    mode: RoutingMode,
+    priority: i64,
+    allowance: Option<Allowance>,
+) -> (WindowExpiry, f64) {
+    use WindowExpiry::Unknown;
+    match mode {
+        RoutingMode::RoundRobin => (Unknown, 0.),
+        RoutingMode::Priority => (Unknown, -(priority as f64)),
+        RoutingMode::MostRemaining => (Unknown, allowance.map_or(f64::INFINITY, |q| -q.remaining)),
+        RoutingMode::LeastRemaining => (Unknown, allowance.map_or(f64::INFINITY, |q| q.remaining)),
+        RoutingMode::EarliestExpiryMostRemaining | RoutingMode::EarliestExpiryLeastRemaining => {
+            let Some(q) = allowance.filter(|q| q.expiry != Unknown) else {
+                return (Unknown, 0.);
+            };
+            let score = if mode == RoutingMode::EarliestExpiryMostRemaining {
+                -q.remaining
+            } else {
+                q.remaining
+            };
+            (q.expiry, score)
+        }
+    }
 }
 
 fn choose(
@@ -247,32 +276,11 @@ fn choose(
                     } else {
                         None
                     };
-                    let remaining = allowance.map(|q| q.remaining);
-                    if remaining == Some(0.) {
+                    if allowance.is_some_and(|q| q.remaining == 0.) {
                         exhausted = true;
                         return None;
                     }
-                    // Lower sorts first. Unknown is behind any measured nonzero score.
-                    let (expiry, rank) = match mode {
-                        RoutingMode::RoundRobin => (Unknown, 0.),
-                        RoutingMode::Priority => (Unknown, -(c.priority as f64)),
-                        RoutingMode::MostRemaining => {
-                            (Unknown, remaining.map(|r| -r).unwrap_or(f64::INFINITY))
-                        }
-                        RoutingMode::LeastRemaining => {
-                            (Unknown, remaining.unwrap_or(f64::INFINITY))
-                        }
-                        RoutingMode::EarliestExpiryMostRemaining
-                        | RoutingMode::EarliestExpiryLeastRemaining => {
-                            match allowance.filter(|q| q.expiry != Unknown) {
-                                Some(q) if mode == RoutingMode::EarliestExpiryMostRemaining => {
-                                    (q.expiry, -q.remaining)
-                                }
-                                Some(q) => (q.expiry, q.remaining),
-                                None => (Unknown, 0.),
-                            }
-                        }
-                    };
+                    let (expiry, rank) = routing_rank(mode, c.priority, allowance);
                     Some((c, expiry, rank))
                 })
                 .min_by(|(a, ta, x), (b, tb, y)| {
@@ -287,13 +295,7 @@ fn choose(
             })
         }
         Intent::Resume(uid) => {
-            let binding: Option<(i64, String)> = db
-                .query_row(
-                    "SELECT owner,evidence FROM sessions WHERE tool=? AND native_id=?",
-                    params![req.tool, uid],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
+            let binding = session_binding(db, &req.tool, uid)?;
             let owner = binding.as_ref().map(|(id, _)| *id);
             let owner = if i.agy_tui {
                 let uuid =
@@ -531,7 +533,7 @@ pub fn codex_browse_plans(
     let profiles = {
         let db = store.db()?;
         if all {
-            crate::store::enabled_configs(&db, "codex", 33)?
+            crate::store::enabled_configs(&db, "codex", CODEX_BROWSE_MAX_PROFILES + 1)?
         } else {
             let id = db
                 .query_row(
@@ -546,7 +548,7 @@ pub fn codex_browse_plans(
                 .collect()
         }
     };
-    if profiles.len() > 32 {
+    if profiles.len() > CODEX_BROWSE_MAX_PROFILES {
         return Err(Error::bad("browse_limit", "Too many profiles to browse."));
     }
     let mut plans = Vec::new();
@@ -689,23 +691,13 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
             };
         }
         let id = crate::agy::session_id(&o.native_id)?;
-        let existing: Option<(i64, String)> = db
-            .query_row(
-                "SELECT owner,evidence FROM sessions WHERE tool='agy' AND native_id=?",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
+        let existing = session_binding(db, "agy", id)?;
         match o.event.as_str() {
             "session/new" => {
                 let ws = o
                     .workspace
                     .as_deref()
-                    .filter(|w| {
-                        std::path::Path::new(w).is_absolute()
-                            && w.len() <= 4096
-                            && !w.chars().any(char::is_control)
-                    })
+                    .filter(|w| crate::paths::workspace(w))
                     .ok_or_else(|| Error::bad("bad_cwd", "Expected an absolute ACP workspace."))?;
                 match existing {
                     None => insert_binding(db, "agy", id, owner, ws, "observed", now()),
@@ -724,7 +716,10 @@ fn acp_event(store: &Store, o: &Observation) -> Result<()> {
             }
             "session/load" | "session/resume" => {
                 let c = config(db, owner)?;
-                if !existing.is_some_and(|(n,e)| n == owner && matches!(e.as_str(),"observed"|"acp_listed")) || !c.enabled || !c.present() {
+                let verified = existing.is_some_and(|(id, evidence)| {
+                    id == owner && matches!(evidence.as_str(), "observed" | "acp_listed")
+                });
+                if !verified || !c.enabled || !c.present() {
                     return Err(Error::denied());
                 }
                 db.execute(
@@ -777,21 +772,16 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
             "Not a managed app-server start or fork reply.",
         ));
     }
-    if o.workspace.as_ref().is_some_and(|s| {
-        !std::path::Path::new(s).is_absolute() || s.len() > 4096 || s.chars().any(char::is_control)
-    }) {
+    if o.workspace
+        .as_deref()
+        .is_some_and(|s| !crate::paths::workspace(s))
+    {
         return Err(Error::bad("bad_cwd", "Invalid thread workspace."));
     }
     store.write(|db| {
         let (owner, _, ws) = codex_admission(db, &o.request_id, &o.ticket)?;
         let ws = o.workspace.as_deref().unwrap_or(&ws);
-        let existing: Option<(i64, String)> = db
-            .query_row(
-                "SELECT owner,evidence FROM sessions WHERE tool='codex' AND native_id=?",
-                [&uid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
+        let existing = session_binding(db, "codex", &uid)?;
         match existing {
             None => insert_binding(db, "codex", &uid, owner, ws, "observed", now()),
             Some((id, _)) if id != owner => Err(Error::conflict(

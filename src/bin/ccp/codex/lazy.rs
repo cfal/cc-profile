@@ -2,12 +2,15 @@ use super::{child_command, command, failed, report, status, stdio};
 use crate::{
     bind_session,
     child::{self, Incoming, Signals},
-    record_failure, request, validate, validate_patch,
+    debug_route, record_failure, request, validate, validate_patch,
 };
 use ccpd::{
     invocation::{codex_stdio_command, native_id},
     paths,
-    protocol::{CODEX_BROWSE, CODEX_CHECK, CODEX_LISTED, CODEX_OWNER, CodexListed, Plan, Request},
+    protocol::{
+        CODEX_BROWSE, CODEX_BROWSE_MAX_PROFILES, CODEX_BROWSE_MAX_THREADS, CODEX_CHECK,
+        CODEX_LISTED, CODEX_OWNER, CodexListed, Plan, Request,
+    },
     types::{Error, Result},
 };
 use serde_json::{Value, json};
@@ -129,7 +132,7 @@ impl Connection {
     async fn confirm_page(&self, req: &Request, owner: i64, reply: &Value) -> Result<()> {
         let rows = reply["result"]["data"]
             .as_array()
-            .filter(|a| a.len() <= 2048)
+            .filter(|a| a.len() <= CODEX_BROWSE_MAX_THREADS)
             .ok_or_else(bad)?;
         let threads = rows
             .iter()
@@ -179,7 +182,7 @@ impl Connection {
     async fn plans(&self, all: bool) -> Result<Vec<(Plan, i64)>> {
         let plans: Vec<(Plan, i64)> =
             request(CODEX_BROWSE, &bytes(&json!([self.base, all]))?, deadline()).await?;
-        if plans.len() > 32 || (!all && plans.len() != 1) {
+        if plans.len() > CODEX_BROWSE_MAX_PROFILES || (!all && plans.len() != 1) {
             return Err(bad());
         }
         for (plan, revision) in &plans {
@@ -227,9 +230,7 @@ impl Connection {
         if managed.is_none() {
             return Err(bad());
         }
-        if env::var_os("CC_PROFILE_DEBUG").as_deref() == Some("1".as_ref()) {
-            eprintln!("ccp: codex/{} -> {home}", plan.label);
-        }
+        debug_route(&plan, home);
         match self.connected(&plan).await {
             Ok(server) => Ok((req, plan, server)),
             Err(e) => {
@@ -326,28 +327,26 @@ impl Connection {
                         continue;
                     }
                 }
-                match source(&mut call) {
-                    Ok(Some(id))
-                        if ephemeral.borrow().contains(&id)
-                            && !matches!(
-                                call["method"].as_str(),
-                                Some("thread/resume" | "thread/fork")
-                            ) =>
-                    {
-                        line = bytes(&call)?
-                    }
-                    Ok(Some(id)) => match self.owner(&id).await {
-                        Ok(owner) if owner == plan.config_id => line = bytes(&call)?,
-                        _ => {
-                            send(out,&error(pending::error_id(&call),"Thread is not available on this connection. Open a new connection for its owner.")).await?;
-                            continue;
-                        }
-                    },
+                let source_id = match source(&mut call) {
+                    Ok(id) => id,
                     Err(e) => {
                         send(out, &error(pending::error_id(&call), &e.2)).await?;
                         continue;
                     }
-                    _ => {}
+                };
+                if let Some(id) = source_id {
+                    let local_read = ephemeral.borrow().contains(&id)
+                        && !matches!(
+                            call["method"].as_str(),
+                            Some("thread/resume" | "thread/fork")
+                        );
+                    if !local_read && self.owner(&id).await.ok() != Some(plan.config_id) {
+                        let msg = "Thread is not available on this connection. Open a new connection for its owner.";
+                        send(out, &error(pending::error_id(&call), msg)).await?;
+                        continue;
+                    }
+                    // source() stripped path selectors; forward the validated ID, not the original bytes.
+                    line = bytes(&call)?;
                 }
                 let admission = pending.borrow_mut().admit(&call, ephemeral.borrow().len());
                 if let Err(e) = admission {

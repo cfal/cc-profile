@@ -2,7 +2,7 @@ use super::child::{Incoming, Signals, status, stop};
 use ccpd::{
     agy,
     invocation::Invocation,
-    protocol::{Plan, Request},
+    protocol::{PRIVATE_REQUEST_MAX_BYTES, Plan, Request},
     socket,
     types::{Error, Result},
 };
@@ -120,7 +120,7 @@ async fn confirm_page(req: &Request, result: &Value) -> Result<()> {
         sessions,
     };
     let body = serde_json::to_vec(&page).map_err(|_| bad())?;
-    if body.len() > 256 * 1024 {
+    if body.len() > PRIVATE_REQUEST_MAX_BYTES {
         return Err(Error::bad(
             "acp_list_limit",
             "This native AgY list page is too large to verify.",

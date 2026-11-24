@@ -1,7 +1,9 @@
 use super::{Connection, deadline, reject, request};
 use ccpd::{
     paths,
-    protocol::{CODEX_LISTED, CodexListed, Plan},
+    protocol::{
+        CODEX_BROWSE_MAX_THREADS, CODEX_LISTED, CodexListed, PRIVATE_REQUEST_MAX_BYTES, Plan,
+    },
     types::{Error, Result},
 };
 use serde_json::{Map, Value, json};
@@ -14,7 +16,6 @@ use uuid::Uuid;
 
 const NATIVE_PAGE: usize = 100;
 const MAX_PUBLIC_PAGE: u32 = 500;
-const MAX_ROWS: usize = 2048;
 const MAX_PAGES: usize = 128;
 const MAX_BYTES: usize = 8 << 20;
 const LIST_TIMEOUT: Duration = Duration::from_secs(35);
@@ -219,7 +220,7 @@ async fn collect(conn: &Connection, query: &Query, plans: &[(Plan, i64)]) -> Res
             let Some(Value::Array(data)) = result.remove("data") else {
                 return Err(invalid_page());
             };
-            if data.len() > NATIVE_PAGE || rows.len() + data.len() > MAX_ROWS {
+            if data.len() > NATIVE_PAGE || rows.len() + data.len() > CODEX_BROWSE_MAX_THREADS {
                 return Err(limit_error());
             }
             let mut states = match result.remove("readStates") {
@@ -300,7 +301,7 @@ async fn collect(conn: &Connection, query: &Query, plans: &[(Plan, i64)]) -> Res
         threads: evidence,
     })
     .map_err(|_| limit_error())?;
-    if packet.len() > 256 * 1024 {
+    if packet.len() > PRIVATE_REQUEST_MAX_BYTES {
         return Err(limit_error());
     }
     let confirmed: usize = request(CODEX_LISTED, &packet, deadline()).await?;

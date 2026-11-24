@@ -1,12 +1,12 @@
 use crate::{
     native::{Build, validate_binary},
-    protocol::CodexListed,
+    protocol::{CODEX_BROWSE_MAX_PROFILES, CODEX_BROWSE_MAX_THREADS, CodexListed},
     routing::codex_admission,
     saved_files::open_home,
-    store::{Store, config, enabled_configs},
+    store::{Store, config, enabled_configs, session_binding},
     types::{Error, Result, now},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
@@ -33,11 +33,7 @@ impl Source {
             Self::Acp => ("agy", "acp_listed"),
             Self::Codex => ("codex", "codex_listed"),
         };
-        let binding: Option<(i64, String)> = db
-            .prepare_cached("SELECT owner,evidence FROM sessions WHERE tool=? AND native_id=?")?
-            .query_row(params![tool, id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?;
-        match binding {
+        match session_binding(db, tool, id)? {
             Some((old, _)) if old != owner => {
                 return Err(Error::conflict(
                     "ambiguous_session",
@@ -67,7 +63,6 @@ impl Source {
 }
 
 pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usize> {
-    const PROFILES: usize = 32;
     let end = Instant::now() + Duration::from_secs(5);
     let stale = || {
         Error::conflict(
@@ -81,7 +76,9 @@ pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usiz
             "Invalid Codex thread list; no results were published.",
         )
     };
-    if list.profiles.len() > PROFILES || list.threads.len() > 2048 {
+    if list.profiles.len() > CODEX_BROWSE_MAX_PROFILES
+        || list.threads.len() > CODEX_BROWSE_MAX_THREADS
+    {
         return Err(Error::bad(
             "browse_limit",
             "Codex thread list exceeds the browsing limit.",
@@ -114,7 +111,7 @@ pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usiz
             }
             Ok(vec![c])
         } else {
-            enabled_configs(db, "codex", PROFILES + 1)
+            enabled_configs(db, "codex", CODEX_BROWSE_MAX_PROFILES + 1)
         }
     };
     let before = roster(&*store.db()?)?;
@@ -130,9 +127,11 @@ pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usiz
     {
         return Err(invalid());
     }
-    let disk = (!claims.is_empty())
-        .then(|| crate::rollout::listed::probe(store, &claims, end))
-        .transpose()?;
+    let disk = if claims.is_empty() {
+        None
+    } else {
+        Some(crate::rollout::listed::probe(store, &claims, end)?)
+    };
     // Never stat user profile paths while holding the global database mutex.
     for c in &before {
         if !open_home(&c.home).is_ok_and(|fd| c.matches_open_home(&fd)) {

@@ -1,5 +1,5 @@
 use super::{Incoming, Out, bad, incoming, key, parse, reject, send};
-use crate::{bind_session, record_failure, request, validate};
+use crate::{bind_session, debug_route, record_failure, request, validate};
 use ccpd::{
     agy::{self, acp as wire},
     protocol::Request,
@@ -131,9 +131,7 @@ pub(crate) async fn run(req: Request) -> Result<ExitCode> {
                     }
                 };
                 let (home, managed) = validate(&plan, &req)?;
-                if std::env::var_os("CC_PROFILE_DEBUG").as_deref() == Some("1".as_ref()) {
-                    eprintln!("ccp: agy/{} -> {home}", plan.label);
-                }
+                debug_route(&plan, home);
                 let mut binding = Binding {
                     init: init.unwrap(),
                     notification,

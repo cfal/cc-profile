@@ -24,16 +24,16 @@ pub const PROXIES: [&str; 8] = [
     "NO_PROXY",
     "no_proxy",
 ];
+pub fn profile_home_env(tool: &str) -> &'static str {
+    match tool {
+        "agy" => "HOME",
+        "codex" => "CODEX_HOME",
+        _ => "CLAUDE_CONFIG_DIR",
+    }
+}
 pub fn env_patch(c: &Config) -> (BTreeMap<String, String>, Vec<String>) {
     let mut set = BTreeMap::from([(
-        if c.tool == "agy" {
-            "HOME"
-        } else if c.tool == "codex" {
-            "CODEX_HOME"
-        } else {
-            "CLAUDE_CONFIG_DIR"
-        }
-        .to_owned(),
+        profile_home_env(&c.tool).to_owned(),
         c.home.to_string_lossy().into_owned(),
     )]);
     let mut unset = Vec::new();

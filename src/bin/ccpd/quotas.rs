@@ -44,6 +44,41 @@ struct Cache {
     snapshot: Option<String>,
 }
 impl Cache {
+    fn from_fetch(stamp: String, prior: Option<Self>, ms: i64, result: Result<Value>) -> Self {
+        match result {
+            Ok(value) => Self {
+                stamp,
+                status: "fresh".into(),
+                attempt: ms,
+                success: Some(ms),
+                retry: ms + 30_000,
+                fails: 0,
+                snapshot: Some(value.to_string()),
+            },
+            Err(error) => {
+                let fails = prior
+                    .as_ref()
+                    .filter(|q| q.stamp == stamp || q.status == "rate_limited")
+                    .map_or(1, |q| q.fails.max(0).saturating_add(1));
+                let delay = 30_000_i64 << (fails - 1).min(6);
+                let previous = prior.filter(|q| q.stamp == stamp);
+                let status = match error.1 {
+                    "sign_in_required" | "rate_limited" => error.1,
+                    _ => "unavailable",
+                };
+                Self {
+                    stamp,
+                    status: status.into(),
+                    attempt: ms,
+                    success: previous.as_ref().and_then(|q| q.success),
+                    retry: ms.saturating_add(delay),
+                    fails,
+                    snapshot: previous.and_then(|q| q.snapshot),
+                }
+            }
+        }
+    }
+
     fn retry_for(&self, stamp: &str) -> i64 {
         if self.stamp == stamp || self.fails == 0 || self.status == "rate_limited" {
             self.retry
@@ -54,8 +89,19 @@ impl Cache {
     }
 }
 fn cached(db: &Connection, id: i64) -> Result<Option<Cache>> {
-    let row = db.query_row("SELECT status,attempt_ms,success_ms,retry_ms,failures,snapshot,stamp FROM quota_cache WHERE config_id=?",
-        [id],|r|Ok(Cache{status:r.get(0)?,attempt:r.get(1)?,success:r.get(2)?,retry:r.get(3)?,fails:r.get(4)?,snapshot:r.get(5)?,stamp:r.get(6)?})).optional();
+    let row = db.query_row(
+        "SELECT status,attempt_ms,success_ms,retry_ms,failures,snapshot,stamp FROM quota_cache WHERE config_id=?",
+        [id],
+        |r| Ok(Cache {
+            status: r.get(0)?,
+            attempt: r.get(1)?,
+            success: r.get(2)?,
+            retry: r.get(3)?,
+            fails: r.get(4)?,
+            snapshot: r.get(5)?,
+            stamp: r.get(6)?,
+        }),
+    ).optional();
     match row {
         Err(rusqlite::Error::InvalidColumnType(..)) => Ok(None),
         result => Ok(result?),
@@ -138,6 +184,70 @@ struct Queued {
     count: usize,
     next_check_ms: i64,
 }
+struct Job {
+    config: Config,
+    stamp: String,
+    prior: Option<Cache>,
+    ticket: Uuid,
+}
+impl Job {
+    fn current(&self, s: &Shared, enabled_only: bool) -> Result<bool> {
+        let id = self.config.id;
+        let current = config(&*s.store.db()?, id)?;
+        Ok((!enabled_only || current.enabled)
+            && inputs(&current).as_ref() == Some(&self.stamp)
+            && s.quotas.active.lock().unwrap().get(&id) == Some(&self.ticket))
+    }
+
+    fn persist(self, s: &Shared, result: Result<Value>) -> Result<()> {
+        let id = self.config.id;
+        s.store.write(|db| {
+            if s.quotas.active.lock().unwrap().get(&id) != Some(&self.ticket) {
+                return Ok(());
+            }
+            let mut cache = Cache::from_fetch(self.stamp, self.prior, now(), result);
+            // A changed Codex login can retain its retry deadline, but never the old observation.
+            if inputs(&config(db, id)?).as_ref() != Some(&cache.stamp) {
+                if self.config.tool != "codex" {
+                    return Ok(());
+                }
+                if cache.status == "fresh" {
+                    cache.status = "unavailable".into();
+                }
+                cache.success = None;
+                cache.snapshot = None;
+            }
+            db.execute(
+                "INSERT INTO quota_cache(config_id,revision,attempt_ms,success_ms,retry_ms,failures,status,stamp,snapshot)
+                 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(config_id) DO UPDATE SET
+                 revision=excluded.revision,attempt_ms=excluded.attempt_ms,success_ms=excluded.success_ms,
+                 retry_ms=excluded.retry_ms,failures=excluded.failures,status=excluded.status,
+                 stamp=excluded.stamp,snapshot=excluded.snapshot",
+                params![id, self.config.revision, cache.attempt, cache.success, cache.retry, cache.fails,
+                        cache.status, cache.stamp, cache.snapshot],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn run(self, s: Shared, enabled_only: bool) {
+        let id = self.config.id;
+        let ticket = self.ticket;
+        let _slot = s.quotas.slots.acquire().await.unwrap();
+        let build = s.build(&self.config.tool).await;
+        if self.current(&s, enabled_only).unwrap_or(false) {
+            let result = quota::fetch(&self.config, &build, &s.state_dir).await;
+            let app = s.clone();
+            if blocking(move || self.persist(&app, result)).await.is_err() {
+                eprintln!("ccpd: could not persist quota observation for config {id}");
+            }
+        }
+        let mut active = s.quotas.active.lock().unwrap();
+        if active.get(&id) == Some(&ticket) {
+            active.remove(&id);
+        }
+    }
+}
 async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
     let a = s.clone();
     let enabled_only = !matches!(
@@ -176,13 +286,13 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
                 next = next.min(due);
                 continue;
             }
-            jobs.push((stamp, c, cache, Uuid::new_v4()));
+            jobs.push(Job { config: c, stamp, prior: cache, ticket: Uuid::new_v4() });
         }
         // Do not mark any jobs active until candidate enumeration succeeds.
         let mut active = a.quotas.active.lock().unwrap();
-        jobs.retain(|(_, c, _, ticket)| {
-            if let std::collections::hash_map::Entry::Vacant(slot) = active.entry(c.id) {
-                slot.insert(*ticket);
+        jobs.retain(|job| {
+            if let std::collections::hash_map::Entry::Vacant(slot) = active.entry(job.config.id) {
+                slot.insert(job.ticket);
                 true
             } else {
                 false
@@ -192,60 +302,8 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
     })
     .await?;
     let n = candidates.len();
-    for (stamp, c, prior, ticket) in candidates {
-        let a = s.clone();
-        tokio::spawn(async move {
-            let id = c.id;
-            let _slot = a.quotas.slots.acquire().await.unwrap();
-            let build = a.build(&c.tool).await;
-            let run = || -> Result<bool> {
-                let current = config(&*a.store.db()?, id)?;
-                Ok((!enabled_only || current.enabled)
-                    && inputs(&current).as_ref() == Some(&stamp)
-                    && a.quotas.active.lock().unwrap().get(&id) == Some(&ticket))
-            };
-            if run().unwrap_or(false) {
-                let result = quota::fetch(&c, &build, &a.state_dir).await;
-                let a2 = a.clone();
-                let saved = blocking(move || a2.store.write(|db| {
-                    if a2.quotas.active.lock().unwrap().get(&id) != Some(&ticket) {
-                        return Ok(());
-                    }
-                    let ms = now();
-                    let (status, failures, retry, success, snapshot) = match result {
-                        Ok(v) => ("fresh", 0, ms + 30000, Some(ms), Some(v.to_string())),
-                        Err(e) => {
-                            let fails = prior.as_ref().filter(|q| q.stamp==stamp || q.status=="rate_limited").map_or(1, |q| q.fails.max(0).saturating_add(1));
-                            let delay = 30000_i64 << (fails-1).min(6);
-                            let status = match e.1 {
-                                "sign_in_required" | "rate_limited" => e.1,
-                                _ => "unavailable",
-                            };
-                            let last = prior.filter(|q| q.stamp == stamp);
-                            (status, fails, ms.saturating_add(delay), last.as_ref().and_then(|q| q.success), last.and_then(|q| q.snapshot))
-                        }
-                    };
-                    // Never publish an observation across a profile or credential change.
-                    let (status, success, snapshot) = if inputs(&config(db, id)?).as_ref() == Some(&stamp) {
-                        (status, success, snapshot)
-                    } else if c.tool != "codex" {
-                        return Ok(());
-                    } else {
-                        (if status=="fresh" { "unavailable" } else { status }, None, None)
-                    };
-                    db.execute("INSERT INTO quota_cache(config_id,revision,attempt_ms,success_ms,retry_ms,failures,status,stamp,snapshot) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(config_id) DO UPDATE SET revision=excluded.revision,attempt_ms=excluded.attempt_ms,success_ms=excluded.success_ms,retry_ms=excluded.retry_ms,failures=excluded.failures,status=excluded.status,stamp=excluded.stamp,snapshot=excluded.snapshot",
-                       params![id,c.revision,ms,success,retry,failures,status,stamp,snapshot])?;
-                    Ok(())
-                })).await;
-                if saved.is_err() {
-                    eprintln!("ccpd: could not persist quota observation for config {id}");
-                }
-            }
-            let mut active = a.quotas.active.lock().unwrap();
-            if active.get(&id) == Some(&ticket) {
-                active.remove(&id);
-            }
-        });
+    for job in candidates {
+        tokio::spawn(job.run(s.clone(), enabled_only));
     }
     Ok(Queued {
         count: n,
@@ -327,6 +385,29 @@ pub async fn one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_fetch_retains_matching_snapshot_but_only_backoff_crosses_a_login_change() {
+        let fresh = Cache::from_fetch("first".into(), None, 100, Ok(json!({"windows": []})));
+        let failed = Cache::from_fetch(
+            "first".into(),
+            Some(fresh),
+            200,
+            Err(Error::unavailable("rate_limited", "")),
+        );
+        assert_eq!(failed.success, Some(100));
+        assert_eq!(failed.snapshot.as_deref(), Some(r#"{"windows":[]}"#));
+        assert_eq!((failed.fails, failed.retry), (1, 30_200));
+
+        let unavailable = || Err(Error::unavailable("native_rpc", ""));
+        let changed = Cache::from_fetch("second".into(), Some(failed), 300, unavailable());
+        assert_eq!(changed.status, "unavailable");
+        assert_eq!((changed.fails, changed.retry), (2, 60_300));
+        assert!(changed.success.is_none() && changed.snapshot.is_none());
+
+        let unrelated = Cache::from_fetch("third".into(), Some(changed), 400, unavailable());
+        assert_eq!((unrelated.fails, unrelated.retry), (1, 30_400));
+    }
 
     #[test]
     fn daily_deadline_uses_the_last_matching_success_not_the_last_attempt() {

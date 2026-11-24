@@ -88,7 +88,13 @@ pub fn codex_stdio_command(args: &[String]) -> Result<(Intent, Vec<String>)> {
 }
 pub fn native_id(raw: &str) -> Result<String> {
     let parsed = Uuid::parse_str(raw).ok().filter(|_| raw.len() == 36);
-    parsed.map(|u|u.to_string()).ok_or_else(||Error::bad("exact_id_required","Use an exact native session UUID from Sessions. Pickers, names and --last are not supported."))
+    parsed.map(|u| u.to_string()).ok_or_else(exact_id_required)
+}
+pub(crate) fn exact_id_required() -> Error {
+    Error::bad(
+        "exact_id_required",
+        "Use an exact native session UUID from Sessions. Pickers, names and --last are not supported.",
+    )
 }
 fn unsupported() -> Error {
     Error::bad(
@@ -571,7 +577,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 | "--skip-git-repo-check"
                 | "--strict-config",
             ) if inline.is_none() => {}
-            (_, "--last" | "--continue") | (true, "-c") => return Err(native_id("").unwrap_err()),
+            (_, "--last" | "--continue") | (true, "-c") => return Err(exact_id_required()),
             _ => return Err(unsupported()),
         }
     }

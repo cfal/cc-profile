@@ -21,23 +21,23 @@ fn env_dir(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
 }
+fn absolute_without_parent(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+}
 fn override_dir(name: &str) -> Result<Option<PathBuf>> {
-    env::var_os(name)
-        .map(|v| {
-            let path = PathBuf::from(v);
-            if !path.is_absolute()
-                || path
-                    .components()
-                    .any(|p| p == std::path::Component::ParentDir)
-            {
-                return Err(Error::bad(
-                    "invalid_directory",
-                    format!("{name} must be an absolute directory without '..'."),
-                ));
-            }
-            Ok(path)
-        })
-        .transpose()
+    let Some(path) = env::var_os(name).map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if !absolute_without_parent(&path) {
+        return Err(Error::bad(
+            "invalid_directory",
+            format!("{name} must be an absolute directory without '..'."),
+        ));
+    }
+    Ok(Some(path))
 }
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = override_dir("CC_PROFILE_DATA_PATH")? {
@@ -62,11 +62,7 @@ pub fn ipc_dir() -> Result<PathBuf> {
 }
 pub fn scratch_dir() -> Result<PathBuf> {
     let base = override_dir("CC_PROFILE_TEMP_PATH")?.unwrap_or_else(env::temp_dir);
-    if !base.is_absolute()
-        || base
-            .components()
-            .any(|p| p == std::path::Component::ParentDir)
-    {
+    if !absolute_without_parent(&base) {
         return Err(Error::bad(
             "invalid_directory",
             "The temporary directory must be absolute and contain no '..'.",

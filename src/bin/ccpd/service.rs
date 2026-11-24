@@ -15,7 +15,7 @@ use ccpd::{
     paths,
     protocol::{
         ACP_CHECK, ACP_LAUNCH, ACP_LIST, ACP_LISTED, CODEX_BROWSE, CODEX_CHECK, CODEX_LAUNCH,
-        CODEX_LISTED, CODEX_OWNER, CodexListed, RoutingMode,
+        CODEX_LISTED, CODEX_OWNER, CodexListed, PRIVATE_REQUEST_MAX_BYTES, Plan, RoutingMode,
     },
     routing::{self, Failure, Observation},
     store::{Page, Store, config, configs, routing_mode},
@@ -42,12 +42,10 @@ pub struct App {
 }
 impl App {
     pub async fn build(&self, t: &str) -> Build {
-        let installed = if t == "claude" {
-            &self.claude
-        } else if t == "agy" {
-            &self.agy
-        } else {
-            &self.codex
+        let installed = match t {
+            "claude" => &self.claude,
+            "agy" => &self.agy,
+            _ => &self.codex,
         };
         installed.current(&self.state_dir).await
     }
@@ -80,22 +78,10 @@ async fn same_uid(req: Request, next: Next) -> Response {
 pub fn private(s: Shared) -> Router {
     Router::new()
         .route(ACP_CHECK, post(super::acp_list::check))
-        .route(CODEX_CHECK, post(|State(s): State<Shared>, Json(bin): Json<PathBuf>| async move {
-            ccpd::native::validate_binary(&s.build("codex").await, Some(&bin))?;
-            Ok::<_, Error>(Json(()))
-        }))
-        .route(CODEX_OWNER, post(|State(s): State<Shared>, Json(r): Json<routing::Request>| async move {
-            let build = s.build("codex").await;
-            blocking(move || routing::codex_owner(&s.store, &build, &r)).await.map(Json)
-        }))
-        .route(CODEX_BROWSE, post(|State(s): State<Shared>, Json((r,all)): Json<(routing::Request,bool)>| async move {
-            let build = s.build("codex").await;
-            blocking(move || routing::codex_browse_plans(&s.store, &build, &r, all)).await.map(Json)
-        }))
-        .route(CODEX_LISTED, post(|State(s): State<Shared>, Json(list): Json<CodexListed>| async move {
-            let build = s.build("codex").await;
-            blocking(move || ccpd::listed::codex(&s.store, &build, list)).await.map(Json)
-        }))
+        .route(CODEX_CHECK, post(codex_check))
+        .route(CODEX_OWNER, post(codex_owner))
+        .route(CODEX_BROWSE, post(codex_browse))
+        .route(CODEX_LISTED, post(codex_listed))
         .route(ACP_LIST, post(super::acp_list::list))
         .route(ACP_LISTED, post(super::acp_list::listed))
         .route("/v3/agy-acp/check", post(|| async { acp_upgrade() }))
@@ -136,9 +122,40 @@ pub fn private(s: Shared) -> Router {
                 },
             ),
         )
-        .layer(DefaultBodyLimit::max(256 * 1024))
+        .layer(DefaultBodyLimit::max(PRIVATE_REQUEST_MAX_BYTES))
         .layer(middleware::from_fn(same_uid))
         .with_state(s)
+}
+async fn codex_check(State(s): State<Shared>, Json(bin): Json<PathBuf>) -> Result<Json<()>> {
+    ccpd::native::validate_binary(&s.build("codex").await, Some(&bin))?;
+    Ok(Json(()))
+}
+async fn codex_owner(
+    State(s): State<Shared>,
+    Json(r): Json<routing::Request>,
+) -> Result<Json<i64>> {
+    let build = s.build("codex").await;
+    blocking(move || routing::codex_owner(&s.store, &build, &r))
+        .await
+        .map(Json)
+}
+async fn codex_browse(
+    State(s): State<Shared>,
+    Json((r, all)): Json<(routing::Request, bool)>,
+) -> Result<Json<Vec<(Plan, i64)>>> {
+    let build = s.build("codex").await;
+    blocking(move || routing::codex_browse_plans(&s.store, &build, &r, all))
+        .await
+        .map(Json)
+}
+async fn codex_listed(
+    State(s): State<Shared>,
+    Json(list): Json<CodexListed>,
+) -> Result<Json<usize>> {
+    let build = s.build("codex").await;
+    blocking(move || ccpd::listed::codex(&s.store, &build, list))
+        .await
+        .map(Json)
 }
 fn acp_upgrade() -> Error {
     Error(
@@ -151,7 +168,7 @@ async fn launch(
     State(s): State<Shared>,
     uri: Uri,
     Json(r): Json<routing::Request>,
-) -> Result<Json<ccpd::protocol::Plan>> {
+) -> Result<Json<Plan>> {
     if r.managed_agy_acp() != (uri.path() == ACP_LAUNCH) {
         return Err(acp_upgrade());
     }

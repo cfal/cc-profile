@@ -1,9 +1,10 @@
 use ccpd::{
     invocation::{Intent, Invocation, classify},
-    native::{PROXIES, native_executable, version_probe_reply},
+    native::{PROXIES, native_executable, profile_home_env, version_probe_reply},
     paths,
     protocol::{
-        DEFAULT_ACCOUNT_DECISION, Failure, Plan, Request, RoutingMode, VERSION, profile_login_args,
+        DEFAULT_ACCOUNT_DECISION, Failure, PRIVATE_REQUEST_MAX_BYTES, Plan, Request, RoutingMode,
+        VERSION, profile_login_args,
     },
     socket,
     types::{Error, Result},
@@ -91,13 +92,7 @@ fn utf8() -> Error {
     Error::bad("encoding", "Arguments and working directory must be UTF-8.")
 }
 fn validate_patch<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
-    let home = if req.tool == "agy" {
-        "HOME"
-    } else if req.tool == "codex" {
-        "CODEX_HOME"
-    } else {
-        "CLAUDE_CONFIG_DIR"
-    };
+    let home = profile_home_env(&req.tool);
     let allowed = |k: &str| k == home || PROXIES.contains(&k);
     let path = plan.env_set.get(home).ok_or_else(invalid)?;
     if plan.v != VERSION
@@ -122,6 +117,11 @@ fn validate_patch<'a>(plan: &'a Plan, req: &Request) -> Result<&'a str> {
         return Err(invalid());
     }
     Ok(path)
+}
+fn debug_route(plan: &Plan, home: &str) {
+    if env::var_os("CC_PROFILE_DEBUG").as_deref() == Some("1".as_ref()) {
+        eprintln!("ccp: {}/{} -> {home}", plan.tool, plan.label);
+    }
 }
 fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invocation>)> {
     let path = validate_patch(plan, req)?;
@@ -169,7 +169,7 @@ async fn request<T: DeserializeOwned>(
     body: &[u8],
     deadline: Instant,
 ) -> Result<T> {
-    if body.len() > 256 * 1024 {
+    if body.len() > PRIVATE_REQUEST_MAX_BYTES {
         return Err(Error::bad(
             "request_size",
             "Launch request too large; use stdin for a long prompt.",
@@ -407,9 +407,7 @@ async fn run() -> Result<ExitCode> {
         .binary
         .as_deref()
         .ok_or_else(|| Error::bad("binary", "Native executable not found on PATH."))?;
-    if env::var_os("CC_PROFILE_DEBUG").as_deref() == Some("1".as_ref()) {
-        eprintln!("ccp: {tool}/{} -> {home}", plan.label);
-    }
+    debug_route(&plan, home);
     if tool == "agy" {
         let result = acp::run(binary, Path::new(home), &req, &plan, managed.as_ref(), None).await;
         if result.is_err() {
