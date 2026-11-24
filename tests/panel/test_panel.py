@@ -895,7 +895,7 @@ class Panel(unittest.TestCase):
             page.get_by_label("Label", exact=True).fill("Primary")
             priority.fill("100")
             page.get_by_role("dialog").get_by_role("button", name="Add profile").click()
-            expect(page.get_by_text("Priority", exact=True)).to_be_visible()
+            expect(page.locator(".detail").get_by_text("Priority", exact=True)).to_be_visible()
             expect(page.locator(".facts dd", has_text=re.compile("^100$"))).to_be_visible()
             self.assertEqual(service.api("GET","accounts?tool=claude")[1]["items"][0]["priority"], 100)
             page.get_by_role("button", name="Edit config").click()
