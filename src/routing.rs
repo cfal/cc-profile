@@ -521,26 +521,42 @@ pub fn codex_browse_plans(
     build: &Build,
     req: &Request,
     all: bool,
-) -> Result<Vec<Plan>> {
+) -> Result<Vec<(Plan, i64)>> {
     check_req(req)?;
     let i = classify(&req.tool, &req.argv, &req.cwd)?;
     if !req.managed_codex_stdio() || i.intent != Intent::New || !req.override_names.is_empty() {
         return Err(Error::denied());
     }
     validate_binary(build, req.binary.as_deref())?;
-    let profiles = configs(&*store.db()?, "codex")?;
+    let profiles = {
+        let db = store.db()?;
+        if all {
+            crate::store::enabled_configs(&db, "codex", 33)?
+        } else {
+            let id = db
+                .query_row(
+                    "SELECT id FROM configs WHERE tool='codex' AND current=1 AND enabled=1",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?;
+            id.map(|id| config(&db, id))
+                .transpose()?
+                .into_iter()
+                .collect()
+        }
+    };
+    if profiles.len() > 32 {
+        return Err(Error::bad("browse_limit", "Too many profiles to browse."));
+    }
     let mut plans = Vec::new();
-    for c in profiles
-        .into_iter()
-        .filter(|c| c.enabled && (all || c.is_default_account))
-    {
-        if !c.present() {
+    for c in profiles {
+        if !crate::saved_files::open_home(&c.home)
+            .is_ok_and(|fd| c.matches_open_home(&fd) && crate::saved_files::entries(&fd).is_ok())
+        {
             return Err(denial("owner_missing", Some(&c), None));
         }
-        if plans.len() >= 32 {
-            return Err(Error::bad("browse_limit", "Too many profiles to browse."));
-        }
-        plans.push(plan(req, &c, &i, None, "browse"));
+        plans.push((plan(req, &c, &i, None, "browse"), c.revision));
     }
     if !all && plans.is_empty() {
         return Err(denial("no_current", None, None));

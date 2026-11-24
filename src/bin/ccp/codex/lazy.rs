@@ -21,6 +21,8 @@ use std::{
 use tokio::{io::Stdout, sync::Mutex, time::Instant};
 use uuid::Uuid;
 
+#[path = "browse.rs"]
+mod browse;
 #[path = "wire.rs"]
 mod wire;
 use wire::{Server, bad, bytes, error, read, value, write};
@@ -170,15 +172,19 @@ impl Connection {
         }
         Ok(server)
     }
-    async fn plans(&self, all: bool) -> Result<Vec<Plan>> {
-        let plans: Vec<Plan> =
+    async fn plans(&self, all: bool) -> Result<Vec<(Plan, i64)>> {
+        let plans: Vec<(Plan, i64)> =
             request(CODEX_BROWSE, &bytes(&json!([self.base, all]))?, deadline()).await?;
         if plans.len() > 32 || (!all && plans.len() != 1) {
             return Err(bad());
         }
-        for plan in &plans {
+        for (plan, revision) in &plans {
             validate_patch(plan, &self.base)?;
-            if plan.config_id <= 0 || plan.decision != "browse" || plan.argv != self.base.argv {
+            if plan.config_id <= 0
+                || *revision <= 0
+                || plan.decision != "browse"
+                || plan.argv != self.base.argv
+            {
                 return Err(bad());
             }
         }
@@ -186,7 +192,13 @@ impl Connection {
     }
     async fn utility(&self, call: &Value) -> Result<Value> {
         let plans = self.plans(false).await?;
-        self.connected(&plans[0]).await?.exchange(call).await
+        let reply = self.connected(&plans[0].0).await?.exchange(call).await?;
+        if self.plans(false).await? != plans {
+            return Err(reject(
+                "The default Codex profile changed. Retry the request.",
+            ));
+        }
+        Ok(reply)
     }
     async fn owner(&self, id: &str) -> Result<i64> {
         request(
@@ -388,6 +400,7 @@ async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, 
     let (_, argv) = codex_stdio_command(&req.argv)?;
     let mut rx = child::incoming("codex-stdin", wire::LIMIT)?;
     let mut conn: Option<Connection> = None;
+    let mut browse = browse::Browse::default();
     while let Some(line) = rx.recv().await {
         let mut call = value(&line?)?;
         let id = call["id"].clone();
@@ -441,11 +454,18 @@ async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, 
             send(out, &reply).await?;
             continue;
         }
+        if method == "thread/list" {
+            let reply = match browse.list(c, &call).await {
+                Ok(result) => json!({"id": id, "result": result}),
+                Err(e) => error(&id, &e.2),
+            };
+            send(out, &reply).await?;
+            continue;
+        }
         if matches!(
             method,
             "model/list"
                 | "skills/list"
-                | "thread/list"
                 | "account/read"
                 | "account/rateLimits/read"
                 | "config/read"
