@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import select
@@ -99,7 +100,8 @@ class DeferredCodex(unittest.TestCase):
         self.assertIn("error",rejected)
         self.assertNotIn("result",rejected)
 
-    def test_disabling_the_bound_profile_blocks_another_start_not_existing_turn_traffic(self):
+    @contextmanager
+    def live_connection(self):
         with subprocess.Popen([svc.LAUNCHER,"codex","app-server"],env=self.s.env,cwd=self.s.root,
                               stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True) as child:
             try:
@@ -110,13 +112,27 @@ class DeferredCodex(unittest.TestCase):
                     return json.loads(child.stdout.readline())
                 self.assertIn("result",rpc("initialize",{}))
                 child.stdin.write('{"method":"initialized"}\n')
-                first = rpc("thread/start",{})["result"]
-                self.assertEqual(first["home"],self.a["home"])
-                self.assertEqual(self.s.api("PATCH","accounts/"+str(self.a["id"]),
-                                            {"enabled":False,"revision":self.a["revision"]})[0],200)
-                self.assertIn("error",rpc("thread/start",{}))
-                self.assertIn("result",rpc("turn/interrupt",{"threadId":first["thread"]["id"]}))
+                yield rpc
             finally:
                 child.terminate()
                 child.wait(timeout=4)
+
+    def test_disabling_the_bound_profile_blocks_another_start_not_existing_turn_traffic(self):
+        with self.live_connection() as rpc:
+            first = rpc("thread/start",{})["result"]
+            self.assertEqual(first["home"],self.a["home"])
+            self.assertEqual(self.s.api("PATCH","accounts/"+str(self.a["id"]),
+                                        {"enabled":False,"revision":self.a["revision"]})[0],200)
+            self.assertIn("error",rpc("thread/start",{}))
+            self.assertIn("result",rpc("turn/interrupt",{"threadId":first["thread"]["id"]}))
         self.assertEqual(len(self.s.api("GET","sessions")[1]["items"]),1)
+
+    def test_ephemeral_fork_can_be_read_on_its_live_connection_but_is_never_bound(self):
+        with self.live_connection() as rpc:
+            parent = rpc("thread/start",{})["result"]["thread"]["id"]
+            fork = rpc("thread/fork",{"threadId":parent,"ephemeral":True})["result"]["thread"]
+            self.assertEqual((fork["ephemeral"],fork["forkedFromId"]),(True,parent))
+            self.assertEqual(rpc("thread/read",{"threadId":fork["id"]})["result"]["thread"]["id"],fork["id"])
+        self.assertFalse(self.s.api("GET","sessions?native_id="+fork["id"])[1]["items"])
+        denied, = self.connection(("thread/read",{"threadId":fork["id"]}))
+        self.assertIn("error",denied)
