@@ -1,5 +1,6 @@
 use super::{Signals, Thread, command, failed, report, status, stop};
 use ccpd::{
+    invocation::codex_stdio_command,
     protocol::{Plan, Request},
     types::Result,
 };
@@ -147,7 +148,8 @@ pub(super) async fn run(
     sig: &mut Signals,
 ) -> Result<ExitCode> {
     let (read, stdin) = io::pipe()?;
-    let mut child = command(binary, &["app-server".into()], plan)
+    let (_, argv) = codex_stdio_command(&plan.argv)?;
+    let mut child = command(binary, &argv, plan)
         .stdin(Stdio::from(read))
         .stdout(Stdio::piped())
         .spawn()

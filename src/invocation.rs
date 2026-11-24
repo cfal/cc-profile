@@ -47,26 +47,52 @@ impl Invocation {
         self.intent.id().filter(|_| self.agy_tui)
     }
 }
-fn app_server(args: &[String], cwd: &Path) -> Result<Invocation> {
-    let mut it = args[1..].iter().map(String::as_str);
+pub fn codex_stdio_command(args: &[String]) -> Result<(Intent, Vec<String>)> {
+    let mut it = args.iter().map(String::as_str);
+    if it.next() != Some("app-server") {
+        return Err(unsupported());
+    }
+    let mut argv = vec!["app-server".to_owned()];
     let mut intent = Intent::New;
     let mut stdio = false;
+    let mut configured = false;
     while let Some(flag) = it.next() {
         match flag {
-            "--stdio" | "--listen=stdio://" if !stdio => stdio = true,
-            "--listen" if !stdio && it.next() == Some("stdio://") => stdio = true,
+            "--stdio" if !stdio => stdio = true,
+            "--listen=stdio://" if !stdio => {
+                stdio = true;
+                argv.push(flag.into());
+            }
+            "--listen" if !stdio && it.next() == Some("stdio://") => {
+                stdio = true;
+                argv.extend([flag.into(), "stdio://".into()]);
+            }
             "--for-session" if intent == Intent::New => {
                 intent = Intent::Resume(native_id(it.next().unwrap_or(""))?)
+            }
+            "--config" => {
+                let value = it.next().ok_or_else(unsupported)?;
+                if !matches!(
+                    value,
+                    "features.goals=false"
+                        | "features.wake_on_agent_messages=false"
+                        | "features.default_mode_request_user_input=true"
+                ) {
+                    return Err(unsupported());
+                }
+                argv.extend([flag.into(), value.into()]);
+                configured = true;
             }
             _ => return Err(unsupported()),
         }
     }
-    Ok(Invocation {
-        intent,
-        agy_tui: false,
-        agy_text_stdin: false,
-        workspace: cwd.into(),
-    })
+    if configured && intent == Intent::New {
+        return Err(Error::bad(
+            "unsupported_invocation",
+            "Configured app-server launches require --for-session <uuid> to select the owner before startup.",
+        ));
+    }
+    Ok((intent, argv))
 }
 pub fn native_id(raw: &str) -> Result<String> {
     let parsed = Uuid::parse_str(raw).ok().filter(|_| raw.len() == 36);
@@ -307,7 +333,12 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         && args.first().is_some_and(|s| s == "app-server")
         && !matches!(args.get(1).map(String::as_str), Some("--help" | "-h"))
     {
-        return app_server(args, cwd);
+        return Ok(Invocation {
+            intent: codex_stdio_command(args)?.0,
+            agy_tui: false,
+            agy_text_stdin: false,
+            workspace: cwd.into(),
+        });
     }
     let mut workspace = cwd.to_owned();
     let mut words = Vec::new();
@@ -983,6 +1014,63 @@ mod tests {
             vec!["exec", "--ephemeral", "--config"],
         ] {
             assert!(parse("codex", &args).is_err());
+        }
+    }
+    #[test]
+    fn configured_stdio_requires_a_pinned_owner_and_forwards_native_args_only() {
+        let id = "60000000-0000-4000-8000-000000000002";
+        let parse = |args: &[&str]| {
+            codex_stdio_command(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        let flags = [
+            "app-server",
+            "--listen",
+            "stdio://",
+            "--config",
+            "features.goals=false",
+            "--config",
+            "features.wake_on_agent_messages=false",
+            "--config",
+            "features.default_mode_request_user_input=true",
+        ];
+        assert!(parse(&flags).is_err());
+        let (intent, argv) = parse(&[&flags[..], &["--for-session", id]].concat()).unwrap();
+        assert_eq!(intent, Intent::Resume(id.into()));
+        assert_eq!(argv, flags);
+        assert_eq!(parse(&["app-server", "--stdio"]).unwrap().1, ["app-server"]);
+        for args in [
+            vec!["app-server", "--for-session", id, "--config"],
+            vec![
+                "app-server",
+                "--for-session",
+                id,
+                "--config",
+                "features.goals=true",
+            ],
+            vec![
+                "app-server",
+                "--for-session",
+                id,
+                "--config",
+                "model_providers={}",
+            ],
+            vec![
+                "app-server",
+                "--for-session",
+                id,
+                "--config",
+                "model_catalog_json=\"elsewhere\"",
+            ],
+            vec!["app-server", "--for-session", id, "--listen", "ws://remote"],
+            vec![
+                "app-server",
+                "--config",
+                "features.goals=false",
+                "--for-session",
+                "--last",
+            ],
+        ] {
+            assert!(parse(&args).is_err());
         }
     }
     #[test]

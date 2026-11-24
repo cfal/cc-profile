@@ -129,7 +129,10 @@ class Native(unittest.TestCase):
         self.assertGreater(len(models), prior_requests)
         owner = self.wait_for_owner(uid)
         self.assertEqual((owner["config_id"], owner["evidence"]), (c["id"],"saved_file"))
-        with subprocess.Popen([test_service.LAUNCHER,"codex","app-server","--for-session",uid],
+        features = {"goals":False, "wake_on_agent_messages":False, "default_mode_request_user_input":True}
+        flags = [arg for k, v in features.items() for arg in ("--config", f"features.{k}={json.dumps(v)}")]
+        with subprocess.Popen([test_service.LAUNCHER,"codex","app-server","--listen","stdio://",
+                               *flags,"--for-session",uid],
                               env=self.s.env,cwd=self.s.root,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE,text=True) as child:
             try:
@@ -146,8 +149,11 @@ class Native(unittest.TestCase):
                         if msg.get("id")==num:
                             self.assertNotIn("error",msg)
                             return msg["result"]
-                call(1,"initialize",{"clientInfo":{"name":"ccp-test","version":"1"}})
+                init = call(1,"initialize",{"clientInfo":{"name":"ccp-test","version":"1"}})
+                self.assertEqual(init["codexHome"], str(home))
                 child.stdin.write('{"method":"initialized"}\n')
+                effective = call(4, "config/read", {"includeLayers":False})["config"]["features"]
+                self.assertEqual({k:effective[k] for k in features}, features)
                 self.assertEqual(call(2,"thread/resume",{"threadId":uid})["thread"]["id"],uid)
                 new=call(3,"thread/start",{})["thread"]["id"]
                 rows=self.s.api("GET","sessions?native_id="+new)[1]["items"]
