@@ -52,6 +52,130 @@ fn write(dir: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
+fn filtered_list_never_binds_over_indexed_or_newly_dirty_archived_competitor() {
+    use crate::{
+        listed,
+        protocol::CodexListed,
+        routing::{Request, launch},
+    };
+    let f = Fixture::new();
+    let a = f.profile("active");
+    let a =
+        f.db.edit(a.id, &json!({"revision":a.revision,"enabled":true}))
+            .unwrap();
+    let b = f.profile("other");
+    let active = a.home.join("sessions/2024/02/29");
+    let archive = b.home.join("archived_sessions");
+    let (x, y, db_only) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    write(&active, &name(x));
+    write(&active, &name(y));
+    let indexed = write(&archive, &name(x));
+    fs::write(&indexed, b"").unwrap();
+    let key = (b.id, "archived_sessions".to_owned());
+    index_batch(&f.db, &key, vec![(x, name(x))]).unwrap();
+    f.db.db()
+        .unwrap()
+        .execute(
+            "INSERT INTO rollout_dirs(owner,dir,stamp) VALUES(?,?,?)",
+            params![b.id, key.1, stamp(&open_home(&archive).unwrap()).unwrap()],
+        )
+        .unwrap();
+
+    let bin = std::env::current_exe().unwrap();
+    let build = Build {
+        fingerprint: crate::native::stamp(&bin),
+        bin: bin.clone(),
+        version: "fixture".into(),
+        supported: true,
+    };
+    let req = Request {
+        tool: "codex".into(),
+        argv: vec!["app-server".into()],
+        request_id: Uuid::new_v4().to_string(),
+        ticket: "ad".repeat(32),
+        binary: Some(bin.clone()),
+        cwd: f.root.clone(),
+        login_profile: None,
+        override_names: vec![],
+    };
+    assert_eq!(launch(&f.db, &build, &req).unwrap().config_id, a.id);
+    let submit = |bound: bool, id: Uuid, roster: &[(i64, i64)]| {
+        listed::codex(
+            &f.db,
+            &build,
+            CodexListed {
+                binary: bin.clone(),
+                profiles: if bound { vec![] } else { roster.to_vec() },
+                bound: bound.then(|| (req.request_id.clone(), req.ticket.clone())),
+                threads: vec![
+                    (a.id, db_only.to_string(), "/db".into()),
+                    (a.id, id.to_string(), "/active".into()),
+                ],
+            },
+        )
+    };
+    let b =
+        f.db.edit(b.id, &json!({"revision":b.revision,"enabled":true}))
+            .unwrap();
+    let one = [(a.id, a.revision)];
+    let both = [one[0], (b.id, b.revision)];
+    fs::write(&indexed, b"now nonempty").unwrap(); // Does not dirty the indexed directory.
+    for bound in [false, true] {
+        assert_eq!(submit(bound, x, &both).unwrap_err().1, "rollout_conflict");
+        assert_eq!((f.seen(x), f.seen(db_only)), (None, None));
+    }
+
+    fs::write(&indexed, b"").unwrap(); // Still indexed; a filename alone is not a conflict.
+    write(&archive, &name(y)); // New generation absent from rollout_paths.
+    f.db.edit(b.id, &json!({"revision":b.revision,"enabled":false}))
+        .unwrap();
+    for bound in [false, true] {
+        assert_eq!(submit(bound, y, &one).unwrap_err().1, "rollout_conflict");
+        assert_eq!((f.seen(y), f.seen(db_only)), (None, None));
+    }
+    assert_eq!(submit(true, x, &one).unwrap(), 2);
+    assert_eq!(f.seen(x), Some((a.id, false)));
+    fs::rename(&b.home, f.root.join("offline")).unwrap();
+    assert_eq!(submit(false, y, &one).unwrap(), 2);
+}
+
+#[test]
+fn listed_batch_scans_one_dirty_leaf_for_many_ids_and_rechecks_sql_before_publication() {
+    use crate::rollout::listed;
+    let f = Fixture::new();
+    let a = f.profile("listed");
+    let b = f.profile("competitor");
+    let archive = b.home.join("archived_sessions");
+    fs::create_dir(&archive).unwrap();
+    // Too many entries for the per-thread exact-resume probe, but one bounded
+    // directory scan can establish the entire batch without per-ID traversal.
+    for n in 0..=MAX_LOOKUP_ENTRIES {
+        fs::write(archive.join(n.to_string()), b"").unwrap();
+    }
+    let ids: BTreeMap<_, _> = (0..256).map(|_| (Uuid::new_v4(), a.id)).collect();
+    let end = Instant::now() + Duration::from_secs(5);
+    let before = listed::probe(&f.db, &ids, end).unwrap();
+    f.db.write(|db| before.recheck(db, end)).unwrap();
+    let id = *ids.keys().next().unwrap();
+    index_batch(
+        &f.db,
+        &(b.id, "archived_sessions".into()),
+        vec![(id, name(id))],
+    )
+    .unwrap();
+    assert_eq!(
+        f.db.write(|db| before.recheck(db, end)).unwrap_err().1,
+        "rollout_pending"
+    );
+    let before = listed::probe(&f.db, &ids, end).unwrap();
+    f.profile("new-disabled-competitor");
+    assert_eq!(
+        f.db.write(|db| before.recheck(db, end)).unwrap_err().1,
+        "rollout_pending"
+    );
+}
+
+#[test]
 fn pinned_filenames_key_by_thread_not_generation() {
     let id = Uuid::new_v4();
     let base = name(id);

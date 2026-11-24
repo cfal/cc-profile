@@ -1,5 +1,4 @@
 use crate::{
-    invocation::native_id,
     native::{Build, validate_binary},
     protocol::CodexListed,
     routing::codex_admission,
@@ -9,9 +8,10 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
-    collections::HashSet,
+    collections::BTreeMap,
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 #[derive(Clone, Copy)]
 pub enum Source {
@@ -91,12 +91,13 @@ pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usiz
     if list.profiles.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(invalid());
     }
-    let mut ids = HashSet::new();
-    for (_, id, cwd) in &list.threads {
-        if !native_id(id).is_ok_and(|canonical| &canonical == id) || !crate::paths::workspace(cwd) {
+    let mut claims = BTreeMap::new();
+    for (owner, id, cwd) in &list.threads {
+        let uuid = Uuid::parse_str(id).map_err(|_| invalid())?;
+        if uuid.to_string() != *id || !crate::paths::workspace(cwd) {
             return Err(invalid());
         }
-        if !ids.insert(id) {
+        if claims.insert(uuid, *owner).is_some() {
             return Err(Error::conflict(
                 "ambiguous_session",
                 "Duplicate Codex thread ID; no results were published.",
@@ -129,6 +130,9 @@ pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usiz
     {
         return Err(invalid());
     }
+    let disk = (!claims.is_empty())
+        .then(|| crate::rollout::listed::probe(store, &claims, end))
+        .transpose()?;
     // Never stat user profile paths while holding the global database mutex.
     for c in &before {
         if !open_home(&c.home).is_ok_and(|fd| c.matches_open_home(&fd)) {
@@ -139,6 +143,9 @@ pub fn codex(store: &Store, build: &Build, mut list: CodexListed) -> Result<usiz
     store.write(|db| {
         if Instant::now() >= end || roster(db)? != before {
             return Err(stale());
+        }
+        if let Some(proof) = disk {
+            proof.recheck(db, end)?;
         }
         for (owner, id, cwd) in &list.threads {
             Source::Codex.record(db, *owner, id, cwd, true)?;

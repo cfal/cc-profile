@@ -49,6 +49,24 @@ class ListedCodex(unittest.TestCase):
         self.assertEqual(self.private("/v3/launch", r)[0],426)
         self.assertFalse(self.s.api("GET","startups")[1]["items"])
 
+    def test_active_only_native_results_cannot_publish_over_an_archived_competitor(self):
+        thread = uid()
+        name = f"rollout-2026-11-23T12-00-00-{thread}.jsonl"
+        # Both files predate discovery: there is no historical owner to catch this.
+        self.s.stop()
+        for c, rel in [(self.a, "sessions/2026/11/23"), (self.b, "archived_sessions")]:
+            directory = Path(c["home"]) / rel
+            directory.mkdir(parents=True)
+            (directory / name).write_bytes(b"not a transcript")
+        self.s.start()
+        self.s.session = self.s.api("POST", "login", {"password": self.s.password})[1]["session"]
+        self.assertEqual(self.sessions(), [])
+        rows = [[self.b["id"], uid(), "/first"], [self.a["id"], thread, "/from-active-list"]]
+        status, data = self.listed(rows)
+        self.assertEqual((status, json.loads(data)["error"]), (409, "rollout_conflict"))
+        self.assertEqual(self.sessions(), [])
+        self.assertEqual(self.s.api("GET", "startups")[1]["items"], [])
+
     def test_listed_only_thread_resumes_without_disk_but_never_overrules_the_disk_or_disabled_owner(self):
         aid, bid = self.a["id"], self.b["id"]
         x, y = uid(), uid()
@@ -167,7 +185,7 @@ class ListedCodex(unittest.TestCase):
         self.assertGreaterEqual(bound([row, [other["id"], uid(), "/wrong"]])[0], 400)
         self.assertGreaterEqual(bound([row], profiles=self.roster)[0], 400)
         self.assertEqual(self.sessions()[0]["evidence"], "saved_file")
-        # A bound listing does not require a filesystem check of an unrelated enabled profile.
+        # A physically absent, unrelated profile supplies no conflicting rollout evidence.
         Path(other["home"]).rename(self.s.root/"unavailable")
         starts = self.s.api("GET", "startups")[1]["items"]
         self.assertEqual(bound([row]), (200, "1"))
