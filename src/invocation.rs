@@ -312,6 +312,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut print_mode = false;
     let mut no_persistence = false;
     let mut ephemeral = false;
+    let mut exec_config = false;
     let mut tui_only = false;
     let mut it = args.iter().peekable();
     let positional = |arg: &str| !arg.starts_with('-') || arg == "-";
@@ -368,6 +369,23 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 if s.is_empty() || (s.starts_with('-') && inline.is_none()) {
                     return Err(unsupported());
                 }
+            }
+            (false, "--config") if matches!(words.first(), Some(("exec" | "e", true))) => {
+                if !matches!(
+                    value()?,
+                    "service_tier=\"default\""
+                        | "approval_policy=\"never\""
+                        | "approval_policy=\"on-request\""
+                        | "model_reasoning_effort=\"low\""
+                        | "model_reasoning_effort=\"medium\""
+                        | "model_reasoning_effort=\"high\""
+                        | "model_reasoning_effort=\"xhigh\""
+                        | "model_reasoning_effort=\"max\""
+                        | "model_reasoning_effort=\"ultra\""
+                ) {
+                    return Err(unsupported());
+                }
+                exec_config = true;
             }
             (false, "-i" | "--image") => {
                 let file = value()?;
@@ -497,6 +515,9 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         }
     }
     let command = words.first().filter(|(_, cmd)| *cmd).map(|(w, _)| *w);
+    if exec_config && !ephemeral {
+        return Err(unsupported());
+    }
     if claude && words.first().is_some_and(|(word, _)| claude_internal(word)) {
         return Err(unsupported());
     }
@@ -754,6 +775,59 @@ mod tests {
             .intent,
             Intent::New
         );
+    }
+    #[test]
+    fn codex_ephemeral_exec_accepts_only_the_known_background_query_settings() {
+        let args = [
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--cd",
+            ".",
+            "--output-last-message",
+            "reply",
+            "--model",
+            "test",
+            "--config",
+            "model_reasoning_effort=\"high\"",
+            "--config",
+            "approval_policy=\"never\"",
+            "--config",
+            "service_tier=\"default\"",
+            "-",
+        ];
+        assert_eq!(parse("codex", &args).unwrap().intent, print(&args));
+        let reordered = [
+            "e",
+            "--config",
+            "approval_policy=\"never\"",
+            "--ephemeral",
+            "-",
+        ];
+        assert_eq!(
+            parse("codex", &reordered).unwrap().intent,
+            print(&reordered)
+        );
+        for value in [
+            "model_provider=\"other\"",
+            "model_providers={}",
+            "model_catalog_json=\"other\"",
+            "cli_auth_credentials_store=\"file\"",
+            "service_tier=\"default\"\nprofile='other'",
+            "approval_policy=",
+            "service_tier=\"fast\"",
+        ] {
+            assert!(parse("codex", &["exec", "--ephemeral", "--config", value, "-"]).is_err());
+        }
+        for args in [
+            vec!["exec", "--config", "approval_policy=\"never\"", "-"],
+            vec!["--config", "approval_policy=\"never\""],
+            vec!["exec", "--ephemeral", "--config"],
+        ] {
+            assert!(parse("codex", &args).is_err());
+        }
     }
     #[test]
     fn agy_tui_values_do_not_select_a_command_or_session() {

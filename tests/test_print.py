@@ -118,6 +118,22 @@ class OneShot(unittest.TestCase):
                          (launch["config_id"], "90000000-0000-4000-8000-000000000001", "saved_file", None))
         self.assertEqual(s.api("GET", "startups?tool=agy")[1]["items"][0], launch)
 
+    def test_codex_background_query_preserves_stdin_arguments_and_profile_home(self):
+        s = self.s
+        profile = s.account("codex", "background")
+        args = ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
+                "--cd", str(s.root), "--output-last-message", str(s.root/"last-message"),
+                "--model", "fixture", "--config", 'model_reasoning_effort="high"',
+                "--config", 'approval_policy="never"', "--config", 'service_tier="default"', "-"]
+        p = subprocess.run([self.aliases/"codex", *args], cwd=s.root,
+                           env=dict(s.env, CODEX_HOME=str(s.root/"external-home")),
+                           input=b"fixture stdin", capture_output=True, timeout=8)
+        self.assertEqual(p.returncode, 23, p.stderr)
+        header, payload = p.stdout.split(b"\n", 1)
+        self.assertEqual(json.loads(header)[:2], [args, profile["home"]])
+        self.assertEqual(payload, b"fixture stdin")
+        self.assertEqual(s.api("GET", "sessions?tool=codex")[1]["items"], [])
+
     def agy_profile(self, label):
         s = self.s
         code, c, _ = s.api("POST", "accounts", dict(tool="agy", label=label, create=True))
