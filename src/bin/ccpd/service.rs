@@ -4,7 +4,7 @@ use axum::{
     extract::{
         ConnectInfo, DefaultBodyLimit, Path, Query, Request, State, connect_info::Connected,
     },
-    http::{StatusCode, Uri},
+    http::{Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
@@ -148,6 +148,16 @@ async fn launch(
 pub struct Filter {
     tool: String,
 }
+async fn versions(State(s): State<Shared>, method: Method) -> Json<Value> {
+    let force = method == Method::POST;
+    let (claude, codex, agy) = tokio::join!(
+        s.claude.resolve(&s.state_dir, force),
+        s.codex.resolve(&s.state_dir, force),
+        s.agy.resolve(&s.state_dir, force),
+    );
+    let report = |b: Build| json!({"version":b.version,"supported":b.supported});
+    Json(json!({"claude":report(claude),"codex":report(codex),"agy":report(agy)}))
+}
 pub async fn accounts(State(s): State<Shared>, Query(q): Query<Filter>) -> Result<Json<Value>> {
     let build = s.build(tool(&q.tool)?).await;
     blocking(move || {
@@ -260,6 +270,7 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/session", get(auth::session))
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/settings", get(settings).put(set_settings))
+        .route("/api/v1/versions", get(versions).post(versions))
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
         .route(

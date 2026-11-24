@@ -210,8 +210,36 @@ function modal(heading, fields, submit, fn) {
 }
 $(".cancel", form).onclick = $(".close", form).onclick = () => dialog.close();
 const copy = async (s) => {
-  await navigator.clipboard.writeText(s);
-  notice("Copied to clipboard.");
+  const token = sessionToken, route = location.hash;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(s);
+      return notice("Copied to clipboard.");
+    }
+  } catch {
+    // A browser can expose the clipboard API but deny writes.
+  }
+  if (!token || sessionToken !== token || route !== location.hash || dialog.open) return;
+  const focus = document.activeElement;
+  const box = el("textarea", {readonly: true, class: "clipboard-buffer", "aria-label": "Text to copy", rows: 3});
+  box.value = s;
+  document.body.append(box);
+  let copied = false;
+  try {
+    box.select();
+    copied = document.execCommand("copy");
+  } catch {
+    // Manual copy also works when both browser mechanisms are unavailable.
+  } finally {
+    box.remove();
+    focus?.focus({preventScroll: true});
+  }
+  if (copied) return notice("Copied to clipboard.");
+  box.className = "manual-copy";
+  modal("Copy manually", [box], "Done");
+  box.focus();
+  box.select();
+  dialog.addEventListener("close", () => box.remove(), {once: true});
 };
 const passwordInput = (name, autocomplete, props = {}) => el("input", {
   type: "password", name, required: true, maxlength: 1024, autocomplete, spellcheck: "false", ...props,
@@ -328,10 +356,35 @@ async function loadRouting(container) {
       btn("Retry", () => loadRouting(container), "refresh-cw"));
   }
 }
+function binaryVersions() {
+  const list = el("dl", {class: "facts"});
+  const status = el("p", {class: "caption", role: "status"});
+  const button = ib("Refresh binary versions", "refresh-cw", () => load(true));
+  async function load(force) {
+    button.disabled = true;
+    status.textContent = "Checking versions…";
+    try {
+      const data = force ? await api("versions", "POST", {}) : await api("versions");
+      list.replaceChildren(...Object.entries(names).flatMap(([tool, label]) => {
+        const b = data[tool];
+        return datum(label, b?.version ? code(b.version + (b.supported ? "" : " (unrecognized)")) : text("Unavailable"));
+      }));
+      status.textContent = "";
+    } catch {
+      status.textContent = "Could not check binary versions.";
+    } finally {
+      button.disabled = false;
+    }
+  }
+  load(false);
+  return el("section", {"aria-labelledby": "versions-heading"},
+    el("div", {class: "sectionhead"}, el("h2", {id: "versions-heading"}, "Binary versions"), button), list, status);
+}
 function settings() {
   const routing = el("div");
   main.replaceChildren(title("Settings"), el("div", {class: "settings"},
     el("section", {}, el("h2", {}, "New chats"), routing),
+    binaryVersions(),
     el("section", {}, el("h2", {}, "Panel password"), changePasswordForm())));
   return loadRouting(routing);
 }
@@ -344,8 +397,9 @@ function empty(heading, description, action) {
     action,
   );
 }
-async function loadProfiles() {
-  const registries = await Promise.all(Object.keys(names).map((tool) => api("accounts?tool=" + tool)));
+async function loadProfiles(filter) {
+  const tools = filter ? [filter] : Object.keys(names);
+  const registries = await Promise.all(tools.map((tool) => api("accounts?tool=" + tool)));
   return registries.flatMap((r) => r.items);
 }
 async function logs(view, params, ver, enter) {
@@ -543,7 +597,8 @@ async function logs(view, params, ver, enter) {
     ),
   ));
 }
-function accountForm(t, c) {
+function accountForm(filter, c) {
+  const provider = !c && !filter && select(Object.entries(names), "claude", {required: true});
   const label = el("input", { required: true, maxlength: 100, value: c?.label || "" }),
     priority = el("input", {type: "number", min: 0, max: 100, step: 1, required: true,
       value: c?.priority ?? 0, "aria-describedby": "priority-hint"}),
@@ -582,8 +637,9 @@ function accountForm(t, c) {
   mode.onchange = toggle;
   toggle();
   modal(
-    c ? "Edit config" : "Add " + names[t] + " profile",
+    c ? "Edit config" : filter ? "Add " + names[filter] + " profile" : "Add profile",
     [
+      ...(provider ? [field("Provider", provider)] : []),
       field("Label", label),
       field("Priority", priority),
       el("p", {id: "priority-hint", class: "caption"}, "0–100. Higher values win in priority mode."),
@@ -593,12 +649,13 @@ function accountForm(t, c) {
     ],
     c ? "Save changes" : "Add profile",
     async () => {
+      const t = c?.tool || filter || provider.value;
       const v = { label: label.value.trim(), proxy_mode: mode.value, priority: priority.valueAsNumber };
       if (mode.value === "custom" && proxy.value) v.proxy_url = proxy.value;
       const saved = c
         ? await api("accounts/" + c.id, "PATCH", { revision: c.revision, ...v })
         : await api("accounts", "POST", { tool: t, ...(source.value === "new" ? {create: true} : {home: home.value.trim()}), ...v });
-      go("accounts", { tool: t, id: saved.id });
+      go("accounts", { tool: filter, id: saved.id });
       const proxyChanged = c && (mode.value !== c.proxy_mode || (mode.value === "custom" && proxy.value));
       notice(t === "codex" && proxyChanged
         ? "Config updated. A running Codex TUI daemon may keep its previous proxy until it restarts."
@@ -702,7 +759,7 @@ const resetErrors = {
   stale_config: "This profile or its sign-in changed. Reopen its grant list.",
   busy: "Another request is in progress. Try again shortly.",
   sign_in_required: "Sign in to this Codex profile first.",
-  unsupported_build: "Could not verify the native Codex executable. Check Accounts.",
+  unsupported_build: "Could not verify the native Codex executable. Check Binary versions in Settings.",
   unavailable: "Grant details are unavailable right now.",
 };
 const resetOutcomes = {
@@ -1033,7 +1090,7 @@ window.addEventListener("focus", () => {
   const view = selectedIdentity;
   if (view?.tool === "agy" && view.node.isConnected && !view.catalogChecked) view.refresh();
 });
-function signInPanel(c, initial, supported) {
+function signInPanel(c, initial) {
   const identity = identityView(c, initial);
   const section = el("section", {}, el("h3", {}, "Sign-in status"), identity.node);
   const cmd = "ccp login " + c.id;
@@ -1090,7 +1147,7 @@ function signInPanel(c, initial, supported) {
         cancel);
     } else {
       const start = action("Sign in with ChatGPT", endpoint, {revision: c.revision}, "key-round");
-      start.disabled = !c.present || !supported;
+      start.disabled = c.readiness !== "ready";
       const messages = {
         completed: "Device sign-in completed for " + c.label + ".",
         expired: "Device code expired. Start again for a new code.",
@@ -1108,23 +1165,23 @@ function signInPanel(c, initial, supported) {
   return section;
 }
 async function accounts(params, ver, enter) {
-  const t = Object.hasOwn(names, params.get("tool")) ? params.get("tool") : "claude",
-    data = await api("accounts?tool=" + t);
+  const filter = Object.hasOwn(names, params.get("tool")) ? params.get("tool") : "",
+    items = await loadProfiles(filter);
   if (ver !== version) return;
-  const c = data.items.find((c) => String(c.id) === params.get("id")) || data.items[0];
+  const c = items.find((c) => String(c.id) === params.get("id")) || items[0];
   checkResetProfile(c ? [c] : []);
   if (!c) selectedIdentity = null;
-  const login = c && t === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
+  const login = c?.tool === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
   if (ver !== version) return;
   const tabs = el(
     "div",
-    { class: "segments", "aria-label": "Provider" },
-    ...Object.entries(names).map(([k, l]) =>
+    { class: "segments", role: "group", "aria-label": "Provider" },
+    [["", "All"], ...Object.entries(names)].map(([k, l]) =>
       el(
         "button",
         {
           type: "button",
-          "aria-pressed": String(k === t),
+          "aria-pressed": String(k === filter),
           onclick: () => go("accounts", { tool: k }),
         },
         l,
@@ -1132,10 +1189,10 @@ async function accounts(params, ver, enter) {
     ),
   );
   const list = el("div", { class: "account-list", "aria-label": "Registered configs" });
-  for (const a of data.items) {
+  for (const a of items) {
     const q = a.quota;
     const windows = (q.snapshot?.windows || [])
-      .filter((w) => w.kind === (t === "agy" ? "model" : "account") && Number.isFinite(w.used_pct)).slice(0, 2);
+      .filter((w) => w.kind === (a.tool === "agy" ? "model" : "account") && Number.isFinite(w.used_pct)).slice(0, 2);
     const summary = windows.map((w) => w.label + " " + percent(100 - w.used_pct) + " left")
       .join(" · ");
     list.append(
@@ -1145,8 +1202,9 @@ async function accounts(params, ver, enter) {
           type: "button",
           class: "account-row",
           "aria-pressed": String(a.id === c.id),
-          onclick: () => go("accounts", { tool: t, id: a.id }),
+          onclick: () => go("accounts", { tool: filter, id: a.id }),
         },
+        !filter && text(names[a.tool], "provider-name"),
         el(
           "span",
           { class: "row" },
@@ -1160,7 +1218,7 @@ async function accounts(params, ver, enter) {
             ? (q.stale ? "Stale · " : "") + summary
             : !q.snapshot
               ? quotaText(q)
-              : "No account windows",
+              : "No quota windows",
           "caption",
         ),
       ),
@@ -1192,7 +1250,7 @@ async function accounts(params, ver, enter) {
       }
     });
     const setDefault = btn("Set as default", async () => {
-      await api("current/" + t, "PUT", { config_id: c.id });
+      await api("current/" + c.tool, "PUT", { config_id: c.id });
       await render();
     });
     setDefault.disabled = !c.enabled;
@@ -1202,7 +1260,7 @@ async function accounts(params, ver, enter) {
           { class: "row" },
           pill("Default", "blue"),
           ib("Clear default account", "x", async () => {
-            await api("current/" + t, "PUT", { config_id: null });
+            await api("current/" + c.tool, "PUT", { config_id: null });
             await render();
           }),
         )
@@ -1211,14 +1269,14 @@ async function accounts(params, ver, enter) {
       el(
         "div",
         { class: "detail-heading" },
-        el("h2", {}, c.label),
+        el("div", {}, !filter && text(names[c.tool], "provider-name"), el("h2", {}, c.label)),
         el(
           "div",
           { class: "actions" },
-          ib("Edit config", "pencil", () => accountForm(t, c)),
+          ib("Edit config", "pencil", () => accountForm(filter, c)),
         ),
       ),
-      signInPanel(c, login, data.supported),
+      signInPanel(c, login),
     );
     detail.append(el("section", {}, el("h3", {}, "Chat routing"),
       el("label", {class: "switch"}, enabled, "Enable profile"),
@@ -1239,25 +1297,20 @@ async function accounts(params, ver, enter) {
         await api("quota/refresh", "POST", {});
         await render();
       }),
-      btn("Add profile", () => accountForm(t, null), "plus", "primary"),
+      btn("Add profile", () => accountForm(filter, null), "plus", "primary"),
     ),
-    el(
-      "div",
-      { class: "titleline" },
-      tabs,
-      text(data.version || "Native tool not found", "caption"),
-    ),
+    el("div", { class: "titleline" }, tabs),
     c
       ? el("div", { class: "account-grid" }, list, detail)
       : empty(
-          "No " + names[t] + " profiles",
+          filter ? "No " + names[filter] + " profiles" : "No profiles yet",
           "Create a profile or use an existing directory.",
         ),
   );
   if (enter) {
     await api("quota/refresh", "POST", { stale_only: true });
     if (ver === version) timer = setTimeout(() => render().catch((e) => notice(e.message)), 400);
-  } else if (data.items.some((a) => a.quota.loading))
+  } else if (items.some((a) => a.quota.loading))
     timer = setTimeout(() => render().catch((e) => notice(e.message)), 1000);
 }
 async function render() {

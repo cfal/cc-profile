@@ -316,6 +316,24 @@ class Service(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("Native tool", p.stderr)
 
+    def test_refresh_binary_versions_reprobes_unchanged_entry_point_without_accounts(self):
+        entry = self.root / "bin/codex"
+        version = entry.with_name("installed-version")
+        version.write_text("codex-cli 1.2.3\n")
+        entry.write_text('#!/bin/sh\n[ "$1" = --version ] && cat "$(dirname "$0")/installed-version"\n')
+        def read(method, extra=None):
+            return self.api(method, "versions", {} if method == "POST" else None, extra=extra)
+        initial = read("GET")[1]
+        self.assertEqual(set(initial), {"claude","codex","agy"})
+        self.assertEqual(initial["codex"], {"version":"codex-cli 1.2.3","supported":True})
+        version.write_text("codex-cli 1.2.4\n")
+        self.assertEqual(read("POST", {"X-CCP-Session":""})[0], 403)
+        self.assertEqual(read("GET")[1]["codex"], initial["codex"])
+        self.assertEqual(read("POST")[1]["codex"]["version"], "codex-cli 1.2.4")
+        entry.unlink()
+        self.assertEqual(read("GET")[1]["codex"], {"version":"","supported":False})
+        self.assertEqual(self.api("GET","startups")[1]["items"], [])
+
     def test_versioned_install_symlink_upgrades_without_restart(self):
         for tool, previous, version, args in [
             ("claude", "2.1.329", "3.0.0", ["-p", "hello"]),

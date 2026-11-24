@@ -699,6 +699,16 @@ dialog footer {
 .fields {
   padding: 16px 20px;
 }
+.clipboard-buffer {
+  position: fixed;
+  inset: 0 auto auto -10000px;
+}
+.manual-copy {
+  width: 100%;
+  padding: 8px;
+  font-family: monospace;
+  resize: vertical;
+}
 .field {
   display: grid;
   gap: 5px;

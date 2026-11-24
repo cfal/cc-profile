@@ -249,6 +249,9 @@ impl Installed {
         }
     }
     pub async fn current(&self, cwd: &Path) -> Build {
+        self.resolve(cwd, false).await
+    }
+    pub async fn resolve(&self, cwd: &Path, force_probe: bool) -> Build {
         let mut cache = self.cached.lock().await;
         let candidates: Candidates =
             match native_candidates(self.configured.as_deref().unwrap_or(self.tool)) {
@@ -263,7 +266,8 @@ impl Installed {
                     return Build::default();
                 }
             };
-        if let Some((previous, build, checked)) = &*cache
+        if !force_probe
+            && let Some((previous, build, checked)) = &*cache
             && previous == &candidates
             && (build.supported || checked.elapsed() < Duration::from_secs(5))
         {
@@ -350,7 +354,7 @@ impl Build {
 pub fn unsupported_build() -> Error {
     Error::conflict(
         "unsupported_build",
-        "Native tool is unavailable or does not match the daemon's executable. Check Accounts and the native binary on PATH.",
+        "Native tool is unavailable or does not match the daemon's executable. Check Binary versions in Settings and the native binary on PATH.",
     )
 }
 pub fn validate_binary(build: &Build, reported: Option<&Path>) -> Result<()> {

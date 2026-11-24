@@ -351,6 +351,108 @@ class Panel(unittest.TestCase):
             expect(logs.get_by_role("cell", name="Unknown", exact=True)).to_be_visible()
             expect(logs.get_by_role("cell", name="Unknown", exact=True).get_by_role("button")).to_have_count(0)
 
+    def test_antigravity_session_id_copy_over_http(self):
+        service = self.start_service()
+        status, profile, _ = service.api("POST","accounts",{"tool":"agy","label":"Offline","create":True})
+        self.assertEqual(status, 201)
+        uid = "acp:fixture session's ID?x=1&y=2"
+        with closing(sqlite3.connect(service.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("INSERT INTO sessions(tool,native_id,owner,evidence,workspace,bound_ms,last_routed_ms) "
+                       "VALUES('agy',?,?,'observed','/work',1,1)", (uid, profile["id"]))
+            db.execute("INSERT INTO launches(request_id,tool,intent,state,reason,native_id,config_id,"
+                       "workspace,digest,ticket_digest,created_ms) VALUES('pinned','agy','resume','routed',"
+                       "'sticky',?,?,'/work',X'01',X'01',1)", (uid, profile["id"]))
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage", "--no-proxy-server",
+                "--host-resolver-rules=MAP ccp.test 127.0.0.1"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://ccp.test:{service.port}/#dashboard")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in", exact=True).click()
+            session_id = page.get_by_title(uid, exact=True)
+            session_id.click()
+            expect(page.get_by_role("heading", name="Sessions", exact=True)).to_be_visible()
+            expect(page.get_by_role("searchbox", name="Session ID")).to_have_value(uid)
+            self.assertFalse(page.evaluate("window.isSecureContext || !!navigator.clipboard"))
+            page.evaluate("""document.addEventListener('copy', () => {
+                window.copied = document.activeElement.value;
+            })""")
+            session_id.click()
+            expect(page.locator("#notice")).to_have_text("Copied to clipboard.")
+            self.assertEqual(page.evaluate("window.copied"), uid)
+            expect(session_id).to_be_focused()
+            page.evaluate("""document.execCommand = () => false""")
+            session_id.click()
+            manual = page.get_by_role("textbox", name="Text to copy")
+            expect(manual).to_be_focused()
+            self.assertEqual(manual.evaluate("e => e.value.slice(e.selectionStart, e.selectionEnd)"), uid)
+            page.get_by_role("button", name="Done", exact=True).click()
+            page.evaluate("""Object.defineProperty(navigator, 'clipboard', {value: {
+                writeText: () => Promise.reject(new Error('Permission denied'))
+            }})""")
+            page.get_by_role("button", name="Copy resume command", exact=True).click()
+            expect(manual).to_be_visible()
+            self.assertEqual(shlex.split(manual.input_value()), ["cd","/work","&&","ccp","agy","acp","--for-session",uid])
+
+    def test_all_accounts_select_and_edit_with_the_right_provider(self):
+        service = self.start_service()
+        for t in ("claude", "codex", "agy"):
+            self.assertEqual(service.api("POST", "accounts", {"tool":t,"create":True,"label":"Work"})[0], 201)
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width":320,"height":720})
+            page.goto(f"http://127.0.0.1:{service.port}/#accounts")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in", exact=True).click()
+            tabs = page.get_by_role("group", name="Provider")
+            expect(tabs.get_by_role("button")).to_have_text(["All", "Claude", "Codex", "Antigravity"])
+            all_tab = tabs.get_by_role("button", name="All", exact=True)
+            expect(all_tab).to_have_attribute("aria-pressed","true")
+            rows = page.locator(".account-row")
+            expect(rows).to_have_count(3)
+            expect(rows.locator(".provider-name")).to_have_text(["Claude","Codex","Antigravity"])
+            for row in rows.all():
+                provider = row.locator(".provider-name").bounding_box()
+                self.assertLessEqual(provider["y"] + provider["height"], row.locator("strong").bounding_box()["y"])
+            expect(page.get_by_text("codex-cli", exact=False)).to_have_count(0)
+            rows.filter(has_text="Codex").click()
+            expect(page.get_by_role("button", name="Sign in with ChatGPT")).to_be_visible()
+            expect(all_tab).to_have_attribute("aria-pressed","true")
+            rows.filter(has_text="Antigravity").click()
+            expect(page.get_by_role("button", name="Copy Antigravity sign-in command")).to_be_visible()
+            expect(page.locator(".detail-heading .provider-name")).to_have_text("Antigravity")
+            page.get_by_role("checkbox", name="Enable profile").check()
+            page.get_by_role("button", name="Set as default").click()
+            expect(rows.filter(has_text="Antigravity")).to_contain_text("Default")
+            self.assertTrue(service.api("GET", "accounts?tool=agy")[1]["items"][0]["current"])
+            page.get_by_role("button", name="Edit config").click()
+            page.get_by_label("Label", exact=True).fill("Renamed")
+            page.get_by_role("button", name="Save changes").click()
+            expect(rows.filter(has_text="Antigravity")).to_contain_text("Renamed")
+            expect(all_tab).to_have_attribute("aria-pressed","true")
+            page.get_by_role("button", name="Add profile", exact=True).click()
+            form = page.get_by_role("dialog")
+            form.get_by_role("combobox",name="Provider",exact=True).select_option("codex")
+            form.get_by_label("Label",exact=True).fill("Personal")
+            form.get_by_role("button",name="Add profile").click()
+            expect(rows).to_have_count(4)
+            expect(page.get_by_role("button", name="Copy Codex sign-in command")).to_be_visible()
+            expect(all_tab).to_have_attribute("aria-pressed","true")
+            tabs.get_by_role("button", name="Codex", exact=True).click()
+            expect(rows).to_have_count(2)
+            expect(rows.locator(".provider-name")).to_have_count(0)
+            self.check_layout(page, "accounts-provider-filter-mobile")
+            page.get_by_role("navigation").get_by_text("Settings").click()
+            versions = page.get_by_role("region",name="Binary versions")
+            expect(versions).to_contain_text("codex-cli 0.171.0")
+            expect(versions).to_contain_text("Antigravity")
+            entry = service.root / "bin/codex"
+            entry.write_text(entry.read_text().replace("0.171.0","0.180.1"))
+            versions.get_by_role("button",name="Refresh binary versions").click()
+            expect(versions).to_contain_text("codex-cli 0.180.1")
+            page.get_by_role("navigation").get_by_text("Accounts").click()
+            expect(all_tab).to_have_attribute("aria-pressed","true")
+            expect(page.get_by_text("codex-cli 0.180.1")).to_have_count(0)
+            self.check_layout(page, "all-accounts-mobile")
+
     def test_codex_saved_id_has_native_resume_command_and_no_startup_attribution(self):
         service = self.start_service()
         c = service.account("codex", "Saved")
@@ -1022,7 +1124,7 @@ class Panel(unittest.TestCase):
             with page.expect_response("**/api/v1/sessions*") as stale:
                 held[0].continue_()
             self.assertEqual(stale.value.status, 403)
-            expect(page.get_by_role("status")).to_have_text(stale.value.json()["message"])
+            expect(page.locator("#notice")).to_have_text(stale.value.json()["message"])
             expect(page.get_by_role("heading", name="Settings")).to_be_visible()
 
     def test_delayed_password_success_preserves_new_session(self):
