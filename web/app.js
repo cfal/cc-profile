@@ -992,7 +992,7 @@ async function readLogin(path) {
 let selectedIdentity;
 function identityView(c, login) {
   if (selectedIdentity?.id === c.id && selectedIdentity.revision === c.revision) return selectedIdentity;
-  const summary = el("span", {class: "wrap", role: "status"}, "Checking sign-in…");
+  const summary = el("span", {class: "wrap", role: "status", "aria-label": "Sign-in status"});
   const button = ib("Refresh sign-in status", "refresh-cw", () => refresh(c.tool === "agy"));
   const view = {id: c.id, tool: c.tool, revision: c.revision, node: el("div", {class: "row"}, summary, button),
     completed: login?.state === "completed" ? login.attempt : null, refresh};
@@ -1001,19 +1001,25 @@ function identityView(c, login) {
   async function refresh(verifyCatalog = false) {
     const attempt = ++seq;
     button.disabled = true;
-    if (verifyCatalog) {
-      view.catalogChecked = true;
-      summary.textContent = "Checking catalog access…";
-    }
+    if (verifyCatalog) view.catalogChecked = true;
+    summary.textContent = verifyCatalog ? "Checking catalog access…" : "Checking sign-in…";
     try {
       const endpoint = "accounts/" + c.id + "/identity";
       const v = verifyCatalog ? await api(endpoint, "POST", {}) : await api(endpoint);
       if (selectedIdentity !== view || attempt !== seq) return;
-      const labels = {signed_in: "Signed in", signed_out: "Not signed in",
-        saved_login: "Saved login found (validity not checked)", no_saved_login: "No saved login",
-        catalog_accessible: "Catalog accessible", sign_in_required: "Sign-in required"};
-      const fallback = verifyCatalog ? "Couldn’t verify catalog access" : "Sign-in status unavailable";
-      summary.textContent = (labels[v.state] || fallback) + (v.email ? ": " + v.email : "");
+      const signedIn = (c.tool === "claude" || c.tool === "codex") && v.state === "signed_in";
+      if (signedIn || (c.tool === "agy" && verifyCatalog && v.state === "catalog_accessible")) {
+        const label = el("strong", {}, signedIn ? "Signed in" : "Catalog accessible");
+        summary.replaceChildren(el("span", {class: "sign-in-confirmed"}, icon("check"),
+          el("span", {}, label, signedIn && v.email ? ": " + v.email : "")));
+      } else if (verifyCatalog) {
+        summary.textContent = v.state === "sign_in_required" ? "Sign-in required" : "Couldn’t verify catalog access";
+      } else {
+        const labels = c.tool === "agy"
+          ? {saved_login: "Saved login found (validity not checked)", no_saved_login: "No saved login"}
+          : {signed_out: "Not signed in"};
+        summary.textContent = labels[v.state] || "Sign-in status unavailable";
+      }
     } catch (err) {
       if (attempt === seq) summary.textContent = err.code === "busy"
         ? "Other sign-in checks are running. Refresh to try again." :

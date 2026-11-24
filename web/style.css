@@ -618,6 +618,21 @@ progress::-moz-progress-bar {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+.sign-in-confirmed {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+}
+.sign-in-confirmed svg {
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 50%;
+  color: var(--green);
+  background: var(--mint);
+  stroke-width: 2.5;
+}
 .sectionhead {
   display: flex;
   align-items: center;

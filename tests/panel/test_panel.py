@@ -147,6 +147,9 @@ class Panel(unittest.TestCase):
             finish.touch()
             completed = page.get_by_text("Device sign-in completed for Codex Personal.")
             expect(completed).to_be_visible()
+            status = page.get_by_role("status", name="Sign-in status")
+            expect(status).to_have_text("Not signed in")
+            expect(status.locator("svg")).to_have_count(0)
             finish.unlink()
             # A delayed full Accounts refresh must not replace a newer attempt either.
             old_panel = page.get_by_role("heading",name="Sign-in status").element_handle()
@@ -222,17 +225,32 @@ class Panel(unittest.TestCase):
             page.get_by_role("button",name="Sign in").click()
             expect(page.get_by_role("heading",name="ACP work",exact=True)).to_be_visible()
             expect(page.get_by_text("No saved login", exact=True)).to_be_visible()
+            status = page.get_by_role("status", name="Sign-in status")
+            check = status.locator("use[href='/icons.svg#check']")
+            expect(check).to_have_count(0)
             self.assertNotIn("POST", probes)
             verify = page.get_by_role("button", name="Refresh sign-in status")
             verify.click()
             expect(page.get_by_text("Sign-in required", exact=True)).to_be_visible()
+            expect(check).to_have_count(0)
             self.assertEqual(service.cli("login",str(c["id"])).returncode,0)
+            page.reload()
+            expect(status).to_have_text("Saved login found (validity not checked)")
+            expect(check).to_have_count(0)
+            self.assertEqual(probes.count("POST"), 1)
             verify.click()
-            expect(page.get_by_text("Catalog accessible", exact=True)).to_be_visible()
+            expect(status).to_have_text("Catalog accessible")
+            expect(check).to_be_visible()
             page.evaluate("window.dispatchEvent(new Event('focus'))")
-            page.route("**" + endpoint, lambda r: r.fulfill(json={"state":"unavailable","email":None}), times=1)
-            verify.click()
+            held = []
+            page.route("**" + endpoint, lambda r: held.append(r), times=1)
+            with page.expect_request(lambda r: r.method == "POST" and r.url.endswith(endpoint)):
+                verify.click()
+            expect(status).to_have_text("Checking catalog access…")
+            expect(check).to_have_count(0)
+            held[0].fulfill(json={"state":"unavailable","email":None})
             expect(page.get_by_text("Couldn’t verify catalog access", exact=True)).to_be_visible()
+            expect(check).to_have_count(0)
             self.assertEqual(probes.count("POST"), 3)
             expect(page.locator(".account-list").get_by_role("progressbar")).to_have_count(0)
             expect(page.get_by_role("button",name="Antigravity",exact=True)).to_have_attribute("aria-pressed","true")
@@ -365,24 +383,61 @@ class Panel(unittest.TestCase):
             page.get_by_label("Password",exact=True).fill(service.password)
             page.get_by_role("button",name="Sign in").click()
             expect(page.get_by_text("Signed in: work@example.test",exact=True)).to_be_visible()
+            status = page.get_by_role("status", name="Sign-in status")
+            check = status.locator("use[href='/icons.svg#check']")
+            expect(check).to_be_visible()
             endpoint = f"**/accounts/{a['id']}/identity"
             held = []
             page.route(endpoint, lambda route: held.append(route), times=1)
             with page.expect_request(endpoint):
                 page.get_by_role("button",name="Refresh sign-in status").click()
+            expect(status).to_have_text("Checking sign-in…")
+            expect(check).to_have_count(0)
             page.locator(".account-row").filter(has_text=b["label"]).click()
             expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
             with page.expect_response(endpoint):
                 held[0].fulfill(json={"state":"signed_in","email":"late@example.test"})
             expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
             expect(page.get_by_text("late@example.test",exact=False)).to_have_count(0)
+            expect(check).to_have_count(0)
             page.route(f"**/accounts/{b['id']}/identity", lambda route:
                        route.fulfill(status=409,json={"error":"busy"}), times=1)
             refresh = page.get_by_role("button",name="Refresh sign-in status")
             refresh.click()
             expect(page.get_by_text("Other sign-in checks are running. Refresh to try again.")).to_be_visible()
+            expect(check).to_have_count(0)
             refresh.click()
             expect(page.get_by_text("Not signed in",exact=True)).to_be_visible()
+
+    def test_codex_verified_identity_wraps_in_both_themes(self):
+        service = self.start_service()
+        c = service.account("codex", "Personal")
+        email = "long-address-" + ("a"*90) + "@example.test"
+        (Path(c["home"])/"fixture-identity.json").write_text(json.dumps({"account":{"type":"chatgpt","email":email}}))
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page(viewport={"width":320,"height":720})
+            page.goto(f"http://127.0.0.1:{service.port}/#accounts?tool=codex&id={c['id']}")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in", exact=True).click()
+            status = page.get_by_role("status", name="Sign-in status")
+            expect(status).to_have_text("Signed in: " + email)
+            glyph = status.locator("svg")
+            expect(glyph).to_have_attribute("aria-hidden", "true")
+            expect(glyph.locator("use")).to_have_attribute("href", "/icons.svg#check")
+            expect(glyph.locator("use")).to_be_visible()
+            for scheme in ("light", "dark"):
+                page.emulate_media(color_scheme=scheme)
+                self.assertTrue(glyph.evaluate("svg => svg.getBBox().width > 0"))
+                r, g, b = glyph.evaluate("""svg => {
+                    const ctx = document.createElement('canvas').getContext('2d');
+                    ctx.fillStyle = getComputedStyle(svg).stroke;
+                    ctx.fillRect(0, 0, 1, 1);
+                    return Array.from(ctx.getImageData(0, 0, 1, 1).data).slice(0, 3);
+                }""")
+                self.assertGreater(g, max(r, b))
+                self.assertLessEqual(status.bounding_box()["x"] + status.bounding_box()["width"],
+                                     page.get_by_role("button", name="Refresh sign-in status").bounding_box()["x"])
+                self.check_layout(page, "codex-identity-"+scheme)
 
     def test_dashboard_quotas_above_independent_startup_filters(self):
         service = self.start_service()
