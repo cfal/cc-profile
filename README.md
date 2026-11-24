@@ -161,6 +161,15 @@ Codex uses its own `exec --ephemeral` (or `e --ephemeral`) command. It accepts a
 
 The **Dashboard** shows account quotas first, then **Startup logs** with routing decisions, denials, observed IDs and reported exec failures. The logs do not track running processes or successful model calls. Full argv, prompts, tokens and proxy URLs are not logged. **Sessions** is a separately paginated, permanent mapping table, not a transcript viewer. Disabling a config blocks future admissions; it cannot revoke a delivered plan or stop an existing process.
 
+### Garcon executors
+
+Use CCP for subscription-backed chats. In the **executor** environment, point `CLAUDE_BINARY` and `GARCON_CODEX_CLI` at the absolute paths to the `claude` and `codex` executable links to `ccp`, not at bare `ccp` or a shell command. The genuine native executables must also be available to the launcher. Set a default account for each provider so that version and sign-in probes can run; their results describe that account, not the whole pool. Use the native binaries directly for Garcon endpoints that supply their own API key or base URL.
+
+Garcon integrations that access transcripts need the selected profile, not just a working executable:
+
+- **Claude:** For bidirectional `--print` with `stream-json` input and output, a new `--session-id <uuid>` is reserved on the selected account. Garcon can reconnect with `--resume <uuid>`; ordinary one-shots remain nonpersistent. Garcon [constructs the native transcript path before launching Claude](https://github.com/cfal/garcon/blob/fd008f12ab4118668bacc33289823ff68c560560/server-agents/claude/src/agents/claude/execution.ts#L43-L66), so file-based history, usage and forks may miss a routed transcript even when reconnect works.
+- **Codex:** Garcon's ephemeral background queries are supported. Its stock interactive [app-server command](https://github.com/cfal/garcon/blob/fd008f12ab4118668bacc33289823ff68c560560/server-agents/codex/src/agents/codex/app-server/client.ts#L327-L347) is not: it starts the same server for new chats and cold restores, without an owner ID. CCP supports those feature settings on an explicitly pinned server (`--for-session <source-thread-id>`). An absolute rollout path in a later RPC does not select the matching account.
+
 ## Proxies and quota
 
 Accounts supports **Inherit**, **Custom** (`HTTP_PROXY` / `HTTPS_PROXY` per directory), and **Direct**. These settings apply to native chats, sign-in, and quota checks. Inherit uses the caller's shell for CLI launches and the daemon environment for dashboard requests. A verification page opened in your browser uses the browser's own network settings. Custom writes matching upper/lowercase variables, removes ambient catch-all proxies and bypasses loopback. The CLI passes the settings to the child; ccpd is not an inference proxy. Refresh failures do not trigger a direct-egress fallback.
