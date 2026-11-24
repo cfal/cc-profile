@@ -52,6 +52,10 @@ fn check_req(r: &Request) -> Result<()> {
 }
 fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
     match code {
+        "session_id_in_use" => Error::conflict(
+            "session_id_in_use",
+            "Claude session ID is already assigned. Resume the existing session or start with a new ID.",
+        ),
         "unknown_session" => Error::missing(
             "unknown_session",
             "No managed mapping for this session ID. See Sessions; ccp never guesses its owner.",
@@ -216,7 +220,12 @@ fn choose(
         );
     }
     match &i.intent {
-        Intent::New | Intent::Print(_) => {
+        Intent::New | Intent::ClaudeStreamNew(_) | Intent::Print(_) => {
+            if let Intent::ClaudeStreamNew(id) = &i.intent
+                && claude_bound(db, id)?
+            {
+                return Ok(reject("session_id_in_use"));
+            }
             let all = configs(db, &req.tool)?;
             if !all.iter().any(|c| c.enabled) {
                 return Ok(reject("no_enabled_config"));
@@ -391,15 +400,17 @@ fn override_error(req: &Request) -> Error {
     )
 }
 
+fn claude_bound(db: &Connection, id: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='claude' AND native_id=?)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
 fn assign_claude(db: &Connection, c: &Config, workspace: &str, ms: i64) -> Result<String> {
     loop {
         let id = Uuid::new_v4().to_string();
-        let exists: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE tool='claude' AND native_id=?)",
-            [&id],
-            |r| r.get(0),
-        )?;
-        if !exists {
+        if !claude_bound(db, &id)? {
             insert_binding(db, "claude", &id, c.id, workspace, "assigned", ms)?;
             return Ok(id);
         }
@@ -548,6 +559,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
                     Intent::New => {
                         if req.tool == "claude" { id = Some(assign_claude(db, &c, &workspace, ms)?); }
                     }
+                    Intent::ClaudeStreamNew(uid) => insert_binding(db, "claude", uid, c.id, &workspace, "assigned", ms)?,
                     Intent::Print(_) => {}
                     Intent::Resume(uid) => {
                         if i.agy_tui {

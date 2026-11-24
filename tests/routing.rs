@@ -47,6 +47,83 @@ fn window(used: f64) -> Value {
 }
 
 #[test]
+fn claude_stream_id_is_claimed_once_and_exact_replay_does_not_rotate() {
+    let f = Fixture::new();
+    let exe = build();
+    let a = f.add("claude", "first");
+    let b = f.add("claude", "next");
+    let id = "9e230000-0000-4000-8000-000000000001";
+    let mut r = req(
+        &f,
+        "claude",
+        &[
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--input-format",
+            "stream-json",
+            "--replay-user-messages",
+            "--verbose",
+            "--permission-mode",
+            "default",
+            "--permission-prompt-tool",
+            "stdio",
+            "--append-system-prompt",
+            "fixture",
+            &format!("--session-id={id}"),
+            "-p",
+            "",
+        ],
+        &exe,
+    );
+    let p = launch(&f.store, &exe, &r).unwrap();
+    assert_eq!((p.config_id, &p.argv), (a.id, &r.argv));
+    assert_eq!(launch(&f.store, &exe, &r).unwrap(), p);
+    r.ticket = "f0".repeat(32);
+    assert_eq!(
+        launch(&f.store, &exe, &r).unwrap_err().1,
+        "request_conflict"
+    );
+    r.request_id = Uuid::new_v4().to_string();
+    for _ in 0..2 {
+        assert_eq!(
+            launch(&f.store, &exe, &r).unwrap_err().1,
+            "session_id_in_use"
+        );
+    }
+    let mut resume = req(&f, "claude", &[], &exe);
+    resume.argv = r
+        .argv
+        .iter()
+        .map(|s| s.replace("--session-id=", "--resume="))
+        .collect();
+    assert_eq!(launch(&f.store, &exe, &resume).unwrap().config_id, a.id);
+    let one_shot = req(&f, "claude", &["-p", "one shot"], &exe);
+    assert_eq!(launch(&f.store, &exe, &one_shot).unwrap().config_id, b.id);
+    f.store
+        .edit(a.id, &json!({"revision":a.revision,"enabled":false}))
+        .unwrap();
+    assert_eq!(launch(&f.store, &exe, &resume).unwrap_err().1, "stale_plan");
+    resume.request_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        launch(&f.store, &exe, &resume).unwrap_err().1,
+        "owner_disabled"
+    );
+    r.request_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        launch(&f.store, &exe, &r).unwrap_err().1,
+        "session_id_in_use"
+    );
+    assert_eq!(
+        f.store.page(true, &Page::default()).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn agy_tui_resume_replay_rechecks_the_saved_conversation_with_native_options() {
     use std::os::unix::fs::DirBuilderExt;
 

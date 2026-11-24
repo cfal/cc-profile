@@ -135,7 +135,9 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
             return Ok((path, None));
         }
         let valid_decision = match i.intent {
-            Intent::New | Intent::Print(_) => RoutingMode::parse(&plan.decision).is_some(),
+            Intent::New | Intent::ClaudeStreamNew(_) | Intent::Print(_) => {
+                RoutingMode::parse(&plan.decision).is_some()
+            }
             Intent::Resume(_) => plan.decision == "sticky",
             Intent::Misc => plan.decision == DEFAULT_ACCOUNT_DECISION,
         };

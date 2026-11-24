@@ -5,6 +5,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Intent {
     New,
+    ClaudeStreamNew(String),
     Print(Vec<String>),
     Resume(String),
     Misc,
@@ -12,14 +13,14 @@ pub enum Intent {
 impl Intent {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::New => "new",
+            Self::New | Self::ClaudeStreamNew(_) => "new",
             Self::Print(_) => "print",
             Self::Resume(_) => "resume",
             Self::Misc => "misc",
         }
     }
     pub fn rotates(&self) -> bool {
-        matches!(self, Self::New | Self::Print(_))
+        matches!(self, Self::New | Self::ClaudeStreamNew(_) | Self::Print(_))
     }
     pub fn argv<'a>(&'a self, original: &'a [String]) -> &'a [String] {
         match self {
@@ -28,7 +29,7 @@ impl Intent {
         }
     }
     pub fn id(&self) -> Option<&str> {
-        if let Self::Resume(id) = self {
+        if let Self::Resume(id) | Self::ClaudeStreamNew(id) = self {
             Some(id)
         } else {
             None
@@ -128,6 +129,11 @@ fn claude_command(word: &str) -> bool {
             | "update"
             | "upgrade"
     )
+}
+fn compact_window(s: &str) -> bool {
+    s.strip_suffix('k')
+        .and_then(|v| v.parse::<u16>().ok())
+        .is_some_and(|n| (100..=1000).contains(&n) && s == format!("{n}k"))
 }
 fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
     let invalid = || {
@@ -307,10 +313,16 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     let mut words = Vec::new();
     let mut cd = false;
     let mut tail = false;
-    let mut resume = None;
+    let mut claude_selector = None;
+    let mut canonical_selector = true;
+    let (mut input_format, mut output_format) = (None, None);
+    let mut repeated_format = false;
+    let mut replay_user = false;
+    let mut permission_stdio = false;
     let mut help = false;
     let mut print_mode = false;
     let mut no_persistence = false;
+    let mut autocompact = false;
     let mut ephemeral = false;
     let mut exec_config = false;
     let mut tui_only = false;
@@ -344,11 +356,18 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
             {
                 help = true
             }
-            (true, "-r" | "--resume") => {
-                if resume.is_some() {
+            (true, "-r" | "--resume" | "--session-id") => {
+                if claude_selector.is_some() {
                     return Err(unsupported());
                 }
-                resume = Some(native_id(value().unwrap_or(""))?);
+                let raw = value().unwrap_or("");
+                let id = native_id(raw)?;
+                canonical_selector = raw == id;
+                claude_selector = Some(if key == "--session-id" {
+                    Intent::ClaudeStreamNew(id)
+                } else {
+                    Intent::Resume(id)
+                });
             }
             (false, "-C" | "--cd") => {
                 let s = value()?;
@@ -439,14 +458,30 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     return Err(unsupported());
                 }
             }
+            (true, "--input-format" | "--output-format") => {
+                let v = value()?;
+                if v.starts_with('-') && inline.is_none() {
+                    return Err(unsupported());
+                }
+                let slot = if key == "--input-format" {
+                    &mut input_format
+                } else {
+                    &mut output_format
+                };
+                repeated_format |= slot.replace(v).is_some();
+            }
+            (true, "--replay-user-messages") if inline.is_none() && !replay_user => {
+                replay_user = true
+            }
+            (true, "--permission-prompt-tool") if !permission_stdio && value()? == "stdio" => {
+                permission_stdio = true
+            }
             (
                 true,
                 "--model"
                 | "-n"
                 | "--name"
                 | "--effort"
-                | "--output-format"
-                | "--input-format"
                 | "--max-turns"
                 | "--max-budget-usd"
                 | "--permission-mode"
@@ -473,6 +508,9 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                 }
             }
             (true, "-p" | "--print") if inline.is_none() => print_mode = true,
+            (true, "--autocompact") if !autocompact && compact_window(value()?) => {
+                autocompact = true
+            }
             (true, "--no-session-persistence") if inline.is_none() => no_persistence = true,
             (false, "--ephemeral")
                 if inline.is_none()
@@ -554,19 +592,37 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     ) {
         return Err(unsupported());
     }
+    let duplex = print_mode
+        && !repeated_format
+        && input_format == Some("stream-json")
+        && output_format == Some("stream-json");
+    // Only bidirectional print on stdin may allocate a caller-selected ID.
+    // An argv prompt alone (including a selector after "--") never does.
+    let allocating = matches!(claude_selector, Some(Intent::ClaudeStreamNew(_)));
+    if (allocating || replay_user || permission_stdio) && (!duplex || help)
+        || allocating && words.iter().any(|(word, _)| !word.is_empty())
+    {
+        return Err(unsupported());
+    }
+    if duplex && !canonical_selector {
+        return Err(Error::bad(
+            "exact_id_required",
+            "Use a canonical lowercase Claude session UUID.",
+        ));
+    }
     let mut intent = if help {
         Intent::Misc
     } else if claude {
         match command {
-            Some("doctor" | "auth") if resume.is_none() => Intent::Misc,
+            Some("doctor" | "auth") if claude_selector.is_none() => Intent::Misc,
             Some("mcp")
-                if resume.is_none()
+                if claude_selector.is_none()
                     && matches!(sub, Some("list" | "get" | "add" | "add-json" | "remove")) =>
             {
                 Intent::Misc
             }
             Some(word) if claude_command(word) => return Err(unsupported()),
-            _ if words.len() <= 1 => resume.map(Intent::Resume).unwrap_or(Intent::New),
+            _ if words.len() <= 1 => claude_selector.unwrap_or(Intent::New),
             _ => return Err(unsupported()),
         }
     } else {
@@ -605,7 +661,9 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
         }
     };
     if claude {
-        if no_persistence && (!print_mode || intent != Intent::New) {
+        if no_persistence && (!print_mode || intent != Intent::New)
+            || autocompact && (!print_mode || intent == Intent::Misc)
+        {
             return Err(unsupported());
         }
         if print_mode && intent == Intent::New {
@@ -640,6 +698,104 @@ mod tests {
     }
     fn print(args: &[&str]) -> Intent {
         Intent::Print(args.iter().map(|s| s.to_string()).collect())
+    }
+    #[test]
+    fn claude_caller_ids_require_the_durable_stdio_protocol() {
+        let id = "9e230000-0000-4000-8000-000000000001";
+        let selector = format!("--session-id={id}");
+        let args = vec![
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--replay-user-messages",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--model",
+            "sonnet[1m]",
+            "--autocompact",
+            "200k",
+            "--dangerously-skip-permissions",
+            "--permission-prompt-tool",
+            "stdio",
+            "--append-system-prompt",
+            "test guidance",
+            "--effort",
+            "high",
+            &selector,
+            "-p",
+            "",
+        ];
+        assert_eq!(
+            parse("claude", &args).unwrap().intent,
+            Intent::ClaudeStreamNew(id.into())
+        );
+        let io = [
+            "--output-format=stream-json",
+            "-p",
+            "--input-format=stream-json",
+        ];
+        let reordered = [
+            "--session-id",
+            id,
+            "--permission-prompt-tool=stdio",
+            "--permission-mode=plan",
+            io[0],
+            io[1],
+            io[2],
+        ];
+        assert_eq!(
+            parse("claude", &reordered).unwrap().intent,
+            Intent::ClaudeStreamNew(id.into())
+        );
+        for prompt in ["--session-id", &selector] {
+            let literal = [io[0], io[1], io[2], "--", prompt];
+            assert_eq!(
+                parse("claude", &literal).unwrap().intent,
+                print(&[&["--no-session-persistence"][..], &literal].concat())
+            );
+        }
+        assert_eq!(
+            parse(
+                "claude",
+                &[io[0], "-p", io[2], "--append-system-prompt", "auth"]
+            )
+            .unwrap()
+            .intent
+            .name(),
+            "print"
+        );
+        for (from, to) in [
+            ("--replay-user-messages", "--no-session-persistence"),
+            ("--input-format", "--output-format"),
+            ("stream-json", "text"),
+            ("200k", "--resume"),
+            ("stdio", "other"),
+            ("test guidance", "--settings"),
+            (
+                &selector,
+                "--session-id=9E230000-0000-4000-8000-000000000001",
+            ),
+            (&selector, "--session-id=9e230000000040008000000000000001"),
+            (&selector, "--continue"),
+            ("", "ordinary one-shot"),
+        ] {
+            let mut bad = args.clone();
+            *bad.iter_mut().find(|s| **s == from).unwrap() = to;
+            assert!(parse("claude", &bad).is_err(), "{from}: {to}");
+        }
+        for extra in [
+            &selector[..],
+            "--resume=9e230000-0000-4000-8000-000000000001",
+            "--no-session-persistence",
+            "--settings=untrusted",
+            "--fork-session",
+        ] {
+            let mut bad = args.clone();
+            bad.insert(bad.len() - 3, extra);
+            assert!(parse("claude", &bad).is_err());
+        }
+        assert!(parse("claude", &["--print", &selector, "-p", ""]).is_err());
     }
     #[test]
     fn print_switches_preserve_option_arity_and_literal_prompts() {

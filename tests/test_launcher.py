@@ -219,6 +219,16 @@ sys.exit(17)
                 self.assertEqual((p.returncode, p.stdout), (1, ""))
                 self.assertIn("Invalid launch plan", p.stderr)
 
+    def test_claude_stream_plan_must_keep_the_id_persistence_and_decision(self):
+        args = ["--session-id=93000000-0000-4000-8000-000000000001", "--input-format=stream-json",
+                "-p", "--output-format=stream-json"]
+        for changes in [{"argv": args[1:]}, {"argv": ["--no-session-persistence", *args]},
+                        {"decision": "sticky"}]:
+            self.respond = lambda path, req: (200, dict(self.plan(req), decision="round_robin") | changes)
+            p = self.run_ccp("claude", *args)
+            self.assertEqual((p.returncode, p.stdout), (1, ""))
+            self.assertIn("Invalid launch plan", p.stderr)
+
     def test_denial_sends_override_names_not_values_and_does_not_retry(self):
         self.respond=lambda path,r:(409,{"message":"owner disabled"})
         for args, key in [(("claude","--resume","id"),"ANTHROPIC_API_KEY"), (("codex",),"CODEX_ACCESS_TOKEN"),
