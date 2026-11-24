@@ -42,6 +42,21 @@ const ready = {
   path_missing: "Directory missing or replaced",
   unsupported_build: "Native executable unavailable or mismatched",
 };
+const routingModes = {
+  earliest_expiry_most_remaining: "Earliest expiry, most quota remaining",
+  earliest_expiry_least_remaining: "Earliest expiry, least quota remaining",
+  most_remaining: "Most quota remaining",
+  least_remaining: "Least quota remaining",
+  round_robin: "Round robin",
+  priority: "Highest priority",
+};
+const decisionLabels = {
+  ...routingModes,
+  earliest_expiry: "Earliest expiry (previous mode)",
+  current: "Default account",
+  no_current: "No default account",
+  current_missing: "Default account directory missing or replaced",
+};
 const quotaStates = {
   not_checked: "Not checked",
   sign_in_required: "Sign-in required",
@@ -293,10 +308,7 @@ async function loadRouting(container) {
   container.replaceChildren(text("Loading routing mode…"));
   try {
     const settings = await api("settings");
-    const mode = select([
-      ["most_remaining", "Most quota remaining"], ["least_remaining", "Least quota remaining"],
-      ["earliest_expiry", "Earliest expiry"], ["round_robin", "Round robin"], ["priority", "Highest priority"],
-    ], settings.routing_mode, {required: true});
+    const mode = select(Object.entries(routingModes), settings.routing_mode, {required: true});
     const save = el("button", {type: "submit"}, "Save routing mode");
     const error = el("p", {class: "error", role: "alert", hidden: true});
     container.replaceChildren(el("form", {onsubmit: async (e) => {
@@ -431,7 +443,7 @@ async function logs(view, params, ver, enter) {
           row.state
         ],
       ),
-      el("div", { class: "caption" }, simple(row.reason || "")),
+      el("div", { class: "caption" }, decisionLabels[row.reason] || simple(row.reason || "")),
     );
     let commands;
     if (sessions) {
@@ -964,30 +976,39 @@ let selectedIdentity;
 function identityView(c, login) {
   if (selectedIdentity?.id === c.id && selectedIdentity.revision === c.revision) return selectedIdentity;
   const summary = el("span", {class: "wrap", role: "status"}, "Checking sign-in…");
-  const button = ib("Refresh sign-in status", "refresh-cw", refresh);
+  const button = ib("Refresh sign-in status", "refresh-cw", () => refresh(c.tool === "agy"));
   const view = {id: c.id, tool: c.tool, revision: c.revision, node: el("div", {class: "row"}, summary, button),
     completed: login?.state === "completed" ? login.attempt : null, refresh};
   selectedIdentity = view;
   let seq = 0;
-  async function refresh() {
+  async function refresh(verifyCatalog = false) {
     const attempt = ++seq;
     button.disabled = true;
+    if (verifyCatalog) {
+      view.catalogChecked = true;
+      summary.textContent = "Checking catalog access…";
+    }
     try {
-      const v = await api("accounts/" + c.id + "/identity");
+      const endpoint = "accounts/" + c.id + "/identity";
+      const v = verifyCatalog ? await api(endpoint, "POST", {}) : await api(endpoint);
       if (selectedIdentity !== view || attempt !== seq) return;
       const labels = {signed_in: "Signed in", signed_out: "Not signed in",
-        saved_login: "Saved login found (validity not checked)", no_saved_login: "No saved login"};
-      summary.textContent = (labels[v.state] || "Sign-in status unavailable") + (v.email ? ": " + v.email : "");
+        saved_login: "Saved login found (validity not checked)", no_saved_login: "No saved login",
+        catalog_accessible: "Catalog accessible", sign_in_required: "Sign-in required"};
+      const fallback = verifyCatalog ? "Couldn’t verify catalog access" : "Sign-in status unavailable";
+      summary.textContent = (labels[v.state] || fallback) + (v.email ? ": " + v.email : "");
     } catch (err) {
       if (attempt === seq) summary.textContent = err.code === "busy"
-        ? "Other sign-in checks are running. Refresh to try again." : "Sign-in status unavailable";
+        ? "Other sign-in checks are running. Refresh to try again." :
+          verifyCatalog ? "Couldn’t verify catalog access" : "Sign-in status unavailable";
     } finally { if (attempt === seq) button.disabled = false; }
   }
   refresh();
   return view;
 }
 window.addEventListener("focus", () => {
-  if (selectedIdentity?.tool === "agy" && selectedIdentity.node.isConnected) selectedIdentity.refresh();
+  const view = selectedIdentity;
+  if (view?.tool === "agy" && view.node.isConnected && !view.catalogChecked) view.refresh();
 });
 function signInPanel(c, initial, supported) {
   const identity = identityView(c, initial);
@@ -1107,7 +1128,7 @@ async function accounts(params, ver, enter) {
           "span",
           { class: "row" },
           el("strong", {}, a.label),
-          a.current && pill("Current", "blue"),
+          a.current && pill("Default", "blue"),
           pill(a.enabled ? "Enabled" : "Disabled", a.enabled ? "green" : ""),
         ),
         windows.length > 0 && el("span", {class: "quota-bars"}, windows.map((w) =>
@@ -1133,7 +1154,7 @@ async function accounts(params, ver, enter) {
         !next &&
         c.current &&
         !confirm(
-          "Disable " + c.label + " and clear Current? Misc commands will need a new Current.",
+          "Disable " + c.label + " and clear it as the default account? Maintenance commands will need a new default.",
         )
       ) {
         enabled.checked = c.enabled;
@@ -1149,7 +1170,7 @@ async function accounts(params, ver, enter) {
         throw error;
       }
     });
-    const set = btn("Set current", async () => {
+    const set = btn("Set as default", async () => {
       await api("current/" + t, "PUT", { config_id: c.id });
       await render();
     });
@@ -1158,8 +1179,8 @@ async function accounts(params, ver, enter) {
       ? el(
           "div",
           { class: "row" },
-          pill("Current", "blue"),
-          ib("Clear current", "x", async () => {
+          pill("Default", "blue"),
+          ib("Clear default account", "x", async () => {
             await api("current/" + t, "PUT", { config_id: null });
             await render();
           }),

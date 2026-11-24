@@ -195,7 +195,7 @@ class Antigravity(unittest.TestCase):
         def models(*extra):
             return subprocess.run([alias,"models",*extra], stdin=subprocess.DEVNULL, text=True,
                                   capture_output=True, cwd=self.s.root, env=self.s.env, timeout=8)
-        self.assertIn("Set current", models().stderr)
+        self.assertIn("Set a default account", models().stderr)
         self.s.api("PUT", "current/agy", {"config_id":b["id"]})
         failed = models()
         self.assertEqual((failed.returncode, failed.stdout), (1, ""))

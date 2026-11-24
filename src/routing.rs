@@ -116,14 +116,17 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
                 )
             }
         }
-        "no_current" => Error::conflict("no_current", "Set current for this tool in Accounts."),
+        "no_current" => Error::conflict(
+            "no_current",
+            "Set a default account for this tool in Accounts.",
+        ),
         "login_profile" => Error::conflict(
             "login_profile",
             "This profile is missing, replaced, or belongs to another provider.",
         ),
         "current_missing" => Error::conflict(
             "current_missing",
-            "The Current config directory is missing or replaced. Restore it or set another Current in Accounts.",
+            "The default account directory is missing or replaced. Restore it or choose a different default account in Accounts.",
         ),
         "no_enabled_config" => Error::conflict(
             "no_enabled_config",
