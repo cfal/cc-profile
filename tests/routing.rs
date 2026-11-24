@@ -205,7 +205,7 @@ fn modes_skip_exhaustion_and_round_robin_among_equal_ranks() {
 }
 
 #[test]
-fn default_prefers_capacity_and_earliest_expiry_uses_any_positive_account_window() {
+fn split_expiry_prefers_the_earliest_window_then_capacity_then_rotation() {
     let f = Fixture::new();
     let exe = build();
     let ms = now();
@@ -231,9 +231,18 @@ fn default_prefers_capacity_and_earliest_expiry_uses_any_positive_account_window
         "spend_control":{"remaining_pct":10,"reset_at_ms":early-1}}),
         ms,
     );
+    let undated_roomy = add("undated-roomy", window(60.), ms);
     let roomy = add("roomy", json!({"windows":[w(5, late)]}), ms);
+    let scarce = add("scarce", json!({"windows":[w(99, late)]}), ms);
     let soon = add("soon", json!({"windows":[w(90, late+1), w(20, early)]}), ms);
-    let tied = add("tied", json!({"windows":[w(30, early)]}), ms);
+    let soon_capped = add(
+        "soon-capped",
+        json!({"windows":[w(5, early)],
+        "spend_control":{"remaining_pct":10}}),
+        ms,
+    );
+    let tied_a = add("tie-a", json!({"windows":[w(30, early)]}), ms);
+    let tied_b = add("tie-b", json!({"windows":[w(30, early)]}), ms);
     add(
         "capped",
         json!({"windows":[w(1, early-1)],"spend_control":{"reached":true}}),
@@ -257,22 +266,38 @@ fn default_prefers_capacity_and_earliest_expiry_uses_any_positive_account_window
         assert_eq!(p.decision, mode.name());
         p.config_id
     };
-    assert_eq!(pick(MostRemaining), roomy.id);
-    f.store.set_routing_mode(EarliestExpiry).unwrap();
-    for c in [&soon, &tied, &soon] {
-        assert_eq!(pick(EarliestExpiry), c.id);
+    let most = EarliestExpiryMostRemaining;
+    let least = EarliestExpiryLeastRemaining;
+    // Fresh default: both 70%-left profiles tie. The profile with 80% left
+    // in its earliest window is actually limited to 10% by its other window.
+    for c in [&tied_a, &tied_b, &tied_a] {
+        assert_eq!(pick(most), c.id);
     }
-    for c in [&roomy, &soon, &tied] {
+    f.store.set_routing_mode(least).unwrap();
+    for c in [&soon, &soon_capped, &soon] {
+        assert_eq!(pick(least), c.id);
+    }
+    f.store.set_routing_mode(MostRemaining).unwrap();
+    assert_eq!(pick(MostRemaining), roomy.id);
+    for c in [&roomy, &scarce, &soon, &soon_capped, &tied_a, &tied_b] {
         cache(&f, c, window(100.), ms);
     }
-    assert_eq!(pick(EarliestExpiry), undated.id);
-    cache(&f, &undated, window(100.), ms);
-    for c in [&stale, &cap_only, &unverified, &unknown, &stale] {
-        assert_eq!(pick(EarliestExpiry), c.id);
+    for (mode, c) in [(most, &undated_roomy), (least, &undated)] {
+        f.store.set_routing_mode(mode).unwrap();
+        assert_eq!(pick(mode), c.id);
+    }
+    for c in [&undated, &undated_roomy] {
+        cache(&f, c, window(100.), ms);
+    }
+    for mode in [most, least] {
+        f.store.set_routing_mode(mode).unwrap();
+        for c in [&stale, &cap_only, &unverified, &unknown] {
+            assert_eq!(pick(mode), c.id);
+        }
     }
     assert_eq!(
         f.store.page(false, &Page::default()).unwrap()["items"][0]["reason"],
-        "earliest_expiry"
+        least.name()
     );
     for mode in [MostRemaining, LeastRemaining] {
         f.store.set_routing_mode(mode).unwrap();
@@ -287,7 +312,9 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     let c = f.add("codex", "one");
     f.store.current("codex", Some(c.id)).unwrap();
     std::fs::write(c.home.join("auth.json"), "{}").unwrap();
-    f.store.set_routing_mode(EarliestExpiry).unwrap();
+    f.store
+        .set_routing_mode(EarliestExpiryLeastRemaining)
+        .unwrap();
     let print = req(
         &f,
         "codex",
@@ -296,7 +323,10 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     );
     let admission = admit(&f.store, &exe, &print).unwrap();
     assert!(admission.refresh_quota);
-    assert_eq!(admission.plan.unwrap().decision, "earliest_expiry");
+    assert_eq!(
+        admission.plan.unwrap().decision,
+        "earliest_expiry_least_remaining"
+    );
     assert!(!admit(&f.store, &exe, &print).unwrap().refresh_quota);
     assert!(
         observe(
@@ -365,7 +395,8 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         Priority,
         MostRemaining,
         LeastRemaining,
-        EarliestExpiry,
+        EarliestExpiryMostRemaining,
+        EarliestExpiryLeastRemaining,
     ] {
         f.store.set_routing_mode(mode).unwrap();
         let request = req(&f, "codex", &[], &exe);

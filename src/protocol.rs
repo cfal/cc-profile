@@ -12,7 +12,8 @@ pub enum RoutingMode {
     RoundRobin,
     MostRemaining,
     LeastRemaining,
-    EarliestExpiry,
+    EarliestExpiryMostRemaining,
+    EarliestExpiryLeastRemaining,
     Priority,
 }
 impl RoutingMode {
@@ -21,7 +22,8 @@ impl RoutingMode {
             Self::RoundRobin => "round_robin",
             Self::MostRemaining => "most_remaining",
             Self::LeastRemaining => "least_remaining",
-            Self::EarliestExpiry => "earliest_expiry",
+            Self::EarliestExpiryMostRemaining => "earliest_expiry_most_remaining",
+            Self::EarliestExpiryLeastRemaining => "earliest_expiry_least_remaining",
             Self::Priority => "priority",
         }
     }
@@ -30,7 +32,8 @@ impl RoutingMode {
             Self::RoundRobin,
             Self::MostRemaining,
             Self::LeastRemaining,
-            Self::EarliestExpiry,
+            Self::EarliestExpiryMostRemaining,
+            Self::EarliestExpiryLeastRemaining,
             Self::Priority,
         ]
         .into_iter()
@@ -39,7 +42,10 @@ impl RoutingMode {
     pub fn uses_remaining(self) -> bool {
         matches!(
             self,
-            Self::MostRemaining | Self::LeastRemaining | Self::EarliestExpiry
+            Self::MostRemaining
+                | Self::LeastRemaining
+                | Self::EarliestExpiryMostRemaining
+                | Self::EarliestExpiryLeastRemaining
         )
     }
 }

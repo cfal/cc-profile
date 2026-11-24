@@ -96,6 +96,8 @@ if sys.argv[1:2] == ["app-server"]:
             assert r["params"] == {"excludeResetCreditDetails":True}
             with (home / "quota-count").open("a") as f: f.write("fetch\n")
             result = {"rateLimits": {"planType":"pro", "primary":{"windowDurationMins":300,"usedPercent":100 if (home/"empty-quota").exists() else 0,"resetsAt":2000000000}}}
+            if (home/"fixture-windows.json").exists():
+                result["rateLimits"] = json.loads((home/"fixture-windows.json").read_text())
             result["rateLimitResetCredits"] = {"availableCount":2,"credits":None}
             if (home/"hold-old-quota").exists() and not (home/"held-old-pid").exists():
                 import time
@@ -656,6 +658,7 @@ class Service(unittest.TestCase):
                 db.execute(f"ALTER TABLE tools ADD COLUMN {name} TEXT")
             db.execute("UPDATE tools SET cursor=?,link_root=?,outer_path=?,projected=? WHERE tool='codex'",
                        (first["id"], str(root), str(outer), str(entry.relative_to(provider))))
+            db.execute("UPDATE settings SET routing_mode='round_robin'")
             db.execute("PRAGMA user_version=8")
         self.start()
         self.session = self.api("POST","login",{"password":self.password})[1]["session"]
@@ -672,11 +675,11 @@ class Service(unittest.TestCase):
     def test_routing_settings_and_account_priorities_survive_restart(self):
         for method in ["GET", "PUT"]:
             self.assertEqual(self.api(method,"settings",{"routing_mode":"priority"},{"X-CCP-Session":""})[0],403)
-        self.assertEqual(self.api("GET","settings")[:2],(200,{"routing_mode":"most_remaining"}))
-        for mode in ["most_remaining","least_remaining","earliest_expiry","round_robin","priority"]:
+        self.assertEqual(self.api("GET","settings")[:2],(200,{"routing_mode":"earliest_expiry_most_remaining"}))
+        for mode in ["most_remaining","least_remaining","earliest_expiry_most_remaining","earliest_expiry_least_remaining","round_robin","priority"]:
             body = {"routing_mode":mode}
             self.assertEqual(self.api("PUT","settings",body)[:2],(200,body))
-        for body in [{},{"routing_mode":None},{"routing_mode":"invalid"}]:
+        for body in [{},{"routing_mode":None},{"routing_mode":"invalid"},{"routing_mode":"earliest_expiry"}]:
             self.assertEqual(self.api("PUT","settings",body)[0],400)
         first = self.account("codex","first")
         self.assertEqual(first["priority"],0)
@@ -714,15 +717,41 @@ class Service(unittest.TestCase):
                 if (codex/"held-old-pid").exists(): break
                 time.sleep(.02)
             self.assertTrue((codex/"held-old-pid").exists())
-            self.assertEqual(self.api("PUT","settings",{"routing_mode":"earliest_expiry"})[0],200)
+            self.assertEqual(self.api("PUT","settings",{"routing_mode":"earliest_expiry_least_remaining"})[0],200)
             p = self.cli("codex","app-server")
             self.assertEqual(p.returncode,0,p.stderr)
-            self.assertEqual(self.api("GET","startups?tool=codex")[1]["items"][0]["reason"],"earliest_expiry")
+            self.assertEqual(self.api("GET","startups?tool=codex")[1]["items"][0]["reason"],"earliest_expiry_least_remaining")
             self.assertFalse((claude/"quota-count").exists())
             q = self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
             self.assertEqual(q,{"loading":False,"status":"not_checked"})
         finally:
             (codex/"hold-old-quota").unlink()
+
+    def test_split_expiry_settings_choose_different_codex_profiles_on_launch(self):
+        early = int(time.time()) + 600
+        profiles = []
+        for label, used, reset in [("late", 0, early+300), ("soon-low", 80, early), ("soon-high", 10, early)]:
+            c = self.account("codex",label)
+            profiles.append(c)
+            home = Path(c["home"])
+            (home/"auth.json").write_text("{}")
+            (home/"fixture-windows.json").write_text(json.dumps({"primary":{"usedPercent":used,"resetsAt":reset}}))
+        self.assertEqual(self.api("POST","quota/refresh",{})[1]["queued"],3)
+        for _ in range(200):
+            rows = self.api("GET","accounts?tool=codex")[1]["items"]
+            if all(r["quota"]["status"]=="fresh" for r in rows): break
+            time.sleep(.02)
+        else: self.fail("fixture windows did not load")
+        most, least = "earliest_expiry_most_remaining", "earliest_expiry_least_remaining"
+        self.assertEqual(self.api("GET","settings")[1]["routing_mode"],most)
+        for mode, profile in [(most, profiles[2]), (least, profiles[1])]:
+            if mode == least:
+                self.assertEqual(self.api("PUT","settings",{"routing_mode":mode})[:2], (200,{"routing_mode":mode}))
+            p = self.cli("codex","exec","--ephemeral","fixture")
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertEqual(json.loads(p.stdout)["home"], profile["home"])
+            row = self.api("GET","startups?tool=codex")[1]["items"][0]
+            self.assertEqual((row["reason"],row["config_id"]),(mode,profile["id"]))
 
     def test_native_claude_usage_is_display_only_in_all_routing_modes(self):
         profiles = [Path(self.account("claude", n)["home"]) for n in ("full", "empty")]
@@ -736,7 +765,7 @@ class Service(unittest.TestCase):
             if all(r["quota"]["status"]=="fresh" for r in rows): break
             time.sleep(.02)
         self.assertEqual([r["quota"]["snapshot"]["windows"][0]["used_pct"] for r in rows],[0,100])
-        for mode in ["most_remaining","least_remaining","earliest_expiry","round_robin","priority"]:
+        for mode in ["most_remaining","least_remaining","earliest_expiry_most_remaining","earliest_expiry_least_remaining","round_robin","priority"]:
             self.assertEqual(self.api("PUT","settings",{"routing_mode":mode})[0],200)
             for home in profiles:
                 self.assertEqual(Path(json.loads(self.cli("claude","chat").stdout)["home"]),home)

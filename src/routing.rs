@@ -244,24 +244,31 @@ fn choose(
                         return None;
                     }
                     // Lower sorts first. Unknown is behind any measured nonzero score.
-                    let (rank, reset) = match mode {
-                        RoutingMode::RoundRobin => (0., Unknown),
-                        RoutingMode::Priority => (-(c.priority as f64), Unknown),
+                    let (expiry, rank) = match mode {
+                        RoutingMode::RoundRobin => (Unknown, 0.),
+                        RoutingMode::Priority => (Unknown, -(c.priority as f64)),
                         RoutingMode::MostRemaining => {
-                            (remaining.map(|r| -r).unwrap_or(f64::INFINITY), Unknown)
+                            (Unknown, remaining.map(|r| -r).unwrap_or(f64::INFINITY))
                         }
                         RoutingMode::LeastRemaining => {
-                            (remaining.unwrap_or(f64::INFINITY), Unknown)
+                            (Unknown, remaining.unwrap_or(f64::INFINITY))
                         }
-                        RoutingMode::EarliestExpiry => {
-                            (0., allowance.map_or(Unknown, |q| q.expiry))
+                        RoutingMode::EarliestExpiryMostRemaining
+                        | RoutingMode::EarliestExpiryLeastRemaining => {
+                            match allowance.filter(|q| q.expiry != Unknown) {
+                                Some(q) if mode == RoutingMode::EarliestExpiryMostRemaining => {
+                                    (q.expiry, -q.remaining)
+                                }
+                                Some(q) => (q.expiry, q.remaining),
+                                None => (Unknown, 0.),
+                            }
                         }
                     };
-                    Some((c, rank, reset))
+                    Some((c, expiry, rank))
                 })
-                .min_by(|(a, x, ta), (b, y, tb)| {
-                    x.total_cmp(y)
-                        .then_with(|| ta.cmp(tb))
+                .min_by(|(a, ta, x), (b, tb, y)| {
+                    ta.cmp(tb)
+                        .then_with(|| x.total_cmp(y))
                         .then_with(|| (a.id <= cursor, a.id).cmp(&(b.id <= cursor, b.id)))
                 });
             Ok(match next {

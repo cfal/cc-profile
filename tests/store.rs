@@ -145,7 +145,8 @@ fn discovery_upgrade_preserves_verified_evidence_workspaces_and_sequence() {
         let db = f.store.db().unwrap();
         db.execute_batch(include_str!("../src/saved_file_sessions.sql"))
             .unwrap();
-        db.execute_batch("ALTER TABLE sessions ADD COLUMN tui_workspace TEXT;
+        db.execute_batch("UPDATE settings SET routing_mode='round_robin';
+            ALTER TABLE sessions ADD COLUMN tui_workspace TEXT;
             INSERT INTO configs(id,tool,label,home,dev,ino,birth_ns) VALUES(42,'agy','old','/offline',1,2,3);
             INSERT INTO sessions(tool,native_id,owner,evidence,workspace,tui_workspace,bound_ms,last_routed_ms)
             VALUES('agy','dual',42,'observed','/acp','/tui',7,8),('agy','file',42,'saved_file','/first','/last',9,10);
@@ -181,7 +182,7 @@ fn reset_offers_upgrade_without_touching_profiles_and_keep_uncertain_attempts() 
     f.store
         .db()
         .unwrap()
-        .execute_batch("DROP TABLE reset_grants; PRAGMA user_version=11")
+        .execute_batch("UPDATE settings SET routing_mode='round_robin'; DROP TABLE reset_grants; PRAGMA user_version=11")
         .unwrap();
     let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     let db = upgraded.db().unwrap();
@@ -373,7 +374,7 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     assert_eq!(c.priority, 0);
     assert_eq!(
         ccpd::store::routing_mode(&db).unwrap().name(),
-        "most_remaining"
+        "earliest_expiry_most_remaining"
     );
     assert_eq!(c.proxy_url.as_deref(), Some("http://saved:3128/"));
     assert!(
@@ -414,7 +415,7 @@ fn upgrading_an_old_tui_startup_does_not_create_a_mapping() {
         "INSERT INTO configs(id,tool,label,home,dev,ino,birth_ns) VALUES(42,'agy','old','/offline',1,2,3);
          INSERT INTO launches(request_id,tool,intent,state,reason,native_id,config_id,workspace,digest,ticket_digest,created_ms)
            VALUES('old','agy','tui_resume','routed','sticky','legacy-id',42,'/work',x'01',x'01',1);
-         PRAGMA user_version=9;",
+         UPDATE settings SET routing_mode='round_robin'; PRAGMA user_version=9;",
     ).unwrap();
     let upgraded = ccpd::store::Store::open(&f.root.join("state/router.sqlite3")).unwrap();
     assert_eq!(
@@ -585,7 +586,7 @@ fn admission_settings_and_priority_are_constrained_in_sql() {
 }
 
 #[test]
-fn v13_keeps_each_stored_routing_mode_and_accepts_earliest_expiry_after_upgrade() {
+fn v13_keeps_each_stored_routing_mode_and_accepts_split_expiry_after_upgrade() {
     use ccpd::{
         protocol::RoutingMode::*,
         store::{Store, routing_mode},
@@ -604,11 +605,54 @@ fn v13_keeps_each_stored_routing_mode_and_accepts_earliest_expiry_after_upgrade(
         }
         let upgraded = Store::open(&path).unwrap();
         assert_eq!(routing_mode(&upgraded.db().unwrap()).unwrap(), choice);
-        upgraded.set_routing_mode(EarliestExpiry).unwrap();
+        upgraded
+            .set_routing_mode(EarliestExpiryLeastRemaining)
+            .unwrap();
         drop(upgraded);
         assert_eq!(
             routing_mode(&Store::open(&path).unwrap().db().unwrap()).unwrap(),
-            EarliestExpiry
+            EarliestExpiryLeastRemaining
+        );
+    }
+}
+
+#[test]
+fn v17_maps_only_the_active_legacy_expiry_or_missing_setting_not_old_launches() {
+    use ccpd::store::{Store, routing_mode};
+    for old in [None, Some("earliest_expiry")] {
+        let f = Fixture::new();
+        let path = f.root.join("state/router.sqlite3");
+        {
+            let db = f.store.db().unwrap();
+            db.execute("DELETE FROM settings", []).unwrap();
+            db.execute_batch(include_str!("../src/earliest_expiry.sql"))
+                .unwrap();
+            if let Some(old) = old {
+                db.execute("INSERT INTO settings VALUES(1,?)", [old])
+                    .unwrap();
+            }
+            db.execute_batch("INSERT INTO launches(request_id,tool,intent,state,reason,workspace,digest,ticket_digest,created_ms)
+                VALUES('old','codex','new','routed','earliest_expiry','/ws',x'01',x'01',1);
+                PRAGMA user_version=16;").unwrap();
+        }
+        let upgraded = Store::open(&path).unwrap();
+        let db = upgraded.db().unwrap();
+        assert_eq!(
+            routing_mode(&db).unwrap().name(),
+            "earliest_expiry_most_remaining"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT reason FROM launches WHERE request_id='old'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "earliest_expiry"
+        );
+        assert!(
+            db.execute("UPDATE settings SET routing_mode='earliest_expiry'", [])
+                .is_err()
         );
     }
 }
