@@ -1,6 +1,6 @@
 # cc-profile
 
-`ccp` starts Claude Code, Codex, or Antigravity with a config chosen by a local router. By default, new launches prefer the eligible profile with the most verified quota remaining. When no profile has an account-wide reading the router can trust, it rotates among eligible profiles. Resuming a tracked session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
+`ccp` starts Claude Code, Codex, or Antigravity with a config chosen by a local router. By default, new Codex launches prefer the account whose usable quota resets soonest, then the one with the most quota left. Without verified account-wide quota, the router rotates among eligible profiles. Resuming a tracked session ID uses its original config or fails. Administrative changes, startup decisions, session mappings, proxies, and quota live in the web panel; the launcher never edits profiles.
 
 ## Install
 
