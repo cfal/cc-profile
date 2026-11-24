@@ -203,6 +203,31 @@ class Service(unittest.TestCase):
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, cwd=self.root,
                               timeout=30 if getattr(self,"native",False) else 8)
 
+    def test_default_account_messages_preserve_api_and_history_codes(self):
+        profile = self.account("claude", "work")
+        route = "current/claude"
+
+        def maintenance():
+            return self.cli("claude", "auth", "status")
+
+        denied = maintenance()
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("Set a default account", denied.stderr)
+        self.assertEqual(self.api("PUT", route, {"config_id": profile["id"]})[:2], (200, {}))
+        self.assertTrue(self.api("GET", "accounts?tool=claude")[1]["items"][0]["current"])
+        self.assertEqual(maintenance().returncode, 0)
+        Path(profile["home"]).rename(self.root / "moved")
+        missing = maintenance()
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("default account directory", missing.stderr)
+        status, error, _ = self.api("PUT", route, {"config_id": profile["id"]})
+        self.assertEqual((status, error["error"]), (409, "not_eligible"))
+        self.assertIn("default account", error["message"])
+        self.assertEqual(self.api("PUT", route, {"config_id": None})[:2], (200, {}))
+        self.assertFalse(self.api("GET", "accounts?tool=claude")[1]["items"][0]["current"])
+        rows = self.api("GET", "startups?tool=claude")[1]["items"]
+        self.assertEqual([r["reason"] for r in rows], ["current_missing", "current", "no_current"])
+
     def test_provider_aliases_route_with_distinct_daemon_and_shell_paths(self):
         for tool in ("codex", "claude"):
             c = self.account(tool, tool + "-work")

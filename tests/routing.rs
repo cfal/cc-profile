@@ -310,7 +310,7 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
     let f = Fixture::new();
     let exe = build();
     let c = f.add("codex", "one");
-    f.store.current("codex", Some(c.id)).unwrap();
+    f.store.set_default_account("codex", Some(c.id)).unwrap();
     std::fs::write(c.home.join("auth.json"), "{}").unwrap();
     f.store
         .set_routing_mode(EarliestExpiryLeastRemaining)
@@ -616,7 +616,9 @@ fn login_plan_targets_only_the_named_claude_profile_even_on_retry() {
     let f = Fixture::new();
     let exe = build();
     let work = f.add("claude", "work");
-    f.store.current("claude", Some(work.id)).unwrap();
+    f.store
+        .set_default_account("claude", Some(work.id))
+        .unwrap();
     let other = f.add("codex", "other");
     let personal = f.add("claude", "personal");
     f.store
@@ -637,7 +639,7 @@ fn login_plan_targets_only_the_named_claude_profile_even_on_retry() {
     r.argv = vec!["chat".into()];
     assert_eq!(launch(&f.store, &exe, &r).unwrap_err().1, "bad_request");
     let db = f.store.db().unwrap();
-    assert!(config(&db, work.id).unwrap().current);
+    assert!(config(&db, work.id).unwrap().is_default_account);
     assert_eq!(
         db.query_row("SELECT count(*) FROM sessions", [], |r| r.get::<_, i64>(0))
             .unwrap(),
@@ -689,7 +691,7 @@ fn retries_disabled_resumes_and_redacted_log() {
         "request_conflict"
     );
     let id = p.argv[1].as_str();
-    f.store.current("claude", Some(b.id)).unwrap();
+    f.store.set_default_account("claude", Some(b.id)).unwrap();
     let r = req(&f, "claude", &["--resume", id], &exe);
     assert_eq!(launch(&f.store, &exe, &r).unwrap().config_id, a.id);
     f.store
@@ -916,7 +918,7 @@ fn a_second_config_observing_an_owned_uuid_is_always_a_conflict() {
 }
 
 #[test]
-fn a_replaced_current_home_is_not_an_unset_current_or_a_new_registration() {
+fn a_replaced_default_account_directory_is_not_an_unset_default_or_a_new_registration() {
     let f = Fixture::new();
     let exe = build();
     let c = f.add("claude", "original");
@@ -926,7 +928,7 @@ fn a_replaced_current_home_is_not_an_unset_current_or_a_new_registration() {
             .1,
         "no_current"
     );
-    f.store.current("claude", Some(c.id)).unwrap();
+    f.store.set_default_account("claude", Some(c.id)).unwrap();
     std::fs::rename(&c.home, f.root.join("backup")).unwrap();
     std::fs::create_dir(&c.home).unwrap();
     let op = req(&f, "claude", &["auth", "status"], &exe);

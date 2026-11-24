@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub const VERSION: u8 = 3;
+// Keep this value compatible with existing launchers and startup history.
+pub const DEFAULT_ACCOUNT_DECISION: &str = "current";
 pub const ACP_LAUNCH: &str = "/v4/agy-acp/launch";
 pub const ACP_CHECK: &str = "/v4/agy-acp/check";
 pub const ACP_LIST: &str = "/v4/agy-acp/list";

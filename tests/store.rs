@@ -290,13 +290,13 @@ fn a_conflicting_legacy_pin_never_prevents_opening_the_router() {
 }
 
 #[test]
-fn current_is_per_provider_and_disable_does_not_elect_a_replacement() {
+fn default_account_is_per_provider_and_disable_does_not_elect_a_replacement() {
     let f = Fixture::new();
     let a = f.add("claude", "a");
     let b = f.add("claude", "b");
     let c = f.add("codex", "c");
-    f.store.current("claude", Some(a.id)).unwrap();
-    f.store.current("codex", Some(c.id)).unwrap();
+    f.store.set_default_account("claude", Some(a.id)).unwrap();
+    f.store.set_default_account("codex", Some(c.id)).unwrap();
     assert!(
         f.store
             .edit(a.id, &json!({"revision":a.revision,"enabled":false}))
@@ -308,9 +308,9 @@ fn current_is_per_provider_and_disable_does_not_elect_a_replacement() {
         .unwrap();
     let db = f.store.db().unwrap();
     for id in [a.id, b.id] {
-        assert!(!config(&db, id).unwrap().current);
+        assert!(!config(&db, id).unwrap().is_default_account);
     }
-    assert!(config(&db, c.id).unwrap().current);
+    assert!(config(&db, c.id).unwrap().is_default_account);
 }
 #[test]
 fn a_reused_inode_at_a_new_path_can_be_registered_without_inheriting_the_owner() {
@@ -369,7 +369,7 @@ fn adding_agy_preserves_existing_owners_cursors_and_quota_cache() {
     let upgraded = ccpd::store::Store::open(&path).unwrap();
     let db = upgraded.db().unwrap();
     let c = config(&db, 42).unwrap();
-    assert!(c.enabled && c.current);
+    assert!(c.enabled && c.is_default_account);
     assert_eq!(c.revision, 4);
     assert_eq!(c.priority, 0);
     assert_eq!(

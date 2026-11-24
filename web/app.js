@@ -1191,12 +1191,12 @@ async function accounts(params, ver, enter) {
         throw error;
       }
     });
-    const set = btn("Set as default", async () => {
+    const setDefault = btn("Set as default", async () => {
       await api("current/" + t, "PUT", { config_id: c.id });
       await render();
     });
-    set.disabled = !c.enabled;
-    const current = c.current
+    setDefault.disabled = !c.enabled;
+    const defaultAccountControl = c.current
       ? el(
           "div",
           { class: "row" },
@@ -1206,7 +1206,7 @@ async function accounts(params, ver, enter) {
             await render();
           }),
         )
-      : set;
+      : setDefault;
     detail.append(
       el(
         "div",
@@ -1226,7 +1226,7 @@ async function accounts(params, ver, enter) {
       el("dl", {class: "facts"},
         datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
         datum("Priority", c.priority ?? 0),
-        datum("Maintenance commands", current),
+        datum("Maintenance commands", defaultAccountControl),
         datum("Directory", code(c.home)),
         datum("Proxy", c.proxy_mode === "custom"
           ? c.proxy_url?.url

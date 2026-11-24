@@ -1,7 +1,7 @@
 use crate::{
     invocation::{Intent, Invocation, classify, native_id},
     native::{Build, env_patch, validate_binary},
-    protocol::{Plan, RoutingMode, VERSION, profile_login_args},
+    protocol::{DEFAULT_ACCOUNT_DECISION, Plan, RoutingMode, VERSION, profile_login_args},
     quota::{WindowExpiry::Unknown, cached_allowance},
     store::{Config, Store, config, configs, routing_mode},
     types::{Error, Result, now, tool},
@@ -371,9 +371,9 @@ fn choose(
         Intent::Misc => Ok(
             match configs(db, &req.tool)?
                 .into_iter()
-                .find(|c| c.current && c.enabled)
+                .find(|c| c.is_default_account && c.enabled)
             {
-                Some(c) if c.present() => Selection::Allow(c, "current"),
+                Some(c) if c.present() => Selection::Allow(c, DEFAULT_ACCOUNT_DECISION),
                 Some(c) => Selection::Refuse(Some(c), denial("current_missing", None, None)),
                 None => reject("no_current"),
             },

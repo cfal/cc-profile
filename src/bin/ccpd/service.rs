@@ -203,16 +203,16 @@ async fn set_settings(State(s): State<Shared>, Json(v): Json<Value>) -> Result<J
     .await
 }
 #[derive(Deserialize)]
-struct Selection {
+struct DefaultAccountSelection {
     config_id: Option<i64>,
 }
-async fn current(
+async fn set_default_account(
     State(s): State<Shared>,
     Path(tool): Path<String>,
-    Json(v): Json<Selection>,
+    Json(v): Json<DefaultAccountSelection>,
 ) -> Result<Json<Value>> {
     blocking(move || {
-        s.store.current(&tool, v.config_id)?;
+        s.store.set_default_account(&tool, v.config_id)?;
         Ok(Json(json!({})))
     })
     .await
@@ -287,7 +287,7 @@ pub fn web(s: Shared) -> Router {
             post(super::quotas::one),
         )
         .route("/api/v1/quota/refresh", post(super::quotas::bulk))
-        .route("/api/v1/current/{tool}", put(current))
+        .route("/api/v1/current/{tool}", put(set_default_account))
         .route(
             "/api/v1/sessions",
             get(

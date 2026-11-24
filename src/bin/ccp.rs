@@ -2,7 +2,9 @@ use ccpd::{
     invocation::{Intent, Invocation, classify},
     native::{PROXIES, native_executable, version_probe_reply},
     paths,
-    protocol::{Failure, Plan, Request, RoutingMode, VERSION, profile_login_args},
+    protocol::{
+        DEFAULT_ACCOUNT_DECISION, Failure, Plan, Request, RoutingMode, VERSION, profile_login_args,
+    },
     socket,
     types::{Error, Result},
 };
@@ -44,9 +46,9 @@ const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
   ccp usage <antigravity-profile-id>
 
 New chats follow the routing policy; exact resumes use their original config. No transfers,
-pickers or --last. Choose the default account for maintenance commands in the ccpd web panel
-(default http://127.0.0.1:8743). Set CC_PROFILE_RUNTIME_DIR to use the same
-custom socket directory as ccpd.";
+pickers or --last. Choose each provider's default account for maintenance commands in
+the ccpd web panel (default http://127.0.0.1:8743). Set CC_PROFILE_RUNTIME_DIR to use
+the same custom socket directory as ccpd.";
 const CLAUDE_OVERRIDES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -135,7 +137,7 @@ fn validate<'a>(plan: &'a Plan, req: &Request) -> Result<(&'a str, Option<Invoca
         let valid_decision = match i.intent {
             Intent::New | Intent::Print(_) => RoutingMode::parse(&plan.decision).is_some(),
             Intent::Resume(_) => plan.decision == "sticky",
-            Intent::Misc => plan.decision == "current",
+            Intent::Misc => plan.decision == DEFAULT_ACCOUNT_DECISION,
         };
         if plan.argv != i.intent.argv(&req.argv) || !valid_decision || plan.config_id <= 0 {
             return Err(invalid());

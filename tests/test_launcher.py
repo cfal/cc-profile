@@ -234,7 +234,7 @@ sys.exit(17)
                 self.assertNotIn(b"private-override",raw)
                 del self.env[key]
 
-    def test_profile_login_never_falls_back_to_current_or_an_unrelated_command(self):
+    def test_profile_login_never_falls_back_to_the_default_account_or_an_unrelated_command(self):
         for changes in [{"config_id": 8}, {"decision": "current"}, {"argv": ["chat"]}]:
             def respond(path, req):
                 if path == "/v2/profile-tool":

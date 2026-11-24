@@ -31,7 +31,7 @@ pub struct Config {
     pub ino: u64,
     birth_ns: Option<i64>,
     pub enabled: bool,
-    pub current: bool,
+    pub is_default_account: bool,
     pub priority: i64,
     pub revision: i64,
     pub mode: String,
@@ -48,7 +48,7 @@ fn row(r: &Row) -> rusqlite::Result<Config> {
         dev: r.get::<_, i64>(4)? as u64,
         ino: r.get::<_, i64>(5)? as u64,
         enabled: r.get(6)?,
-        current: r.get(7)?,
+        is_default_account: r.get(7)?,
         revision: r.get(8)?,
         mode: r.get(9)?,
         proxy_url: r.get(10)?,
@@ -87,7 +87,7 @@ impl Config {
                 .unwrap_or(Value::Null)
         }
         json!({"id":self.id,"tool":self.tool,"label":self.label,"home":self.home,"enabled":self.enabled,
-            "current":self.current,"priority":self.priority,"revision":self.revision,"present":self.present(),"proxy_mode":self.mode,
+            "current":self.is_default_account,"priority":self.priority,"revision":self.revision,"present":self.present(),"proxy_mode":self.mode,
             "proxy_url":redact(&self.proxy_url)})
     }
 }
@@ -481,11 +481,15 @@ impl Store {
             config(db,id)
         })
     }
-    pub fn current(&self, t: &str, id: Option<i64>) -> Result<()> {
+    pub fn set_default_account(&self, t: &str, id: Option<i64>) -> Result<()> {
         tool(t)?;
         self.write(|db|{
-            if let Some(id)=id {let c=config(db,id)?;
-                if c.tool!=t || !c.enabled || !c.present(){return Err(Error::conflict("not_eligible","Select an enabled, present config for this tool."))}
+            if let Some(id) = id {
+                let c = config(db, id)?;
+                if c.tool != t || !c.enabled || !c.present() {
+                    return Err(Error::conflict("not_eligible",
+                        "To set a default account, choose an enabled profile for this provider with its original directory available."));
+                }
             }
             db.execute("UPDATE configs SET current=0,revision=revision+1 WHERE tool=? AND current=1 AND id IS NOT ?",params![t,id])?;
             if let Some(id)=id {db.execute("UPDATE configs SET current=1,revision=revision+1 WHERE id=? AND current=0",[id])?;}

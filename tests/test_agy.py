@@ -188,7 +188,7 @@ class Antigravity(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(expected, result.stdout)
 
-    def test_model_discovery_requires_current_and_preserves_native_streams_and_rotation(self):
+    def test_model_discovery_requires_a_default_account_and_preserves_native_streams_and_rotation(self):
         a, b = self.profile("first"), self.profile("catalog")
         alias = self.s.root / "agy"
         alias.symlink_to(svc.LAUNCHER)
@@ -214,12 +214,12 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], a["id"])
 
     def test_active_identity_checks_only_selected_profile_without_routing(self):
-        current, disabled = self.profile("current"), self.profile("disabled", enable=False)
+        default_account, disabled = self.profile("default"), self.profile("disabled", enable=False)
         self.login_markers(disabled)
         endpoint = lambda c: f"accounts/{c['id']}/identity"
-        self.assertEqual(self.s.api("PUT","current/agy",{"config_id":current["id"]})[0],200)
+        self.assertEqual(self.s.api("PUT","current/agy",{"config_id":default_account["id"]})[0],200)
         self.s.api("GET","accounts?tool=agy")
-        for c, local in [(current,"no_saved_login"),(disabled,"saved_login")]:
+        for c, local in [(default_account,"no_saved_login"),(disabled,"saved_login")]:
             self.assertEqual(self.s.api("GET",endpoint(c))[:2], (200, {"state":local,"email":None}))
             self.s.cli("login", str(c["id"]), "--status")
             self.assertFalse((Path(c["home"])/"models-calls").exists())
@@ -230,12 +230,12 @@ class Antigravity(unittest.TestCase):
             self.assertEqual(self.s.api("POST",endpoint(disabled),{"args":["--other"]})[0],400)
             self.assertEqual(self.s.api("POST",endpoint(self.s.account("claude","not-agy")),{})[0],400)
             self.assertEqual(self.s.api("POST",endpoint(disabled),{})[:2], (200, {"state":"catalog_accessible","email":None}))
-            self.assertFalse((Path(current["home"])/"models-calls").exists())
-            self.assertEqual(self.s.api("POST",endpoint(current),{})[:2], (200, {"state":"sign_in_required","email":None}))
+            self.assertFalse((Path(default_account["home"])/"models-calls").exists())
+            self.assertEqual(self.s.api("POST",endpoint(default_account),{})[:2], (200, {"state":"sign_in_required","email":None}))
             self.assertEqual(cursor(db), before)
             self.assertEqual(self.s.api("GET","startups")[1]["items"], starts)
             self.assertEqual(self.s.api("GET","sessions")[1]["items"], [])
-        for c in (current, disabled):
+        for c in (default_account, disabled):
             home = Path(c["home"])
             self.assertEqual(len((home/"models-calls").read_text().splitlines()), 1)
             obs = json.loads((home/"last-run").read_text())
