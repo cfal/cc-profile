@@ -26,7 +26,13 @@ pub(super) fn incoming(name: &str, limit: usize) -> io::Result<Incoming> {
                 {
                     Ok(0) => break,
                     Ok(_) => {
+                        let drain = line.len() > limit && !line.ends_with(b"\n");
                         if tx.blocking_send(Ok(line)).is_err() {
+                            break;
+                        }
+                        // Report overflow immediately, but never deliver its tail as another frame.
+                        if drain && let Err(e) = reader.skip_until(b'\n') {
+                            let _ = tx.blocking_send(Err(e));
                             break;
                         }
                     }

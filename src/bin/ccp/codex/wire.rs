@@ -38,15 +38,22 @@ pub(super) async fn write(w: &mut (impl AsyncWrite + Unpin), line: &[u8]) -> Res
     w.flush().await?;
     Ok(())
 }
-pub(super) async fn read(r: &mut BufReader<ChildStdout>) -> Result<Option<Vec<u8>>> {
+pub(super) async fn prefix(r: &mut BufReader<ChildStdout>) -> Result<Option<Vec<u8>>> {
     let mut b = Vec::new();
     if r.take((LIMIT + 1) as u64).read_until(b'\n', &mut b).await? == 0 {
         return Ok(None);
     }
-    if b.len() > LIMIT || !b.ends_with(b"\n") {
+    if b.len() <= LIMIT && !b.ends_with(b"\n") {
         return Err(bad());
     }
     Ok(Some(b))
+}
+pub(super) async fn read(r: &mut BufReader<ChildStdout>) -> Result<Option<Vec<u8>>> {
+    let frame = prefix(r).await?;
+    if frame.as_ref().is_some_and(|b| b.len() > LIMIT) {
+        return Err(bad());
+    }
+    Ok(frame)
 }
 
 pub(super) struct Server {

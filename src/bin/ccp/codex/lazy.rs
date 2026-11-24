@@ -23,9 +23,13 @@ use uuid::Uuid;
 
 #[path = "browse.rs"]
 mod browse;
+#[path = "frames.rs"]
+mod frames;
+#[path = "pending.rs"]
+mod pending;
 #[path = "wire.rs"]
 mod wire;
-use wire::{Server, bad, bytes, error, read, value, write};
+use wire::{Server, bad, bytes, error, value, write};
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
@@ -252,47 +256,61 @@ impl Connection {
             mut input,
             mut output,
         } = server;
-        let starts = stdio::Starts::default();
-        let pending_lists = std::cell::RefCell::new(std::collections::HashSet::new());
+        let pending = std::cell::RefCell::new(pending::Requests::default());
         // Ephemeral threads have no durable owner. They can be read only on
         // the connection on which native Codex actually started them.
         let ephemeral = std::cell::RefCell::new(std::collections::HashSet::new());
         let reader = async {
-            while let Some(line) = read(&mut output).await? {
-                if !pending_lists.borrow().is_empty() {
-                    let reply = value(&line)?;
-                    let listed = reply.get("method").is_none()
-                        && reply
-                            .get("id")
-                            .is_some_and(|id| pending_lists.borrow_mut().remove(&id.to_string()));
-                    if listed
-                        && reply.get("error").is_none()
-                        && let Err(e) = self.confirm_page(&req, plan.config_id, &reply).await
-                    {
-                        send(out, &error(&reply["id"], &e.2)).await?;
-                        continue;
-                    }
+            while let Some(line) = frames::bound_output(&mut output, out, &pending).await? {
+                let msg: pending::Envelope = serde_json::from_slice(&line).map_err(|_| bad())?;
+                if msg.method.as_deref() == Some("thread/closed")
+                    && msg.id.is_null()
+                    && let Some(id) = value(&line)?["params"]["threadId"].as_str()
+                {
+                    ephemeral.borrow_mut().remove(id);
                 }
-                if let Some((event, thread)) = stdio::started(&line, &starts) {
-                    if thread.ephemeral {
-                        if ephemeral.borrow().len() < 1024 {
-                            ephemeral.borrow_mut().insert(thread.id);
+                let kind = if msg.method.is_none() {
+                    pending.borrow_mut().remove(&msg.id)
+                } else {
+                    None
+                };
+                match kind {
+                    Some(pending::Kind::List) => {
+                        let reply = value(&line)?;
+                        if reply.get("error").is_some() == reply.get("result").is_some() {
+                            return Err(bad());
                         }
-                    } else if report(&req, event, &thread).await.is_err() {
-                        let id = &value(&line)?["id"];
-                        send(out, &error(id, "Native Codex created a thread but CCP could not confirm its owner. Do not automatically retry.")).await?;
-                        continue;
+                        if reply.get("error").is_none()
+                            && let Err(e) = self.confirm_page(&req, plan.config_id, &reply).await
+                        {
+                            send(out, &error(&msg.id, &e.2)).await?;
+                            continue;
+                        }
                     }
+                    Some(pending::Kind::Claim { source, .. }) => {
+                        if let Some((event, thread)) = stdio::started_claim(&line, source) {
+                            if thread.ephemeral {
+                                if ephemeral.borrow().len() >= pending::CAP {
+                                    send(out, &error(&msg.id, pending::EPHEMERAL_FULL)).await?;
+                                    continue;
+                                }
+                                ephemeral.borrow_mut().insert(thread.id);
+                            } else if report(&req, event, &thread).await.is_err() {
+                                send(out, &error(&msg.id, "Native Codex created a thread but CCP could not confirm its owner. Do not automatically retry.")).await?;
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
                 write(&mut *out.lock().await, &line).await?;
             }
             Ok::<_, Error>(())
         };
         let writer = async {
-            stdio::track(&first, &starts, true);
+            pending.borrow_mut().admit(&value(&first)?, 0)?;
             write(&mut input, &first).await?;
-            while let Some(line) = rx.recv().await {
-                let mut line = line?;
+            while let Some(mut line) = frames::client(&mut rx, out).await? {
                 let mut call = value(&line)?;
                 if matches!(
                     call["method"].as_str(),
@@ -304,23 +322,8 @@ impl Connection {
                         .await
                         .is_err()
                     {
-                        send(out,&error(&call["id"],"This Codex profile changed or is unavailable. Open a new connection.")).await?;
+                        send(out,&error(pending::error_id(&call),"This Codex profile changed or is unavailable. Open a new connection.")).await?;
                         continue;
-                    }
-                }
-                if call.get("method").is_some()
-                    && let Some(id) = call.get("id")
-                {
-                    let key = id.to_string();
-                    if pending_lists.borrow().contains(&key) {
-                        return Err(bad());
-                    }
-                    if call["method"] == "thread/list" {
-                        if pending_lists.borrow().len() >= 1024 {
-                            send(out, &error(id, "Too many pending thread lists.")).await?;
-                            continue;
-                        }
-                        pending_lists.borrow_mut().insert(key);
                     }
                 }
                 match source(&mut call) {
@@ -336,17 +339,21 @@ impl Connection {
                     Ok(Some(id)) => match self.owner(&id).await {
                         Ok(owner) if owner == plan.config_id => line = bytes(&call)?,
                         _ => {
-                            send(out,&error(&call["id"],"Thread is not available on this connection. Open a new connection for its owner.")).await?;
+                            send(out,&error(pending::error_id(&call),"Thread is not available on this connection. Open a new connection for its owner.")).await?;
                             continue;
                         }
                     },
                     Err(e) => {
-                        send(out, &error(&call["id"], &e.2)).await?;
+                        send(out, &error(pending::error_id(&call), &e.2)).await?;
                         continue;
                     }
                     _ => {}
                 }
-                stdio::track(&line, &starts, true);
+                let admission = pending.borrow_mut().admit(&call, ephemeral.borrow().len());
+                if let Err(e) = admission {
+                    send(out, &error(pending::error_id(&call), &e.2)).await?;
+                    continue;
+                }
                 write(&mut input, &line).await?;
             }
             drop(input);
@@ -401,8 +408,8 @@ async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, 
     let mut rx = child::incoming("codex-stdin", wire::LIMIT)?;
     let mut conn: Option<Connection> = None;
     let mut browse = browse::Browse::default();
-    while let Some(line) = rx.recv().await {
-        let mut call = value(&line?)?;
+    while let Some(line) = frames::client(&mut rx, out).await? {
+        let mut call = value(&line)?;
         let id = call["id"].clone();
         let method = call["method"].as_str().ok_or_else(bad)?;
         if id.is_null() {
@@ -414,7 +421,7 @@ async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, 
             }
             continue;
         }
-        if !(id.is_i64() || id.as_str().is_some_and(|s| s.len() <= 256)) {
+        if !pending::valid_id(&id) {
             return Err(bad());
         }
         if method == "initialize" && conn.is_none() {

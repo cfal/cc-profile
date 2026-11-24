@@ -126,6 +126,9 @@ pub(super) fn started(line: &[u8], starts: &Starts) -> Option<(&'static str, Thr
         return None;
     }
     let source = starts.lock().unwrap().remove(&reply.id)?;
+    started_claim(line, source)
+}
+pub(super) fn started_claim(line: &[u8], source: Option<String>) -> Option<(&'static str, Thread)> {
     let thread = serde_json::from_slice::<Started>(line).ok()?.result.thread;
     if let Some(source) = source {
         return (thread.id == thread.session_id
