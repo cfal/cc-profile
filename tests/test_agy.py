@@ -199,7 +199,7 @@ class Antigravity(unittest.TestCase):
         self.s.api("PUT", "current/agy", {"config_id":b["id"]})
         failed = models()
         self.assertEqual((failed.returncode, failed.stdout), (1, ""))
-        self.assertEqual(failed.stderr, "Fetching available models...\nError: Please sign in to view available models.\n")
+        self.assertEqual(failed.stderr, "Fetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.\n")
         self.assertEqual(self.s.cli("login",str(b["id"])).returncode,0)
         result = models()
         self.assertEqual((result.returncode, result.stdout), (0, "fixture-model\tFixture Model\n"))
@@ -212,6 +212,130 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"], [])
         self.assertEqual(self.s.cli("agy").returncode, 0)
         self.assertEqual(self.s.api("GET","startups?tool=agy")[1]["items"][0]["config_id"], a["id"])
+
+    def test_active_identity_checks_only_selected_profile_without_routing(self):
+        current, disabled = self.profile("current"), self.profile("disabled", enable=False)
+        self.login_markers(disabled)
+        endpoint = lambda c: f"accounts/{c['id']}/identity"
+        self.assertEqual(self.s.api("PUT","current/agy",{"config_id":current["id"]})[0],200)
+        self.s.api("GET","accounts?tool=agy")
+        for c, local in [(current,"no_saved_login"),(disabled,"saved_login")]:
+            self.assertEqual(self.s.api("GET",endpoint(c))[:2], (200, {"state":local,"email":None}))
+            self.s.cli("login", str(c["id"]), "--status")
+            self.assertFalse((Path(c["home"])/"models-calls").exists())
+        cursor = lambda db: db.execute("SELECT cursor FROM tools WHERE tool='agy'").fetchone()
+        with closing(sqlite3.connect(self.s.root/"state/cc-profile/router.sqlite3")) as db:
+            before = cursor(db)
+            starts = self.s.api("GET","startups")[1]["items"]
+            self.assertEqual(self.s.api("POST",endpoint(disabled),{"args":["--other"]})[0],400)
+            self.assertEqual(self.s.api("POST",endpoint(self.s.account("claude","not-agy")),{})[0],400)
+            self.assertEqual(self.s.api("POST",endpoint(disabled),{})[:2], (200, {"state":"catalog_accessible","email":None}))
+            self.assertFalse((Path(current["home"])/"models-calls").exists())
+            self.assertEqual(self.s.api("POST",endpoint(current),{})[:2], (200, {"state":"sign_in_required","email":None}))
+            self.assertEqual(cursor(db), before)
+            self.assertEqual(self.s.api("GET","startups")[1]["items"], starts)
+            self.assertEqual(self.s.api("GET","sessions")[1]["items"], [])
+        for c in (current, disabled):
+            home = Path(c["home"])
+            self.assertEqual(len((home/"models-calls").read_text().splitlines()), 1)
+            obs = json.loads((home/"last-run").read_text())
+            self.assertEqual((obs["home"],obs["cwd"],obs["proxy"]), (str(home),str(home),["https://proxy.invalid:8443/"]*4))
+            self.assertFalse(Path(obs["runtime"]).exists())
+
+    def test_catalog_identity_does_not_publish_malformed_or_unbounded_output(self):
+        c = self.profile("shape", enable=False)
+        out = "fixture-model\tFixture model (High)\nother\tOther model\n"
+        signed_out = "Error: Please sign in to view available models. Launch the CLI without arguments to sign in.\n"
+        for code, stdout, stderr, state in [
+            (0, out, "irrelevant diagnostic", "catalog_accessible"),
+            (1, "", signed_out, "sign_in_required"),
+            (0, "", signed_out, "unavailable"),
+            (1, out, signed_out, "unavailable"),
+            (2, "", signed_out, "unavailable"),
+            (1, "", "Unknown error: Please sign in", "unavailable"),
+            (1, "", "another failure\n"+signed_out, "unavailable"),
+            (0, "header\n"+out, "", "unavailable"),
+            (0, "id\t\n", "", "unavailable"),
+            (0, "\tLabel\n", "", "unavailable"),
+            (0, "bad id\tLabel\n", "", "unavailable"),
+            (0, "id\tLabel\textra", "", "unavailable"),
+            (0, "id\tLabel\x1b", "", "unavailable"),
+            (0, "id\t"+"x"*65536, "", "unavailable"),
+            (0, out, "x"*65537, "unavailable"),
+        ]:
+            with self.subTest(code=code, out_len=len(stdout), err_len=len(stderr)):
+                (Path(c["home"])/"model-response").write_text(json.dumps(dict(code=code,out=stdout,err=stderr)))
+                self.assertEqual(self.s.api("POST",f"accounts/{c['id']}/identity",{})[:2],
+                                 (200, {"state":state,"email":None}))
+
+    def test_catalog_identity_shares_slots_and_discards_changed_inputs(self):
+        a, b = self.profile("a"), self.profile("b")
+        self.login_markers(a, b)
+        other = self.s.account("claude","other-tool")
+        holds = [Path(c["home"])/"hold-models" for c in (a,b)]
+        for hold in holds: hold.touch()
+        with ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(self.s.api, "POST", f"accounts/{c['id']}/identity", {}) for c in (a,b)]
+            try:
+                for hold in holds:
+                    end = time.monotonic()+3
+                    while not hold.with_name("models-calls").exists():
+                        self.assertLess(time.monotonic(),end)
+                        time.sleep(.02)
+                self.assertEqual(self.s.api("GET",f"accounts/{other['id']}/identity")[0],409)
+                self.assertEqual(self.s.api("PATCH",f"accounts/{a['id']}",{"revision":a["revision"],"enabled":False})[0],200)
+                (Path(b["home"])/".gemini/antigravity-cli/antigravity-oauth-token").write_text("changed inert marker")
+            finally:
+                for hold in holds: hold.unlink()
+            for f in futures:
+                self.assertEqual(f.result()[:2], (200, {"state":"unavailable","email":None}))
+        self.assertEqual(self.s.api("POST",f"accounts/{a['id']}/identity",{})[1]["state"],"catalog_accessible")
+
+    def test_catalog_identity_rejects_replaced_and_unsupported_binary(self):
+        c = self.profile("upgrading", enable=False)
+        self.login_markers(c)
+        endpoint = f"accounts/{c['id']}/identity"
+        home = Path(c["home"])
+        hold = home/"hold-models"
+        hold.touch()
+        with ThreadPoolExecutor(1) as pool:
+            probe = pool.submit(self.s.api, "POST", endpoint, {})
+            try:
+                end = time.monotonic()+3
+                while not (home/"models-calls").exists():
+                    self.assertLess(time.monotonic(),end)
+                    time.sleep(.02)
+                binary = self.s.root/"bin/agy"
+                replacement = binary.with_suffix(".new")
+                replacement.write_text(binary.read_text().replace('print("1.5.14")','print("not AgY")'))
+                replacement.chmod(0o700)
+                replacement.replace(binary)
+            finally:
+                hold.unlink()
+            self.assertEqual(probe.result()[:2], (200, {"state":"unavailable","email":None}))
+        self.assertEqual(self.s.api("POST",endpoint,{})[:2], (200, {"state":"unavailable","email":None}))
+        self.assertEqual(len((home/"models-calls").read_text().splitlines()),1)
+
+    def test_catalog_identity_timeout_cleans_descendant_and_private_runtime(self):
+        c = self.profile("slow", enable=False)
+        home = Path(c["home"])
+        hold = home/"hold-model-pipe"
+        hold.touch()
+        try:
+            self.assertEqual(self.s.api("POST",f"accounts/{c['id']}/identity",{})[:2],
+                             (200, {"state":"unavailable","email":None}))
+            proc = Path("/proc")/(home/"pipe-holder").read_text()/"stat"
+            end = time.monotonic()+1
+            while True:
+                try:
+                    if proc.read_text().split()[2] == "Z": break
+                except FileNotFoundError:
+                    break
+                self.assertLess(time.monotonic(),end,"orphaned catalog process")
+                time.sleep(.02)
+            self.assertFalse(Path(json.loads((home/"last-run").read_text())["runtime"]).exists())
+        finally:
+            hold.unlink()
 
     def test_tui_resume_uses_the_unique_saved_file_not_rotation(self):
         a, b, c = self.profile("first"), self.profile("owner"), self.profile("third")

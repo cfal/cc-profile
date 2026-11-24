@@ -37,6 +37,10 @@ class NativeACP(unittest.TestCase):
 
     def test_models_reaches_signed_out_native_cli(self):
         s, c = self.service, self.profile
+        endpoint = f"accounts/{c['id']}/identity"
+        self.assertEqual(s.api("GET", endpoint)[:2], (200, {"state":"no_saved_login","email":None}))
+        self.assertEqual(s.api("POST", endpoint, {})[:2], (200, {"state":"sign_in_required","email":None}))
+        self.assertEqual(s.api("GET", "startups")[1]["items"], [])
         self.assertEqual(s.api("PUT", "current/agy", {"config_id":c["id"]})[0], 200)
         p = s.cli("agy", "models")
         self.assertNotEqual(p.returncode, 0)

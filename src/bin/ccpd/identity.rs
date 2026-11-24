@@ -1,12 +1,12 @@
 use super::service::Shared;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
 };
 use ccpd::{
     agy,
     native::{Build, clean_command},
-    quota::auth_stamp,
+    quota::{auth_stamp, inputs},
     rpc,
     store::{Config, config},
     types::{Error, Result},
@@ -15,6 +15,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{path::Path as Dir, process::Stdio, time::Duration};
 use tokio::io::AsyncReadExt;
+
+mod catalog;
 
 #[derive(Serialize)]
 pub struct Identity {
@@ -114,4 +116,47 @@ pub async fn read(State(s): State<Shared>, Path(id): Path<i64>) -> Result<Json<I
         return Ok(Json(status("unavailable")));
     }
     Ok(Json(result.unwrap_or_else(|_| status("unavailable"))))
+}
+
+pub async fn check_catalog(
+    State(s): State<Shared>,
+    Path(id): Path<i64>,
+    body: std::result::Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Identity>> {
+    if !body.is_ok_and(|v| v.as_object().is_some_and(|m| m.is_empty())) {
+        return Err(Error::bad("bad_request", "Expected an empty JSON object."));
+    }
+    let c = config(&*s.store.db()?, id)?;
+    if c.tool != "agy" {
+        return Err(Error::bad(
+            "wrong_tool",
+            "Catalog checks require an AgY profile.",
+        ));
+    }
+    let _slot = s
+        .identity_slots
+        .try_acquire()
+        .map_err(|_| Error::conflict("busy", "Another sign-in check is in progress."))?;
+    let build = s.build("agy").await;
+    let unknown = Json(status("unavailable"));
+    let Some(stamp) = inputs(&c) else {
+        return Ok(unknown);
+    };
+    if !build.supported || !build.unchanged() {
+        return Ok(unknown);
+    }
+    let Ok(state) = catalog::check(&c, &build).await else {
+        return Ok(unknown);
+    };
+    let installed = s.build("agy").await;
+    let current = config(&*s.store.db()?, id)?;
+    if !installed.supported
+        || installed.bin != build.bin
+        || installed.fingerprint != build.fingerprint
+        || !installed.unchanged()
+        || inputs(&current) != Some(stamp)
+    {
+        return Ok(unknown);
+    }
+    Ok(Json(status(state)))
 }

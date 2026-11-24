@@ -32,9 +32,25 @@ if not args or (args[0].startswith("-") and args[0] not in ("--settings","--outp
     print(json.dumps({"home": str(home), "args": args}) if args else "fixture Antigravity TUI")
     sys.exit()
 if args == ["models"]:
+    with (home/"models-calls").open("a") as f:
+        print(os.getpid(), file=f)
+    if (home/"hold-models").exists():
+        import time
+        while (home/"hold-models").exists(): time.sleep(.02)
+    if (home/"hold-model-pipe").exists():
+        import time
+        if os.fork(): sys.exit(0)
+        (home/"pipe-holder").write_text(str(os.getpid()))
+        while (home/"hold-model-pipe").exists(): time.sleep(.02)
+        os._exit(0)
+    if (home/"model-response").exists():
+        response = json.loads((home/"model-response").read_text())
+        sys.stdout.write(response["out"])
+        sys.stderr.write(response["err"])
+        sys.exit(response["code"])
     print("Fetching available models...", file=sys.stderr)
     if not (home/".gemini/antigravity-cli/antigravity-oauth-token").exists():
-        sys.exit("Error: Please sign in to view available models.")
+        sys.exit("Error: Please sign in to view available models. Launch the CLI without arguments to sign in.")
     print("fixture-model\tFixture Model")
     sys.exit()
 if "/usage" in args:

@@ -262,7 +262,10 @@ pub fn web(s: Shared) -> Router {
         .route("/api/v1/settings", get(settings).put(set_settings))
         .route("/api/v1/accounts", get(accounts).post(add))
         .route("/api/v1/accounts/{id}", patch(edit))
-        .route("/api/v1/accounts/{id}/identity", get(super::identity::read))
+        .route(
+            "/api/v1/accounts/{id}/identity",
+            get(super::identity::read).post(super::identity::check_catalog),
+        )
         .route(
             "/api/v1/accounts/{id}/resets/list",
             post(super::resets::list),
