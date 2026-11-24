@@ -23,8 +23,7 @@ fn failed(msg: &'static str) -> Error {
     Error::unavailable("codex_app_server", msg)
 }
 
-fn command(binary: &Path, argv: &[String], plan: &Plan) -> Command {
-    let exec = NativeExec::new(binary, "codex", argv, plan);
+fn child_command(binary: &Path) -> Command {
     let parent = std::process::id();
     let mut cmd = Command::new(binary);
     cmd.kill_on_drop(true);
@@ -37,8 +36,16 @@ fn command(binary: &Path, argv: &[String], plan: &Plan) -> Command {
             if libc::getppid() as u32 != parent {
                 return Err(io::Error::from_raw_os_error(libc::EINTR));
             }
-            Err(exec.exec())
+            Ok(())
         });
+    }
+    cmd
+}
+fn command(binary: &Path, argv: &[String], plan: &Plan) -> Command {
+    let exec = NativeExec::new(binary, "codex", argv, plan);
+    let mut cmd = child_command(binary);
+    unsafe {
+        cmd.pre_exec(move || Err(exec.exec()));
     }
     cmd
 }
@@ -55,7 +62,6 @@ struct Thread {
 impl Thread {
     fn root(&self) -> bool {
         self.id == self.session_id
-            && !self.ephemeral
             && self.forked_from_id.is_none()
             && self.parent_thread_id.is_none()
             && native_id(&self.id).is_ok()

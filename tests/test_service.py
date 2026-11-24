@@ -58,15 +58,22 @@ if sys.argv[1:2] == ["app-server"]:
         r = json.loads(line)
         if "id" not in r: continue
         result = {}
+        if r["method"] == "initialize":
+            result = {"userAgent":"fixture/0.171.0","codexHome":str(home),
+                      "platformFamily":"unix","platformOs":"linux"}
+            if (home/"wrong-capabilities").exists(): result["changedProtocol"]=True
         if r["method"] == "account/read":
             assert r["params"] == {"refreshToken":False}
             path = home / "fixture-identity.json"
             result = json.loads(path.read_text()) if path.exists() else {"account":None}
             checked_identity = True
-        if r["method"] in ("thread/start","thread/resume","unrelated"):
+        if r["method"] in ("thread/start","thread/resume","thread/fork","thread/read","unrelated"):
+            assert r.get("params",{}).get("path") is None
             uid = r.get("params",{}).get("threadId",str(uuid.uuid4()))
+            parent = uid if r["method"] == "thread/fork" else None
+            if parent: uid = str(uuid.uuid4())
             result = {"thread":{"id":uid,"sessionId":uid,"ephemeral":r.get("params",{}).get("ephemeral",False),
-                                "cwd":os.getcwd()}, "home":str(home), "proxy":os.getenv("HTTPS_PROXY"),
+                                "forkedFromId":parent,"cwd":os.getcwd()}, "home":str(home), "proxy":os.getenv("HTTPS_PROXY"),
                       "markers":[os.getenv("CCP_LAUNCH_ID"),os.getenv("CCP_OBSERVE_TICKET")]}
         if r["method"] == "account/login/start":
             assert r["params"] == {"type":"chatgptDeviceCode"}
@@ -402,12 +409,13 @@ class Service(unittest.TestCase):
                  "proxy_mode":"custom", "proxy_url":"http://proxy.invalid:8888"})
         self.env["CCP_LAUNCH_ID"] = self.env["CCP_OBSERVE_TICKET"] = "inherited"
         def server(args, calls):
-            wire = "".join(json.dumps({"id":i,"method":method,"params":params})+"\n"
+            wire = '{"id":"hello","method":"initialize","params":{}}\n{"method":"initialized"}\n'
+            wire += "".join(json.dumps({"id":i,"method":method,"params":params})+"\n"
                            for i,(method,params) in enumerate(calls))
             p=subprocess.run([LAUNCHER,"codex","app-server",*args],input=wire,
                              env=self.env,cwd=self.root,capture_output=True,text=True,timeout=8)
             self.assertEqual(p.returncode,0,p.stderr)
-            return [json.loads(line)["result"] for line in p.stdout.splitlines()]
+            return [json.loads(line)["result"] for line in p.stdout.splitlines()[1:]]
         one,two,ephemeral,noise = server([], [("thread/start",{}),("thread/start",{}),
                                                ("thread/start",{"ephemeral":True}),("unrelated",{})])
         self.assertEqual((one["home"],two["home"],two["proxy"],one["markers"]),
@@ -429,6 +437,9 @@ class Service(unittest.TestCase):
         with subprocess.Popen([LAUNCHER,"codex","app-server"],cwd=self.root,env=self.env,
                               stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as p:
             try:
+                p.stdin.write(b'{"id":0,"method":"initialize","params":{}}\n{"method":"initialized"}\n'
+                              b'{"id":1,"method":"thread/start","params":{"ephemeral":true}}\n')
+                p.stdin.flush()
                 for _ in range(100):
                     if (home/"child-pid").exists():break
                     time.sleep(.03)
@@ -743,7 +754,7 @@ class Service(unittest.TestCase):
         self.assertEqual(self.api("GET","settings")[1],{"routing_mode":"priority"})
         self.assertEqual([c["priority"] for c in self.api("GET","accounts?tool=codex")[1]["items"]],[0,99])
         # Exercise the real client's validation of the new-session decision.
-        p = self.cli("codex","app-server")
+        p = self.cli("codex")
         self.assertEqual(p.returncode,0,p.stderr)
         row = self.api("GET","startups")[1]["items"][0]
         self.assertEqual((row["config_id"], row["reason"]), (high["id"], "priority"))
@@ -755,13 +766,13 @@ class Service(unittest.TestCase):
         (codex/"hold-old-quota").touch()
         try:
             self.assertEqual(self.cli("claude","chat").returncode,0)
-            self.assertEqual(self.cli("codex","app-server").returncode,0)
+            self.assertEqual(self.cli("codex").returncode,0)
             for _ in range(200):
                 if (codex/"held-old-pid").exists(): break
                 time.sleep(.02)
             self.assertTrue((codex/"held-old-pid").exists())
             self.assertEqual(self.api("PUT","settings",{"routing_mode":"earliest_expiry_least_remaining"})[0],200)
-            p = self.cli("codex","app-server")
+            p = self.cli("codex")
             self.assertEqual(p.returncode,0,p.stderr)
             self.assertEqual(self.api("GET","startups?tool=codex")[1]["items"][0]["reason"],"earliest_expiry_least_remaining")
             self.assertFalse((claude/"quota-count").exists())
@@ -1298,7 +1309,7 @@ class Service(unittest.TestCase):
             self.assertEqual(q["snapshot"]["windows"][0]["used_pct"],100)
             self.assertNotIn("file_auth_verified",q["snapshot"])
         def launch(exhausted):
-            p = self.cli("codex","app-server")
+            p = self.cli("codex")
             if exhausted:
                 self.assertNotEqual(p.returncode,0)
                 self.assertIn("exhausted",p.stderr)

@@ -1,5 +1,5 @@
 use super::{Incoming, Out, bad, incoming, key, parse, reject, send};
-use crate::{launch, record_failure, request, validate};
+use crate::{bind_session, record_failure, request, validate};
 use ccpd::{
     agy::{self, acp as wire},
     protocol::Request,
@@ -16,7 +16,7 @@ pub(crate) struct Binding {
     pub(super) first: Option<Vec<u8>>,
 }
 
-pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
+pub(crate) async fn run(req: Request) -> Result<ExitCode> {
     let deadline = || Instant::now() + Duration::from_secs(5);
     let binary = req
         .binary
@@ -32,7 +32,6 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
     let out = Out::new(tokio::io::stdout());
     let mut init: Option<Value> = None;
     let mut notification = None;
-    let argc = req.argv.len();
     while let Some(bytes) = rx.recv().await {
         let bytes = bytes?;
         let v = parse(&bytes)?;
@@ -112,7 +111,7 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
                     reject(&out, id, "Expected an absolute ACP workspace.").await?;
                     continue;
                 }
-                if method != "session/new" {
+                let owner_id = if method != "session/new" {
                     let Some(sid) = params["sessionId"]
                         .as_str()
                         .and_then(|s| agy::session_id(s).ok())
@@ -120,15 +119,14 @@ pub(crate) async fn run(mut req: Request) -> Result<ExitCode> {
                         reject(&out, id, "Expected an exact ACP session ID.").await?;
                         continue;
                     };
-                    req.argv.extend(["--for-session".into(), sid.into()]);
-                }
-                let plan = match launch(&req, deadline()).await {
+                    Some(sid)
+                } else {
+                    None
+                };
+                let (req, plan) = match bind_session(&req, owner_id, None).await {
                     Ok(p) => p,
                     Err(e) => {
                         reject(&out, id, &e.2).await?;
-                        req.argv.truncate(argc);
-                        req.request_id = uuid::Uuid::new_v4().to_string();
-                        req.ticket = ccpd::paths::secret()?;
                         continue;
                     }
                 };

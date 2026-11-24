@@ -6,7 +6,7 @@ use ccpd::{
 };
 use serde::Deserialize;
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     io::{self, PipeWriter, Read, Write},
     path::Path,
     process::{ExitCode, Stdio},
@@ -62,6 +62,15 @@ struct Call {
     method: String,
 }
 #[derive(Deserialize)]
+struct Fork {
+    params: Selector,
+}
+#[derive(Deserialize)]
+struct Selector {
+    #[serde(rename = "threadId")]
+    thread_id: String,
+}
+#[derive(Deserialize)]
 struct Reply {
     id: Id,
     method: Option<String>,
@@ -74,17 +83,21 @@ struct Started {
 struct StartedResult {
     thread: Thread,
 }
-pub(super) type Starts = Arc<Mutex<HashSet<Id>>>;
+pub(super) type Starts = Arc<Mutex<HashMap<Id, Option<String>>>>;
 
-pub(super) fn track(line: &[u8], starts: &Starts) {
+pub(super) fn track(line: &[u8], starts: &Starts, managed_fork: bool) {
     if let Ok(call) = serde_json::from_slice::<Call>(line) {
         let mut ids = starts.lock().unwrap();
         ids.remove(&call.id);
-        if call.method == "thread/start"
-            && ids.len() < 1024
-            && !matches!(&call.id, Id::Text(s) if s.len()>256)
-        {
-            ids.insert(call.id);
+        if ids.len() < 1024 && !matches!(&call.id, Id::Text(s) if s.len()>256) {
+            if call.method == "thread/start" {
+                ids.insert(call.id, None);
+            } else if managed_fork
+                && call.method == "thread/fork"
+                && let Ok(fork) = serde_json::from_slice::<Fork>(line)
+            {
+                ids.insert(call.id, Some(fork.params.thread_id));
+            }
         }
     }
 }
@@ -100,20 +113,30 @@ fn input(mut pipe: PipeWriter, starts: Starts) -> io::Result<()> {
         }
         for part in chunk[..n].split_inclusive(|b| *b == b'\n') {
             if let Some(line) = frame.feed(part, &starts) {
-                track(line, &starts);
+                track(line, &starts, false);
             }
             frame.done(part);
         }
         pipe.write_all(&chunk[..n])?;
     }
 }
-pub(super) fn started(line: &[u8], starts: &Starts) -> Option<Thread> {
+pub(super) fn started(line: &[u8], starts: &Starts) -> Option<(&'static str, Thread)> {
     let reply = serde_json::from_slice::<Reply>(line).ok()?;
-    if reply.method.is_some() || !starts.lock().unwrap().remove(&reply.id) {
+    if reply.method.is_some() {
         return None;
     }
+    let source = starts.lock().unwrap().remove(&reply.id)?;
     let thread = serde_json::from_slice::<Started>(line).ok()?.result.thread;
-    thread.root().then_some(thread)
+    if let Some(source) = source {
+        return (!thread.ephemeral
+            && thread.id == thread.session_id
+            && thread.parent_thread_id.is_none()
+            && thread.id != source
+            && super::native_id(&thread.id).is_ok()
+            && thread.forked_from_id.as_ref() == Some(&source))
+        .then_some(("thread/fork", thread));
+    }
+    thread.root().then_some(("thread/start", thread))
 }
 async fn output(
     mut pipe: tokio::process::ChildStdout,
@@ -129,10 +152,11 @@ async fn output(
             return out.flush().await;
         }
         for part in chunk[..n].split_inclusive(|b| *b == b'\n') {
-            if let Some(thread) = frame
+            if let Some((event, thread)) = frame
                 .feed(part, starts)
                 .and_then(|line| started(line, starts))
-                && let Err(e) = report(req, "thread/start", &thread).await
+                && !thread.ephemeral
+                && let Err(e) = report(req, event, &thread).await
             {
                 eprintln!("ccp: {e}");
             }
@@ -183,7 +207,7 @@ mod tests {
     #[test]
     fn oversized_frame_invalidates_unknown_ids_and_next_frame_is_read_normally() {
         let starts = Starts::default();
-        starts.lock().unwrap().insert(Id::Number(1));
+        starts.lock().unwrap().insert(Id::Number(1), None);
         let mut frame = Frame::default();
         assert!(frame.feed(&vec![b'x'; LIMIT], &starts).is_none());
         assert!(frame.feed(b"x\n", &starts).is_none());

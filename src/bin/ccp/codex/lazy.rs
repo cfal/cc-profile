@@ -1,7 +1,8 @@
-use super::{command, failed, report, status, stdio};
+use super::{child_command, command, failed, report, status, stdio};
 use crate::{
+    bind_session,
     child::{self, Incoming, Signals},
-    launch, record_failure, request, validate, validate_patch,
+    record_failure, request, validate, validate_patch,
 };
 use ccpd::{
     invocation::{codex_stdio_command, native_id},
@@ -17,7 +18,7 @@ use std::{
     process::{ExitCode, Stdio},
     time::Duration,
 };
-use tokio::{io::Stdout, process::Command, sync::Mutex, time::Instant};
+use tokio::{io::Stdout, sync::Mutex, time::Instant};
 use uuid::Uuid;
 
 #[path = "wire.rs"]
@@ -31,6 +32,7 @@ fn reject(msg: &'static str) -> Error {
     Error::bad("codex_routing", msg)
 }
 type Out = Mutex<Stdout>;
+const LISTED: &str = "/v4/codex-stdio/listed";
 async fn send(out: &Out, v: &Value) -> Result<()> {
     write(&mut *out.lock().await, &bytes(v)?).await
 }
@@ -49,7 +51,9 @@ async fn neutral(req: &Request, argv: &[String], init: &Value) -> Result<Value> 
     let path = runtime.join(format!("codex-init-{}", Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&path)?;
     let scratch = Scratch(path);
-    let mut cmd = Command::new(req.binary.as_ref().ok_or_else(bad)?);
+    let binary = req.binary.as_ref().ok_or_else(bad)?;
+    request::<()>(CODEX_CHECK, &bytes(&json!(binary))?, deadline()).await?;
+    let mut cmd = child_command(binary);
     cmd.args(argv)
         .current_dir(&scratch.0)
         .env_clear()
@@ -116,14 +120,37 @@ struct Connection {
     hello: Value,
 }
 impl Connection {
+    async fn confirm_page(&self, req: &Request, owner: i64, reply: &Value) -> Result<()> {
+        let rows = reply["result"]["data"]
+            .as_array()
+            .filter(|a| a.len() <= 2048)
+            .ok_or_else(bad)?;
+        let threads = rows
+            .iter()
+            .map(|r| {
+                Ok((
+                    owner,
+                    r["id"].as_str().ok_or_else(bad)?,
+                    r["cwd"].as_str().ok_or_else(bad)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let body = json!({"bound":[req.request_id,req.ticket],"binary":req.binary,"profiles":[],"threads":threads});
+        let count: usize = request(LISTED, &bytes(&body)?, deadline()).await?;
+        if count != rows.len() {
+            return Err(bad());
+        }
+        Ok(())
+    }
     async fn connected(&self, plan: &Plan) -> Result<Server> {
         let bin = self.base.binary.as_ref().ok_or_else(bad)?;
         let home = Path::new(plan.env_set.get("CODEX_HOME").ok_or_else(bad)?);
         let mut server = Server::spawn(command(bin, &self.argv, plan))?;
-        let reply = server.handshake(&self.init, home).await?;
-        if reply.get("error").is_some()
-            || reply["result"]["userAgent"] != self.hello["result"]["userAgent"]
-        {
+        let mut reply = server.handshake(&self.init, home).await?;
+        if let Some(result) = reply.get_mut("result") {
+            result["codexHome"] = self.hello["result"]["codexHome"].clone();
+        }
+        if reply.get("result") != self.hello.get("result") {
             return Err(failed(
                 "The selected Codex server could not replay the client handshake.",
             ));
@@ -160,10 +187,7 @@ impl Connection {
         .await
     }
     async fn bind(&self, call: &Value, id: Option<&str>) -> Result<(Request, Plan, Server)> {
-        let mut req = id.map_or_else(|| self.base.clone(), |id| pinned(&self.base, id));
-        req.request_id = Uuid::new_v4().to_string();
-        req.ticket = paths::secret()?;
-        if let Some(cwd) = call["params"].get("cwd").filter(|v| !v.is_null()) {
+        let cwd = if let Some(cwd) = call["params"].get("cwd").filter(|v| !v.is_null()) {
             let cwd = cwd
                 .as_str()
                 .filter(|p| {
@@ -172,9 +196,11 @@ impl Connection {
                         && !p.chars().any(char::is_control)
                 })
                 .ok_or_else(bad)?;
-            req.cwd = cwd.into();
-        }
-        let plan = launch(&req, deadline()).await?;
+            Some(Path::new(cwd))
+        } else {
+            None
+        };
+        let (req, plan) = bind_session(&self.base, id, cwd).await?;
         let (home, managed) = validate(&plan, &req)?;
         if managed.is_none() {
             return Err(bad());
@@ -194,35 +220,85 @@ impl Connection {
         &self,
         mut rx: Incoming,
         out: &Out,
-        first: Vec<u8>,
-        req: &Request,
-        plan: &Plan,
-        server: Server,
+        bound: Bound,
+        sig: &mut Signals,
     ) -> Result<ExitCode> {
+        let Bound {
+            first,
+            req,
+            plan,
+            server,
+        } = bound;
         let Server {
             mut child,
             mut input,
             mut output,
         } = server;
         let starts = stdio::Starts::default();
+        let pending_lists = std::cell::RefCell::new(std::collections::HashSet::new());
+        // Ephemeral threads have no durable owner. They can be read only on
+        // the connection on which native Codex actually started them.
+        let ephemeral = std::cell::RefCell::new(std::collections::HashSet::new());
         let reader = async {
             while let Some(line) = read(&mut output).await? {
-                if let Some(thread) = stdio::started(&line, &starts)
-                    && let Err(e) = report(req, "thread/start", &thread).await
-                {
-                    eprintln!("ccp: {e}");
+                if !pending_lists.borrow().is_empty() {
+                    let reply = value(&line)?;
+                    let listed = reply.get("method").is_none()
+                        && reply
+                            .get("id")
+                            .is_some_and(|id| pending_lists.borrow_mut().remove(&id.to_string()));
+                    if listed
+                        && reply.get("error").is_none()
+                        && let Err(e) = self.confirm_page(&req, plan.config_id, &reply).await
+                    {
+                        send(out, &error(&reply["id"], &e.2)).await?;
+                        continue;
+                    }
+                }
+                if let Some((event, thread)) = stdio::started(&line, &starts) {
+                    if thread.ephemeral {
+                        if ephemeral.borrow().len() < 1024 {
+                            ephemeral.borrow_mut().insert(thread.id);
+                        }
+                    } else if let Err(e) = report(&req, event, &thread).await {
+                        eprintln!("ccp: {e}");
+                    }
                 }
                 write(&mut *out.lock().await, &line).await?;
             }
             Ok::<_, Error>(())
         };
         let writer = async {
-            stdio::track(&first, &starts);
+            stdio::track(&first, &starts, true);
             write(&mut input, &first).await?;
             while let Some(line) = rx.recv().await {
                 let mut line = line?;
                 let mut call = value(&line)?;
+                if call.get("method").is_some()
+                    && let Some(id) = call.get("id")
+                {
+                    let key = id.to_string();
+                    if pending_lists.borrow().contains(&key) {
+                        return Err(bad());
+                    }
+                    if call["method"] == "thread/list" {
+                        if pending_lists.borrow().len() >= 1024 {
+                            send(out, &error(id, "Too many pending thread lists.")).await?;
+                            continue;
+                        }
+                        pending_lists.borrow_mut().insert(key);
+                    }
+                }
                 match source(&mut call) {
+                    Ok(Some(id))
+                        if ephemeral.borrow().contains(&id)
+                            && !matches!(
+                                call["method"].as_str(),
+                                Some("thread/resume" | "thread/fork")
+                            ) =>
+                    {
+                        line = bytes(&call)?
+                    }
                     Ok(Some(id)) => match self.owner(&id).await {
                         Ok(owner) if owner == plan.config_id => line = bytes(&call)?,
                         _ => {
@@ -236,29 +312,52 @@ impl Connection {
                     }
                     _ => {}
                 }
-                stdio::track(&line, &starts);
+                stdio::track(&line, &starts, true);
                 write(&mut input, &line).await?;
             }
             drop(input);
             Ok::<_, Error>(())
         };
-        tokio::pin!(reader, writer);
+        let pump = async {
+            tokio::pin!(reader, writer);
+            tokio::select! {
+                r = &mut reader => r,
+                w = &mut writer => { w?; reader.await }
+            }
+        };
         tokio::select! {
-            r = &mut reader => r?,
-            w = &mut writer => {w?; reader.await?;}
+            r = pump => r?,
+            s = sig.recv() => {
+                child::stop(&mut child,s).await;
+                return Ok(ExitCode::from((128+s) as u8));
+            }
         }
-        Ok(status(child.wait().await?))
+        tokio::select! {
+            r=child.wait()=>Ok(status(r?)),
+            s=sig.recv()=>{child::stop(&mut child,s).await; Ok(ExitCode::from((128+s) as u8))}
+        }
     }
 }
 
 pub(crate) async fn run(req: Request) -> Result<ExitCode> {
     let mut sig = Signals::new()?;
-    tokio::select! {
-        s=sig.recv()=>Ok(ExitCode::from((128+s) as u8)),
-        result=route(req)=>result,
+    let out = Mutex::new(tokio::io::stdout());
+    let result = tokio::select! {
+        s=sig.recv()=>return Ok(ExitCode::from((128+s) as u8)),
+        result=route(req,&out)=>result?,
+    };
+    match result {
+        Some((conn, rx, bound)) => conn.bound(rx, &out, bound, &mut sig).await,
+        None => Ok(ExitCode::SUCCESS),
     }
 }
-async fn route(req: Request) -> Result<ExitCode> {
+struct Bound {
+    first: Vec<u8>,
+    req: Request,
+    plan: Plan,
+    server: Server,
+}
+async fn route(req: Request, out: &Out) -> Result<Option<(Connection, Incoming, Bound)>> {
     let bin = req
         .binary
         .as_ref()
@@ -266,7 +365,6 @@ async fn route(req: Request) -> Result<ExitCode> {
     request::<()>(CODEX_CHECK, &bytes(&json!(bin))?, deadline()).await?;
     let (_, argv) = codex_stdio_command(&req.argv)?;
     let mut rx = child::incoming("codex-stdin", wire::LIMIT)?;
-    let out = Mutex::new(tokio::io::stdout());
     let mut conn: Option<Connection> = None;
     while let Some(line) = rx.recv().await {
         let mut call = value(&line?)?;
@@ -286,7 +384,7 @@ async fn route(req: Request) -> Result<ExitCode> {
         }
         if method == "initialize" && conn.is_none() {
             let reply = neutral(&req, &argv, &call).await?;
-            send(&out, &reply).await?;
+            send(out, &reply).await?;
             if reply.get("result").is_some() {
                 conn = Some(Connection {
                     base: req.clone(),
@@ -299,7 +397,7 @@ async fn route(req: Request) -> Result<ExitCode> {
             continue;
         }
         let Some(c) = conn.as_ref() else {
-            send(&out, &error(&id, "Initialize Codex first.")).await?;
+            send(out, &error(&id, "Initialize Codex first.")).await?;
             continue;
         };
         let is_new = method == "thread/start";
@@ -316,18 +414,18 @@ async fn route(req: Request) -> Result<ExitCode> {
                 Ok(v) => v,
                 Err(e) => error(&id, &e.2),
             };
-            send(&out, &reply).await?;
+            send(out, &reply).await?;
             continue;
         }
         let sid = match source(&mut call) {
             Ok(s) if s.is_some() || is_new => s,
             Err(e) => {
-                send(&out, &error(&id, &e.2)).await?;
+                send(out, &error(&id, &e.2)).await?;
                 continue;
             }
             _ => {
                 send(
-                    &out,
+                    out,
                     &error(&id, "Start or select a Codex thread before this operation."),
                 )
                 .await?;
@@ -336,10 +434,19 @@ async fn route(req: Request) -> Result<ExitCode> {
         };
         match c.bind(&call, sid.as_deref()).await {
             Ok((req, plan, server)) => {
-                return c.bound(rx, &out, bytes(&call)?, &req, &plan, server).await;
+                return Ok(Some((
+                    conn.take().unwrap(),
+                    rx,
+                    Bound {
+                        first: bytes(&call)?,
+                        req,
+                        plan,
+                        server,
+                    },
+                )));
             }
-            Err(e) => send(&out, &error(&id, &e.2)).await?,
+            Err(e) => send(out, &error(&id, &e.2)).await?,
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(None)
 }

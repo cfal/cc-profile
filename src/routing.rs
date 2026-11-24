@@ -726,10 +726,10 @@ pub fn observe(store: &Store, o: &Observation) -> Result<()> {
         return acp_event(store, o);
     }
     let uid = native_id(&o.native_id)?;
-    if o.event != "thread/start" || o.source != "app-server" {
+    if !matches!(o.event.as_str(), "thread/start" | "thread/fork") || o.source != "app-server" {
         return Err(Error::bad(
             "wrong_event",
-            "Not a managed app-server thread/start reply.",
+            "Not a managed app-server start or fork reply.",
         ));
     }
     if o.workspace.as_ref().is_some_and(|s| {

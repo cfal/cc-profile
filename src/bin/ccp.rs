@@ -450,6 +450,24 @@ async fn launch(req: &Request, deadline: Instant) -> Result<Plan> {
     )
     .await
 }
+// Each user request gets one admission ticket; transport retries reuse it.
+async fn bind_session(
+    base: &Request,
+    owner_id: Option<&str>,
+    workspace: Option<&Path>,
+) -> Result<(Request, Plan)> {
+    let mut req = base.clone();
+    req.request_id = Uuid::new_v4().to_string();
+    req.ticket = paths::secret()?;
+    if let Some(id) = owner_id {
+        req.argv.extend(["--for-session".into(), id.into()]);
+    }
+    if let Some(cwd) = workspace {
+        req.cwd = cwd.to_owned();
+    }
+    let plan = launch(&req, Instant::now() + Duration::from_secs(5)).await?;
+    Ok((req, plan))
+}
 async fn record_failure(req: &Request, errno: i32) {
     let failure = Failure {
         request_id: req.request_id.clone(),
