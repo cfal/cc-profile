@@ -51,6 +51,9 @@ async fn run() -> Result<()> {
             }
             "-h" | "--help" => {
                 println!("{}", bad());
+                println!(
+                    "CC_PROFILE_PATH: database directory. CC_PROFILE_RUNTIME_DIR: launcher socket and runtime directory. Both take absolute paths."
+                );
                 return Ok(());
             }
             "--listen" => listen = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,

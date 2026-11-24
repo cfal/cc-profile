@@ -46,7 +46,7 @@ Link to the same `ccp` installation you use for direct commands. Keep the real n
 
 The panel defaults to **http://127.0.0.1:8743**. In a container, run `ccpd --listen 0.0.0.0` and publish the port with Docker's `-p 127.0.0.1:8743:8743` for host-only access. Open the published address in your browser. `--listen IP` accepts an IPv4 or IPv6 address; `--port PORT` changes the internal port. Mapped ports, custom hostnames, and HTTPS reverse proxies need no panel configuration. Only the panel listens on TCP; launches still use the private Unix socket.
 
-On the first visit, set a panel password; subsequent visits use **Sign in**. This is the same on every listen address. Anyone who can reach an unconfigured panel can claim it, so keep it on a trusted network during setup or optionally run `ccpd set-password` first. Use HTTPS at a reverse proxy or an SSH tunnel on untrusted networks: `ccpd` serves plain HTTP. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and startup log show the database path; use the same `XDG_STATE_HOME` in your shell and service.
+On the first visit, set a panel password; subsequent visits use **Sign in**. This is the same on every listen address. Anyone who can reach an unconfigured panel can claim it, so keep it on a trusted network during setup or optionally run `ccpd set-password` first. Use HTTPS at a reverse proxy or an SSH tunnel on untrusted networks: `ccpd` serves plain HTTP. The same terminal command resets a forgotten password, even while the service is running, and signs out existing browsers without affecting launches. The prompt and startup log show the database path; use the same [directory settings](#storage-and-recovery) in your shell and service.
 
 Sign-in survives reloads in the same tab. A separately opened tab signs in independently. The theme button in the header cycles through system, light, and dark for this browser. In **Settings**, change the panel password using the current one. Changing it signs out all tabs; it does not stop running agents.
 
@@ -179,7 +179,17 @@ Custom uses one proxy URL for both HTTP and HTTPS. Leaving the field blank while
 
 ## Storage and recovery
 
-`$XDG_STATE_HOME/cc-profile/router.sqlite3` (default `~/.local/state/cc-profile/`) holds the salted Argon2id panel password verifier, configs, rotation cursors, mappings, startup records and quota snapshots. `$XDG_RUNTIME_DIR/cc-profile/` holds the private launch socket; without an absolute XDG runtime directory use `runtime/` under the state directory. Both directories must be private to the user. Protect backups: proxy credentials are stored under OS permissions, not encrypted by ccpd. The server does not store provider OAuth tokens in SQLite. Upgrading from token pairing preserves router records and requires initial password setup; old tokens are not accepted.
+| Contents | Default directory | Override |
+| --- | --- | --- |
+| Router database (`router.sqlite3`), initialization marker and service lock | `$XDG_CONFIG_HOME/cc-profile` or `~/.config/cc-profile` | `CC_PROFILE_PATH` |
+| Launcher socket (`launch.sock`), listener lock and temporary AgY runtimes | `$XDG_RUNTIME_DIR/cc-profile`, or `runtime/` under the database directory without an absolute XDG runtime directory | `CC_PROFILE_RUNTIME_DIR` |
+| Newly created provider homes | `~/.local/share/cc-profile/profiles/<tool>/<uuid>` | `XDG_DATA_HOME` replaces `~/.local/share` |
+
+The two `CC_PROFILE_*` variables take exact, absolute directory paths: no `cc-profile` suffix is added. These directories must be private to the user (mode `0700`). Set the runtime override for **both** the daemon and anything that invokes the launcher, including Garcon. For separate instances, use distinct database and runtime directories and HTTP ports. The launcher **executable** itself can be installed anywhere on `PATH`; it is not stored in the runtime directory.
+
+The previous `$XDG_STATE_HOME/cc-profile` (normally `~/.local/state/cc-profile`) is not searched or migrated. To keep using it, set `CC_PROFILE_PATH` to that directory. An empty destination starts an unclaimed panel: run `ccpd set-password` with the same environment before exposing it on a network.
+
+The database holds the salted Argon2id panel password verifier, configs, rotation cursors, mappings, startup records and quota snapshots. Protect backups: proxy credentials are stored under OS permissions, not encrypted by ccpd. The server does not store provider OAuth tokens in SQLite. Upgrading from token pairing preserves router records and requires initial password setup; old tokens are not accepted.
 
 Existing config directories can be registered in place. Codex and AgY saved filenames can be discovered retrospectively. No transcript contents are read. Startups expire after 90 days; session mappings do not expire, even after a file disappears.
 

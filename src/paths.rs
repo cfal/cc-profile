@@ -17,14 +17,37 @@ fn env_dir(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
 }
+fn override_dir(name: &str) -> Result<Option<PathBuf>> {
+    env::var_os(name)
+        .map(|v| {
+            let path = PathBuf::from(v);
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|p| p == std::path::Component::ParentDir)
+            {
+                return Err(Error::bad(
+                    "invalid_directory",
+                    format!("{name} must be an absolute directory without '..'."),
+                ));
+            }
+            Ok(path)
+        })
+        .transpose()
+}
 pub fn state_dir() -> Result<PathBuf> {
-    env_dir("XDG_STATE_HOME")
-        .or_else(|| env_dir("HOME").map(|p| p.join(".local/state")))
+    if let Some(dir) = override_dir("CC_PROFILE_PATH")? {
+        return Ok(dir);
+    }
+    env_dir("XDG_CONFIG_HOME")
+        .or_else(|| env_dir("HOME").map(|p| p.join(".config")))
         .map(|p| p.join("cc-profile"))
         .ok_or_else(Error::denied)
 }
 pub fn runtime_dir() -> Result<PathBuf> {
-    if let Some(dir) = env_dir("XDG_RUNTIME_DIR") {
+    if let Some(dir) = override_dir("CC_PROFILE_RUNTIME_DIR")? {
+        Ok(dir)
+    } else if let Some(dir) = env_dir("XDG_RUNTIME_DIR") {
         Ok(dir.join("cc-profile"))
     } else {
         Ok(state_dir()?.join("runtime"))

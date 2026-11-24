@@ -141,7 +141,7 @@ class Service(unittest.TestCase):
             shutil.copyfile(ROOT / "tests/fixtures/agy.py", paths / "agy")
             (paths / "agy").chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
-                    "XDG_RUNTIME_DIR": str(self.root / "run"), "XDG_STATE_HOME": str(self.root / "state")}
+                    "XDG_RUNTIME_DIR": str(self.root / "run"), "CC_PROFILE_PATH": str(self.root / "state/cc-profile")}
         if getattr(self, "native", False):
             dirs = [str(Path(p).parent) for p in (shutil.which(t) for t in ("claude", "codex", "node")) if p]
             self.env["PATH"] = ":".join(dirs + ["/usr/bin", "/bin"])
