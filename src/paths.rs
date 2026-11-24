@@ -39,8 +39,8 @@ fn override_dir(name: &str) -> Result<Option<PathBuf>> {
         })
         .transpose()
 }
-pub fn state_dir() -> Result<PathBuf> {
-    if let Some(dir) = override_dir("CC_PROFILE_PATH")? {
+pub fn data_dir() -> Result<PathBuf> {
+    if let Some(dir) = override_dir("CC_PROFILE_DATA_PATH")? {
         return Ok(dir);
     }
     env_dir("XDG_CONFIG_HOME")
@@ -48,25 +48,31 @@ pub fn state_dir() -> Result<PathBuf> {
         .map(|p| p.join("cc-profile"))
         .ok_or_else(Error::denied)
 }
-pub fn runtime_dir() -> Result<PathBuf> {
-    if let Some(dir) = override_dir("CC_PROFILE_RUNTIME_DIR")? {
+pub fn accounts_dir(data: &Path) -> Result<PathBuf> {
+    Ok(override_dir("CC_PROFILE_ACCOUNTS_PATH")?.unwrap_or_else(|| data.join("accounts")))
+}
+pub fn ipc_dir() -> Result<PathBuf> {
+    if let Some(dir) = override_dir("CC_PROFILE_RUNTIME_PATH")? {
         Ok(dir)
     } else if let Some(dir) = env_dir("XDG_RUNTIME_DIR") {
         Ok(dir.join("cc-profile"))
     } else {
-        Ok(state_dir()?.join("runtime"))
+        Ok(data_dir()?.join("runtime"))
     }
 }
-pub fn profile_root(tool: &str) -> Result<PathBuf> {
-    let tool = crate::types::tool(tool)?;
-    let data = env_dir("XDG_DATA_HOME")
-        .or_else(|| env_dir("HOME").map(|p| p.join(".local/share")))
-        .ok_or_else(Error::denied)?;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&data)?;
-    Ok(data.canonicalize()?.join("cc-profile/profiles").join(tool))
+pub fn scratch_dir() -> Result<PathBuf> {
+    let base = override_dir("CC_PROFILE_TEMP_PATH")?.unwrap_or_else(env::temp_dir);
+    if !base.is_absolute()
+        || base
+            .components()
+            .any(|p| p == std::path::Component::ParentDir)
+    {
+        return Err(Error::bad(
+            "invalid_directory",
+            "The temporary directory must be absolute and contain no '..'.",
+        ));
+    }
+    Ok(base.join(format!("cc-profile-{}", uid())))
 }
 pub fn private_dir(p: &Path) -> Result<()> {
     fs::DirBuilder::new()

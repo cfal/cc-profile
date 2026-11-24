@@ -139,7 +139,7 @@ impl Browse {
                     .ok_or_else(stale);
             }
             drop(previous);
-            let runtime = paths::runtime_dir()?;
+            let runtime = paths::ipc_dir()?;
             paths::private_dir(&runtime)?;
             let _slot = paths::locked(&runtime.join("codex-browse.lock")).map_err(|err| {
                 if err.1 == "already_running" {

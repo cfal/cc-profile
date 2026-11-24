@@ -52,7 +52,7 @@ async fn run() -> Result<()> {
             "-h" | "--help" => {
                 println!("{}", bad());
                 println!(
-                    "CC_PROFILE_PATH: database directory. CC_PROFILE_RUNTIME_DIR: launcher socket and runtime directory. Both take absolute paths."
+                    "CC_PROFILE_DATA_PATH: router data (default ~/.config/cc-profile). CC_PROFILE_ACCOUNTS_PATH: new account homes (default <data>/accounts). CC_PROFILE_RUNTIME_PATH: ccpd.sock and runtime locks (default $XDG_RUNTIME_DIR/cc-profile or <data>/runtime). CC_PROFILE_TEMP_PATH: scratch base (default OS temp). All overrides take absolute paths."
                 );
                 return Ok(());
             }
@@ -64,8 +64,8 @@ async fn run() -> Result<()> {
             _ => return Err(bad()),
         }
     }
-    let state = paths::state_dir()?;
-    let runtime = paths::runtime_dir()?;
+    let state = paths::data_dir()?;
+    let runtime = paths::ipc_dir()?;
     paths::private_dir(&state)?;
     paths::private_dir(&runtime)?;
     let _state_lock = paths::locked(&state.join("service.lock"))?;
@@ -77,13 +77,13 @@ async fn run() -> Result<()> {
         Error::unavailable("listener", format!("Could not bind panel to {addr}: {e}"))
     })?;
     let bound = tcp.local_addr()?;
-    let sock = runtime.join("launch.sock");
+    let sock = runtime.join(ccpd::socket::SOCKET_NAME);
     match fs::symlink_metadata(&sock) {
         Ok(m) if m.file_type().is_socket() => fs::remove_file(&sock)?,
         Ok(_) => {
             return Err(Error::conflict(
                 "socket_path",
-                "Refusing to replace non-socket at launch.sock.",
+                format!("Refusing to replace non-socket at {}.", sock.display()),
             ));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -154,7 +154,10 @@ class Service(unittest.TestCase):
             shutil.copyfile(ROOT / "tests/fixtures/agy.py", paths / "agy")
             (paths / "agy").chmod(0o700)
         self.env = {"PATH": str(paths) + ":/usr/bin:/bin", "HOME": str(self.root),
-                    "XDG_RUNTIME_DIR": str(self.root / "run"), "CC_PROFILE_PATH": str(self.root / "state/cc-profile")}
+                    "XDG_RUNTIME_DIR": str(self.root / "run"), "CC_PROFILE_DATA_PATH": str(self.root / "state/cc-profile"),
+                    "TMPDIR":str(self.root/"tmp")}
+        (self.root/"tmp").mkdir()
+        self.scratch = self.root/"tmp"/f"cc-profile-{os.getuid()}"
         if getattr(self, "native", False):
             dirs = [str(Path(p).parent) for p in (shutil.which(t) for t in ("claude", "codex", "node")) if p]
             self.env["PATH"] = ":".join(dirs + ["/usr/bin", "/bin"])
@@ -388,7 +391,7 @@ class Service(unittest.TestCase):
         status, personal, _ = self.api("POST", "accounts", create)
         self.assertEqual(status, 201, personal)
         home = Path(personal["home"])
-        self.assertTrue(home.is_relative_to(self.root/".local/share/cc-profile/profiles/claude"))
+        self.assertEqual(home.parent, Path(self.env["CC_PROFILE_DATA_PATH"])/"accounts/claude")
         self.assertEqual(home.stat().st_mode & 0o777, 0o700)
         self.assertEqual(list(home.iterdir()), [])
         self.assertFalse(personal["enabled"] or personal["current"])
@@ -495,7 +498,7 @@ class Service(unittest.TestCase):
         self.assertEqual(self.api("GET","startups")[1]["items"][0]["reason"],"rollout_pruned")
         self.assertEqual(self.api("GET","sessions?tool=codex")[1]["items"][0]["config_id"],b["id"])
 
-    def test_managed_profile_under_relocated_data_home(self):
+    def test_old_data_home_symlink_is_not_used_for_new_profiles(self):
         data = self.root / "relocated-share"
         data.mkdir()
         share = self.root / ".local/share"
@@ -504,9 +507,11 @@ class Service(unittest.TestCase):
         status, c, _ = self.api("POST", "accounts", {"tool":"claude","label":"Personal","create":True})
         self.assertEqual(status, 201, c)
         home = Path(c["home"])
-        self.assertEqual(home.parent, data / "cc-profile/profiles/claude")
+        self.assertEqual(home.parent, Path(self.env["CC_PROFILE_DATA_PATH"]) / "accounts/claude")
         self.assertTrue(c["present"])
-        alias = share / "cc-profile/profiles/claude" / home.name
+        self.assertEqual(list(data.iterdir()), [])
+        alias = data / "alias"
+        alias.symlink_to(home, target_is_directory=True)
         status, error, _ = self.api("POST", "accounts", {"tool":"claude","label":"Existing","home":str(alias)})
         self.assertEqual((status, error["error"]), (400, "bad_home"))
 
@@ -601,6 +606,34 @@ class Service(unittest.TestCase):
         self.assertNotIn("private prompt", str(data))
         self.assertNotIn("ticket", str(data))
 
+    def test_edit_directory_keeps_the_original_session_owner_after_rename(self):
+        c = self.account("claude", "work")
+        other = self.account("claude", "other")
+        self.assertEqual(self.api("PUT", "current/claude", {"config_id": c["id"]})[0], 200)
+        c = next(a for a in self.api("GET","accounts?tool=claude")[1]["items"] if a["id"] == c["id"])
+        route = f"accounts/{c['id']}"
+        sid = json.loads(self.cli("claude", "hello").stdout)["argv"][1]
+        original = Path(c["home"])
+        moved = self.root/"new parent"/"moved account"
+        moved.parent.mkdir()
+        original.rename(moved)
+        self.assertNotEqual(self.cli("claude","--resume",sid).returncode,0)
+        symlink = self.root/"alias"
+        symlink.symlink_to(moved)
+        copy = self.root/"copied home"
+        shutil.copytree(moved, copy)
+        for path, status in [(copy,409), (other["home"],409), (symlink,400), (original,400)]:
+            self.assertEqual(self.api("PATCH",route,{"revision":c["revision"],"home":str(path)})[0], status)
+        self.assertEqual(self.api("PATCH",route,{"revision":c["revision"]-1,"home":str(moved)})[0],409)
+        status, updated, _ = self.api("PATCH",route,{"revision":c["revision"],"home":str(moved)})
+        self.assertEqual(status,200,updated)
+        self.assertEqual((updated["id"],updated["label"],updated["enabled"],updated["current"],
+                          updated["home"],updated["revision"]),
+                         (c["id"],c["label"],True,True,str(moved),c["revision"]+1))
+        self.stop()
+        self.start()
+        self.assertEqual(json.loads(self.cli("claude","--resume",sid).stdout)["home"],str(moved))
+
     def test_recreating_a_home_does_not_inherit_its_session(self):
         home=Path(self.account("claude","recycled")["home"])
         launched=self.cli("claude","first")
@@ -636,7 +669,7 @@ class Service(unittest.TestCase):
         for version, code in [(1,b"404"),(2,b"426")]:
             with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
                 client.settimeout(2)
-                client.connect(str(self.root/"run/cc-profile/launch.sock"))
+                client.connect(str(self.root/"run/cc-profile/ccpd.sock"))
                 client.sendall(f"POST /v{version}/launch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".encode())
                 self.assertIn(code,client.recv(100))
         self.assertEqual(self.api("GET","startups")[1]["items"],[])

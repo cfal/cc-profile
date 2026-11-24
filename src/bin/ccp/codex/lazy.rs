@@ -49,11 +49,11 @@ impl Drop for Scratch {
     }
 }
 async fn neutral(req: &Request, argv: &[String], init: &Value) -> Result<Value> {
-    let runtime = paths::runtime_dir()?;
-    paths::private_dir(&runtime)?;
-    let public_home = runtime.join("codex-router-home");
+    let base = paths::scratch_dir()?;
+    paths::private_dir(&base)?;
+    let public_home = base.join("codex-router-home");
     paths::private_dir(&public_home)?;
-    let path = runtime.join(format!("codex-init-{}", Uuid::new_v4()));
+    let path = base.join(format!("codex-init-{}", Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&path)?;
     let scratch = Scratch(path);
     let binary = req.binary.as_ref().ok_or_else(bad)?;

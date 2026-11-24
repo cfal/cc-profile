@@ -81,7 +81,7 @@ class Antigravity(unittest.TestCase):
         import socket
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
             sock.settimeout(3)
-            sock.connect(str(self.s.root/"run/cc-profile/launch.sock"))
+            sock.connect(str(self.s.root/"run/cc-profile/ccpd.sock"))
             with closing(http.client.HTTPConnection("localhost")) as conn:
                 conn.sock=sock
                 conn.request("POST",path,json.dumps(body),{"Content-Type":"application/json"})
@@ -336,6 +336,28 @@ class Antigravity(unittest.TestCase):
             self.assertFalse(Path(json.loads((home/"last-run").read_text())["runtime"]).exists())
         finally:
             hold.unlink()
+
+    def test_edit_directory_keeps_saved_antigravity_conversation_on_owner(self):
+        self.profile("other")
+        owner = self.profile("owner")
+        sid = str(uuid.uuid4())
+        home = Path(owner["home"])
+        saved = home/".gemini/antigravity-cli/conversations"
+        for folder in (saved.parents[1], saved.parent, saved):
+            folder.mkdir(mode=0o700, exist_ok=True)
+        (saved/(sid+".db")).write_bytes(b"fixture")
+        first = self.s.cli("agy","--conversation",sid)
+        self.assertEqual(first.returncode,0,first.stderr)
+        moved = home.with_name("renamed")
+        home.rename(moved)
+        status, result, _ = self.s.api("PATCH", f"accounts/{owner['id']}",
+                                       {"revision":owner["revision"], "home":str(moved)})
+        self.assertEqual(status,200,result)
+        resumed = self.s.cli("agy","--conversation",sid)
+        self.assertEqual(resumed.returncode,0,resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)["home"], str(moved))
+        row, = self.s.api("GET","sessions?tool=agy")[1]["items"]
+        self.assertEqual((row["native_id"],row["config_id"]), (sid,owner["id"]))
 
     def test_tui_resume_uses_the_unique_saved_file_not_rotation(self):
         a, b, c = self.profile("first"), self.profile("owner"), self.profile("third")
@@ -774,7 +796,7 @@ class Antigravity(unittest.TestCase):
                 (hb/"hold-list").unlink()
             self.assertIn("error",job.result())
         self.assertEqual(self.s.api("GET","sessions?tool=agy")[1]["items"],[])
-        self.assertFalse(list((self.s.root/"run/cc-profile").glob("agy-*")))
+        self.assertFalse(list(self.s.scratch.glob("agy-*")))
 
     def test_list_conflicting_historical_owner_rolls_back_earlier_rows(self):
         a,b=self.profile("a"),self.profile("b")
@@ -896,7 +918,7 @@ class Antigravity(unittest.TestCase):
             finally:
                 (home/"hold-list").unlink()
                 if p.poll() is None: p.kill()
-        self.assertFalse(list((self.s.root/"run/cc-profile").glob("agy-*")))
+        self.assertFalse(list(self.s.scratch.glob("agy-*")))
 
     def test_lazy_protocol_failures_do_not_send_a_session_or_guess_an_owner(self):
         a,b=self.profile("a"),self.profile("b")

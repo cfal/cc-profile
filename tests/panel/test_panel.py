@@ -82,6 +82,22 @@ class Panel(unittest.TestCase):
             expect(page.locator(".account-row").get_by_text("Default", exact=True)).to_have_count(0)
             page.get_by_role("button",name="Set as default").click()
             expect(page.get_by_role("button",name="Clear default account")).to_be_visible()
+            moved = service.root/"moved panel config"
+            config.rename(moved)
+            page.get_by_role("button",name="Edit directory").click()
+            directory = page.get_by_role("dialog",name="Edit directory").get_by_label("Directory",exact=True)
+            expect(directory).to_be_focused()
+            expect(directory).to_have_value(str(config))
+            wrong = service.root/"another home"
+            wrong.mkdir()
+            directory.fill(str(wrong))
+            page.get_by_role("button",name="Save changes").click()
+            expect(page.get_by_role("alert")).to_contain_text("original account directory")
+            directory.fill(str(moved))
+            page.get_by_role("button",name="Save changes").click()
+            expect(page.get_by_role("dialog")).to_be_hidden()
+            expect(page.locator(".detail")).to_contain_text(str(moved))
+            config = moved
             page.get_by_role("button",name="Edit config").click()
             page.get_by_label("Proxy mode").select_option("custom")
             proxy = page.get_by_role("textbox",name="Proxy URL",exact=True)

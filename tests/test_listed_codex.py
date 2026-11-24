@@ -30,7 +30,7 @@ class ListedCodex(unittest.TestCase):
     def private(self, path, body):
         with socket.socket(socket.AF_UNIX) as sock, closing(http.client.HTTPConnection("localhost")) as conn:
             sock.settimeout(5)
-            sock.connect(str(self.s.root / "run/cc-profile/launch.sock"))
+            sock.connect(str(self.s.root / "run/cc-profile/ccpd.sock"))
             conn.sock = sock
             conn.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
             r = conn.getresponse()

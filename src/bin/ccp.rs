@@ -47,8 +47,8 @@ const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
 
 New chats follow the routing policy; exact resumes use their original config. No transfers,
 pickers or --last. Choose each provider's default account for maintenance commands in
-the ccpd web panel (default http://127.0.0.1:8743). Set CC_PROFILE_RUNTIME_DIR to use
-the same custom socket directory as ccpd.";
+the ccpd web panel (default http://127.0.0.1:8743). If using CC_PROFILE_RUNTIME_PATH,
+set it for both launcher and daemon so they use the same ccpd.sock.";
 const CLAUDE_OVERRIDES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",

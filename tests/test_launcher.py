@@ -48,7 +48,7 @@ sys.exit(17)
                 try: self.wfile.write(body)
                 except BrokenPipeError: pass
             def log_message(self,*args): pass
-        server=socketserver.ThreadingUnixStreamServer(str(self.directory/"launch.sock"),Handler)
+        server=socketserver.ThreadingUnixStreamServer(str(self.directory/"ccpd.sock"),Handler)
         thread=threading.Thread(target=server.serve_forever,kwargs={"poll_interval":0.02},daemon=True)
         thread.start()
         self.addCleanup(server.server_close)

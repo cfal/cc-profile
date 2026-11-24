@@ -14,7 +14,7 @@ class PeerCredentials(unittest.TestCase):
         service = test_service.Service("test_web_authenticates_reads_and_mutations")
         self.addCleanup(service.doCleanups)
         service.setUp()
-        sock = service.root / "run/cc-profile/launch.sock"
+        sock = service.root / "run/cc-profile/ccpd.sock"
         # Use a directory FD so the test never changes permissions above its fixture.
         directory = os.open(sock.parent, os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, directory)

@@ -11,12 +11,14 @@ use hyper_util::rt::TokioIo;
 use std::{error::Error as _, os::unix::fs::MetadataExt, time::Duration};
 use tokio::net::UnixStream;
 
+pub const SOCKET_NAME: &str = "ccpd.sock";
+
 pub fn unreachable() -> Error {
     Error::unavailable("transport", "Cannot reach ccpd on the private socket.")
 }
 
 pub async fn post(route: &'static str, body: &[u8]) -> Result<(StatusCode, Bytes)> {
-    let dir = paths::runtime_dir()?;
+    let dir = paths::ipc_dir()?;
     let m = dir.symlink_metadata().map_err(|_| unreachable())?;
     if !m.is_dir() || dir.canonicalize()? != dir || m.uid() != paths::uid() || m.mode() & 0o077 != 0
     {
@@ -24,7 +26,7 @@ pub async fn post(route: &'static str, body: &[u8]) -> Result<(StatusCode, Bytes
     }
     let socket = tokio::time::timeout(
         Duration::from_secs(2),
-        UnixStream::connect(dir.join("launch.sock")),
+        UnixStream::connect(dir.join(SOCKET_NAME)),
     )
     .await
     .map_err(|_| unreachable())?

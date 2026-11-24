@@ -148,7 +148,7 @@ pub fn login_stamp(home: &Path) -> Result<Option<LoginStamp>> {
 pub struct Runtime(PathBuf);
 impl Runtime {
     pub fn new() -> Result<Self> {
-        let base = paths::runtime_dir()?;
+        let base = paths::scratch_dir()?;
         paths::private_dir(&base)?;
         let path = base.join(format!("agy-{}", uuid::Uuid::new_v4().simple()));
         fs::DirBuilder::new().mode(0o700).create(&path)?;

@@ -78,7 +78,7 @@ pub fn save(store: &Store, hash: String, expected_revision: Option<i64>) -> Resu
     })
 }
 pub fn prompt() -> Result<()> {
-    let state = ccpd::paths::state_dir()?;
+    let state = ccpd::paths::data_dir()?;
     let database = Store::user_db_path(&state);
     eprintln!("Panel database: {}", database.display());
     let read = |prompt| {

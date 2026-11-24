@@ -158,7 +158,7 @@ class NativeACP(unittest.TestCase):
         self.assertTrue(any("Using file-based token storage because no D-Bus session bus detected" in log.read_text()
                             for log in (root/"log").glob("*.log")))
         self.assertEqual(s.api("GET","sessions?tool=agy")[1]["items"],[])
-        self.assertFalse(list((s.root/"run/cc-profile").glob("agy-*")))
+        self.assertFalse(list(s.scratch.glob("agy-*")))
 
 if __name__=="__main__":
     unittest.main()

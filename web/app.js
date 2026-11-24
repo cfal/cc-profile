@@ -598,6 +598,19 @@ async function logs(view, params, ver, enter) {
     ),
   ));
 }
+function editDirectory(c) {
+  const home = el("input", {value: c.home, required: true, spellcheck: "false", autocomplete: "off",
+    "aria-describedby": c.tool === "codex" ? "directory-note" : null});
+  const fields = [field("Directory", home)];
+  if (c.tool === "codex") fields.push(el("p", {id: "directory-note", class: "caption"},
+    "Codex may still look for older transcripts at their previous paths."));
+  modal("Edit directory", fields, "Save changes", async () => {
+    if (home.value === c.home) return;
+    await api("accounts/" + c.id, "PATCH", {revision: c.revision, home: home.value});
+    notice("Directory updated.");
+  });
+  home.focus();
+}
 function accountForm(filter, c) {
   const provider = !c && !filter && select(Object.entries(names), "claude", {required: true});
   const label = el("input", { required: true, maxlength: 100, value: c?.label || "" }),
@@ -644,7 +657,7 @@ function accountForm(filter, c) {
       field("Label", label),
       field("Priority", priority),
       el("p", {id: "priority-hint", class: "caption"}, "0–100. Higher values win in priority mode."),
-      ...(c ? [field("Config directory", code(c.home))] : [field("Profile directory", source), homeField]),
+      ...(!c ? [field("Profile directory", source), homeField] : []),
       field("Proxy mode", mode),
       fields,
     ],
@@ -1286,7 +1299,8 @@ async function accounts(params, ver, enter) {
         datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
         datum("Priority", c.priority ?? 0),
         datum("Maintenance commands", defaultAccountControl),
-        datum("Directory", code(c.home)),
+        datum("Directory", el("div", {class: "row"}, code(c.home),
+          ib("Edit directory", "pencil", () => editDirectory(c)))),
         datum("Proxy", c.proxy_mode === "custom"
           ? c.proxy_url?.url
           : simple(c.proxy_mode)))), quotaCard(c).section);

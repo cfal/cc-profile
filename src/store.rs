@@ -19,6 +19,7 @@ use url::Url;
 pub struct Store {
     db: Mutex<Connection>,
     state_dir: PathBuf,
+    accounts_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,7 +230,10 @@ fn directory_identity_at(
         .ok_or_else(|| Error::bad("home_identity", "Use a filesystem that reports a directory creation time so ccp can detect replaced configs."))?;
     Ok((makedev(m.stx_dev_major, m.stx_dev_minor), m.stx_ino, birth))
 }
-fn directory(path: &Path, state: &Path) -> Result<(u64, u64, i64)> {
+fn overlap(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+fn directory(path: &Path, state: &Path, accounts: &Path, tool: &str) -> Result<(u64, u64, i64)> {
     if !path.is_absolute()
         || path.canonicalize().ok().as_deref() != Some(path)
         || path.parent().is_none()
@@ -239,10 +243,12 @@ fn directory(path: &Path, state: &Path) -> Result<(u64, u64, i64)> {
         || std::env::var_os("HOME")
             .as_deref()
             .is_some_and(|h| Path::new(h).starts_with(path))
-        || path.starts_with(state)
+        || ((path.starts_with(state) || path.starts_with(accounts))
+            && path.parent() != Some(accounts.join(tool).as_path()))
         || state.starts_with(path)
-        || crate::paths::runtime_dir()
-            .is_ok_and(|runtime| path.starts_with(&runtime) || runtime.starts_with(path))
+        || accounts.starts_with(path)
+        || overlap(path, &crate::paths::ipc_dir()?)
+        || overlap(path, &crate::paths::scratch_dir()?)
     {
         return Err(bad_home());
     }
@@ -275,6 +281,22 @@ impl Store {
         Ok(store)
     }
     pub fn open(path: &Path) -> Result<Self> {
+        let state_dir = path.parent().unwrap_or(Path::new(".")).to_owned();
+        let accounts_dir = crate::paths::accounts_dir(&state_dir)?;
+        let scratch = crate::paths::scratch_dir()?;
+        let ipc = crate::paths::ipc_dir()?;
+        if state_dir.starts_with(&accounts_dir)
+            || state_dir.starts_with(&ipc)
+            || state_dir.starts_with(&scratch)
+            || overlap(&accounts_dir, &scratch)
+            || overlap(&accounts_dir, &ipc)
+            || overlap(&ipc, &scratch)
+        {
+            return Err(Error::bad(
+                "invalid_directory",
+                "Keep account homes separate from socket and temporary files. The accounts directory cannot contain the router data directory.",
+            ));
+        }
         let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(3))?;
         db.execute_batch(
@@ -402,7 +424,8 @@ impl Store {
         db.execute_batch("PRAGMA foreign_keys=ON")?;
         Ok(Self {
             db: Mutex::new(db),
-            state_dir: path.parent().unwrap_or(Path::new(".")).to_owned(),
+            state_dir,
+            accounts_dir,
         })
     }
     pub fn db(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -428,7 +451,9 @@ impl Store {
         label(v["label"].as_str().unwrap_or(""))?;
         priority(&v, 0)?;
         proxy_settings(&v, None)?;
-        let root = crate::paths::profile_root(v["tool"].as_str().unwrap_or(""))?;
+        let t = tool(v["tool"].as_str().unwrap_or(""))?;
+        let root = self.accounts_dir.join(t);
+        crate::paths::private_dir(&self.accounts_dir)?;
         crate::paths::private_dir(&root)?;
         let home = root.join(uuid::Uuid::new_v4().to_string());
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
@@ -452,7 +477,7 @@ impl Store {
         let t = tool(v["tool"].as_str().unwrap_or(""))?;
         let name = label(v["label"].as_str().unwrap_or(""))?;
         let requested = Path::new(v["home"].as_str().unwrap_or(""));
-        let (dev, ino, birth) = directory(requested, &self.state_dir)?;
+        let (dev, ino, birth) = directory(requested, &self.state_dir, &self.accounts_dir, t)?;
         if t == "agy" {
             crate::agy::has_login(requested)?;
         }
@@ -481,14 +506,39 @@ impl Store {
         })
     }
     pub fn edit(&self, id: i64, v: &Value) -> Result<Config> {
+        let moved = if let Some(value) = v.get("home") {
+            let c = config(&*self.db()?, id)?;
+            revision(v, &c)?;
+            let path = Path::new(value.as_str().ok_or_else(bad_home)?);
+            let (dev, ino, birth) = directory(path, &self.state_dir, &self.accounts_dir, &c.tool)?;
+            if (dev, ino, Some(birth)) != (c.dev, c.ino, c.birth_ns) {
+                return Err(Error::conflict(
+                    "different_directory",
+                    "Choose the original account directory at its new path. A copy or a different directory cannot keep this account's sessions.",
+                ));
+            }
+            if c.tool == "agy" {
+                crate::agy::has_login(path)?;
+            }
+            Some(path.components().collect::<PathBuf>())
+        } else {
+            None
+        };
         self.write(|db|{
             let c=config(db,id)?; revision(v,&c)?;
+            if let Some(home) = &moved {
+                for t in crate::types::TOOLS {
+                    if configs(db,t)?.iter().any(|other| other.id != id && other.home == *home) {
+                        return Err(Error::conflict("directory_in_use", "This path is already registered to another account."));
+                    }
+                }
+            }
             let name=label(v.get("label").map(|s|s.as_str().unwrap_or("")).unwrap_or(&c.label))?;
             let enabled=match v.get("enabled"){Some(v)=>v.as_bool().ok_or_else(||Error::bad("bad_enabled","Expected a boolean."))?,None=>c.enabled};
             let (mode,url)=proxy_settings(v,Some(&c))?;
             let priority=priority(v,c.priority)?;
-            db.execute("UPDATE configs SET label=?,enabled=?,current=current AND ?,proxy_mode=?,proxy_url=?,priority=?,revision=revision+1 WHERE id=?",
-                params![name,enabled,enabled,mode,url,priority,id])?;
+            db.execute("UPDATE configs SET home=COALESCE(?,home),label=?,enabled=?,current=current AND ?,proxy_mode=?,proxy_url=?,priority=?,revision=revision+1 WHERE id=?",
+                params![moved.as_deref().and_then(Path::to_str),name,enabled,enabled,mode,url,priority,id])?;
             config(db,id)
         })
     }

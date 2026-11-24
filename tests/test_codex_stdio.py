@@ -47,7 +47,8 @@ class DeferredCodex(unittest.TestCase):
         self.assertEqual(result["result"]["account"]["email"],"fixture@example.test")
         self.assertFalse(self.s.api("GET","startups")[1]["items"])
         self.assertFalse(self.s.api("GET","sessions")[1]["items"])
-        self.assertFalse(list((self.s.root/"run/cc-profile").glob("codex-init-*")))
+        self.assertFalse(list(self.s.scratch.glob("codex-init-*")))
+        self.assertTrue((self.s.scratch/"codex-router-home").is_dir())
         first, = self.connection(("thread/start",{}))
         self.assertEqual(first["result"]["home"],self.a["home"])
 

@@ -161,9 +161,24 @@ class Native(unittest.TestCase):
         self.assertEqual((resumed["thread"]["id"], resumed["thread"]["path"]), (uid, str(rollout)))
         self.assertEqual(private["codexHome"], a["home"])
         public_home = Path(public["codexHome"])
-        self.assertTrue(public_home.is_dir() and public_home.is_relative_to(Path(self.s.env["XDG_RUNTIME_DIR"])))
+        self.assertEqual(public_home, self.s.scratch/"codex-router-home")
+        self.assertTrue(public_home.is_dir())
         self.assertEqual(public | {"codexHome":a["home"]}, private)
         self.assertRegex(public["userAgent"], r"^garcon/\d+\.\d+\.\d+\b")
+
+        old = Path(a["home"])
+        moved = old.with_name("relocated-codex")
+        old.rename(moved)
+        status, updated, _ = self.s.api("PATCH", f"accounts/{a['id']}",
+                                        {"revision":a["revision"],"home":str(moved)})
+        self.assertEqual(status,200,updated)
+        new_rollout = moved/rollout.relative_to(old)
+        private, recovery = asyncio.run(exchange(["--for-session", uid], "thread/resume",
+                                                 {"threadId":uid,"path":str(new_rollout)}))
+        self.assertEqual(recovery["thread"]["path"],str(new_rollout))
+        _, reopened = asyncio.run(exchange([], "thread/resume", {"threadId":uid}))
+        self.assertEqual((reopened["thread"]["id"], reopened["thread"]["path"]),
+                         (uid, str(moved/rollout.relative_to(old))))
 
     def test_default_codex_exec_and_stdio_agree_on_sticky_owner(self):
         c = self.s.account("codex","no-hooks")
