@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import select
 import subprocess
 import unittest
 import uuid
@@ -97,3 +98,25 @@ class DeferredCodex(unittest.TestCase):
         _, rejected = self.connection(("thread/start",{}),("thread/list",{}))
         self.assertIn("error",rejected)
         self.assertNotIn("result",rejected)
+
+    def test_disabling_the_bound_profile_blocks_another_start_not_existing_turn_traffic(self):
+        with subprocess.Popen([svc.LAUNCHER,"codex","app-server"],env=self.s.env,cwd=self.s.root,
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True) as child:
+            try:
+                def rpc(method,params):
+                    child.stdin.write(json.dumps({"id":7,"method":method,"params":params})+"\n")
+                    child.stdin.flush()
+                    self.assertTrue(select.select([child.stdout],[],[],8)[0])
+                    return json.loads(child.stdout.readline())
+                self.assertIn("result",rpc("initialize",{}))
+                child.stdin.write('{"method":"initialized"}\n')
+                first = rpc("thread/start",{})["result"]
+                self.assertEqual(first["home"],self.a["home"])
+                self.assertEqual(self.s.api("PATCH","accounts/"+str(self.a["id"]),
+                                            {"enabled":False,"revision":self.a["revision"]})[0],200)
+                self.assertIn("error",rpc("thread/start",{}))
+                self.assertIn("result",rpc("turn/interrupt",{"threadId":first["thread"]["id"]}))
+            finally:
+                child.terminate()
+                child.wait(timeout=4)
+        self.assertEqual(len(self.s.api("GET","sessions")[1]["items"]),1)

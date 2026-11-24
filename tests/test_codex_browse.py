@@ -261,6 +261,23 @@ class Browse(unittest.TestCase):
             self.assert_denied(c.read())
             self.assertEqual(c.call("account/read", {})["result"]["account"]["label"],"beta")
 
+    def test_disabled_while_a_previous_worker_is_busy_is_not_opened(self):
+        a, b = (Path(c["home"]) for c in (self.a,self.b))
+        (a/"hold").touch()
+        with self.connection() as c:
+            try:
+                c.send("thread/list",GARCON)
+                deadline = time.monotonic()+5
+                while not (a/"waiting").exists():
+                    self.assertLess(time.monotonic(),deadline)
+                    time.sleep(.02)
+                self.change(self.b,enabled=False)
+            finally:
+                (a/"hold").unlink()
+            self.assert_denied(c.read())
+            self.assertFalse((b/"calls").exists())
+            self.assertFalse(self.items("sessions"))
+
     def test_busy_sweep_does_not_block_cursor_or_new_thread(self):
         home = Path(self.a["home"])
         with self.connection() as cached, self.connection() as running, self.connection() as competitor:

@@ -190,7 +190,17 @@ async fn collect(conn: &Connection, query: &Query, plans: &[(Plan, i64)]) -> Res
     let mut read_states_available = !plans.is_empty();
     let mut count_bytes = 0;
     let mut pages = 0;
-    for (plan, _) in plans {
+    for (index, (plan, revision)) in plans.iter().enumerate() {
+        // A preceding worker may have been slow. Don't start the next child
+        // using a selection captured before that wait.
+        if index > 0 {
+            let current = conn.plans(true).await?;
+            if roster(&current) != profiles
+                || !current.iter().any(|(p, r)| p == plan && r == revision)
+            {
+                return Err(stale());
+            }
+        }
         let mut server = conn.connected(plan).await?;
         let mut cursors = HashSet::new();
         let mut params = query.filters.clone();

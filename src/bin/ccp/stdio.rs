@@ -128,8 +128,7 @@ pub(super) fn started(line: &[u8], starts: &Starts) -> Option<(&'static str, Thr
     let source = starts.lock().unwrap().remove(&reply.id)?;
     let thread = serde_json::from_slice::<Started>(line).ok()?.result.thread;
     if let Some(source) = source {
-        return (!thread.ephemeral
-            && thread.id == thread.session_id
+        return (thread.id == thread.session_id
             && thread.parent_thread_id.is_none()
             && thread.id != source
             && super::native_id(&thread.id).is_ok()
