@@ -154,7 +154,7 @@ impl Runtime {
         fs::DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self(path))
     }
-    pub fn configure(&self, cmd: &mut Command, home: &Path, args: &[String]) {
+    pub fn configure(&self, cmd: &mut Command, profile: &Path, args: &[String]) {
         for key in [
             "DBUS_SESSION_BUS_ADDRESS",
             "DBUS_STARTER_ADDRESS",
@@ -168,16 +168,29 @@ impl Runtime {
         ] {
             cmd.env_remove(key);
         }
-        cmd.env("HOME", home)
-            .env("XDG_RUNTIME_DIR", &self.0)
-            // Declare the intended backend as well; 1.5.14 still needs the bus-less runtime.
+        cmd.env("XDG_RUNTIME_DIR", &self.0)
             .env("AGY_ACP_FORCE_FILE_STORAGE", "1")
+            .env("AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "1")
             .args(args);
         if args.first().is_some_and(|s| s == "acp") {
-            cmd.arg("--gemini-dir")
-                .arg(home.join(".gemini"))
+            // The plan carries the profile as HOME. Restore the caller's HOME for
+            // ACP tools; the two flags select the account for native ACP itself.
+            match std::env::var_os("HOME") {
+                Some(home) => cmd.env("HOME", home),
+                None => cmd.env_remove("HOME"),
+            };
+            // ACP's separate plugin secret store follows XDG_CONFIG_HOME, not --gemini-dir.
+            cmd.env("XDG_CONFIG_HOME", profile.join(".config"))
+                .arg("--gemini-dir")
+                .arg(profile.join(".gemini"))
                 .arg("--app-data-dir")
                 .arg(APP_DIR);
+        } else {
+            // Only ACP accepts the storage flags. Revisit this HOME fallback for
+            // TUI/print when https://github.com/google-antigravity/antigravity-cli/issues/1784 lands.
+            // https://github.com/google-antigravity/antigravity-cli/issues/1815 proposes a shared
+            // environment for AgY and its tools, not a separate HOME for spawned commands.
+            cmd.env("HOME", profile);
         }
         let parent = std::process::id();
         unsafe {

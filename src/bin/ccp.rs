@@ -42,6 +42,7 @@ const HELP: &str = "Usage: ccp <claude|codex|agy> [native arguments...]
   ccp agy --print --sandbox 'summarize'
   ccp agy models
   ccp agy --conversation <session-uuid>
+  ccp agy --resume <session-uuid>       (or -r; native AgY 1.5.16+)
   ccp agy acp [--for-session <session-id>]
   ccp login <profile-id> [--status]
   ccp usage <antigravity-profile-id>

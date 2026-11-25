@@ -6,7 +6,7 @@ On Linux 1.5.16, offline tests with disposable signed-out profiles also confirme
 
 ## Set up a profile
 
-1. In Accounts, choose Antigravity and add a profile. Its directory is a dedicated **HOME**, not the `.gemini` directory itself. An existing home must be a private, physical directory owned by the same Linux user. Project files stay in the workspace supplied by the harness.
+1. In Accounts, choose Antigravity and add a profile. Its directory is the account root containing `.gemini`, not the `.gemini` directory itself. An existing root must be a private, physical directory owned by the same Linux user. Project files stay in the workspace supplied by the harness.
 2. Run `ccp login <id>`. This uses native `agy acp --login`; the browser and pasted-code step belong to Google. The child receives the saved proxy. Your browser uses its own network settings. `ccp login <id> --status` checks for a nonempty, private token file **without reading it**. It does not verify the account email, entitlement, expiry or refresh. To check catalog access, select the profile in Accounts and use **Refresh sign-in status**. It runs native `agy models` in that profile, regardless of which account is the default. A network failure does not mean the profile is signed out. If the profile or its saved login changes during the check, the result is discarded; refresh again.
 3. Enable the profile. Configure the harness executable as `ccp` with arguments `["agy","acp"]`, or use the provider-named `agy` launcher link with `["acp"]`. Both accept the same arguments for a new chat or a cold reconnect.
 
@@ -30,6 +30,8 @@ Independently of the installed CLI version, ccpd watches each registered profile
 
 If the same profile also reports that UUID through ACP, Sessions offers both resume commands, each with its own workspace.
 
+AgY [1.5.16 added](https://antigravity.google/docs/changelog?tab=cli) `agy --resume <uuid>` and `agy -r <uuid>` as aliases for `--conversation`. The launcher supports all three for interactive resumes, including with `-i 'follow-up'`. Use `--conversation` on older native builds. An exact UUID is required: `-c` / `--continue` means "most recent" within one native account, not across the router's accounts. Combining print with a resume selector is not supported by CCP.
+
 New and resumed terminal sessions accept local options before or after `--conversation`, for example `ccp agy --conversation=<uuid> --sandbox --mode plan`. Pass `--model`, `--effort`, `--mode`, `--agent`, `--add-dir` (repeatable), or `-i`/`--prompt-interactive` with one value per occurrence. Use `-i 'your prompt'` rather than a bare positional argument. The switches `--sandbox` and `--dangerously-skip-permissions` also accept `=true` or `=false`. Enabling the latter tells native AgY to auto-approve tool permissions. Account, storage and remote overrides are not terminal routing options.
 
 For a one-shot, use `ccp agy --sandbox -p --output-format=json 'your prompt'` or pipe text to `ccp agy --print`. With no prompt argument, the launcher streams text stdin unchanged; an empty pipe or terminal gets the native empty-prompt error instead of opening the TUI. For NDJSON, use `ccp agy -p --input-format stream-json --output-format stream-json`: native AgY reads the stream directly.
@@ -44,7 +46,12 @@ On 1.5.14, `--conversation` [resumes an existing conversation](https://antigravi
 
 Tested 2026-11-22 with Google's [Linux x86-64 1.5.14 archive](https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.14-5302690847260672/linux-x64/cli_linux_x64.tar.gz); archive SHA-512: `83311d3f354567612dc16c1ae2ea9b503d6f6833aa4e138d39aa229da3f3bb99b0e4d7cca0bce4796b0060d6a51d8113eb7449ed5dc0e7900bf217107ea5bff9`.
 
-Both login and ACP use `--gemini-dir <profile>/.gemini --app-data-dir antigravity-cli`. The first argument is an absolute root; the second is a **relative name** (an absolute app-data path initialized but failed when starting a session). Child HOME is also the profile root. On the pinned build the file-store lookup is:
+On Linux 1.5.17, `agy acp` accepts the two storage flags; terminal chats, print, models and quota do not. CCP does not mount or switch any directories. The rule is the same for every client:
+
+- **ACP, including login and list workers:** pass `--gemini-dir <profile>/.gemini --app-data-dir antigravity-cli`. The first selects the root, including shared native settings under its `config/`; the second is a **relative name** for this app's token, settings, logs and conversations. Set `XDG_CONFIG_HOME=<profile>/.config` because ACP's plugin secret store lives under `antigravity/plugin-secrets.json`, outside the Gemini root. Keep the spawning process's `HOME` (launcher for chats/login, daemon for browse workers).
+- **Terminal UI, exact terminal resume, print, models and quota:** set `HOME=<profile>` on the native child. These commands find the same native state under `$HOME/.gemini`. Passing the ACP flags on a bare 1.5.17 chat is a native argument error.
+
+This selects AgY's storage; it is not a filesystem sandbox. A shell or Git process started by ACP sees the ordinary `~` and can find `~/.gitconfig`. Tools following `XDG_CONFIG_HOME` see the profile's config directory. A helper that opens `~/.gemini` directly sees the caller's tree, not the ACP flags. The account's Google login file is:
 
     <profile>/.gemini/antigravity-cli/antigravity-oauth-token
 
@@ -60,9 +67,11 @@ Separate data roots alone do **not** isolate Google accounts when a Linux Secret
 | Set the bus address to a dead socket | Attempted the keyring first, then fell back. Not used by cc-profile. |
 | Unset the bus address **and** use a fresh private runtime with no bus socket | Selected file storage immediately. Two profiles each opened only their own dummy token file, with no Secret Service calls. Login startup logged the same backend selection. |
 
-The launcher sets the flag and uses the last combination on **the native child only**; it overrides any inherited flag value without changing the harness or daemon environment. The child's private runtime is created under CCP's temporary base (`CC_PROFILE_TEMP_PATH` or the OS temp directory) and removed on normal exit. It is separate from the router's `ccpd.sock` and from the account home where native login and history persist. The shipped adapter neither installs nor impersonates a Secret Service. A compatibility symlink or a raw `agy` invocation does not select this credential backend. This controls native storage discovery, not OS security against another process with your UID. Protect the account home and its backups like a password. ACP workers and tools inherit this private HOME and environment, not the desktop keyring. `--process-per-session` separates ACP workers; it does not select an account.
+CCP uses the last combination on **the native child only**. It also sets `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`, which 1.5.17 recognizes, alongside the older storage preference. Do not rely on either flag alone across versions. The private runtime is created under `CC_PROFILE_TEMP_PATH` or the OS temp directory and removed on normal exit. It is separate from `ccpd.sock` and the persistent account directory. CCP neither installs nor impersonates a Secret Service. Protect the account directory and its backups like a password. `--process-per-session` separates ACP workers; it does not select an account.
 
 In separate offline tests, setting `ANTIGRAVITY_GEMINI_DIR` and `ANTIGRAVITY_APP_DATA_DIR` did not move the ACP session database or logs. Changing HOME did move the default tree; explicit ACP flags moved it predictably. The product is distributed as a binary: Google's [public CLI repository](https://github.com/google-antigravity/antigravity-cli/tree/b9f5bf40b9e9e66f417f7bc6e8c0b22a079bc51a) has release notes, examples and issue reports, not the CLI implementation. See also the [Linux keyring report](https://github.com/google-antigravity/antigravity-cli/issues/1610).
+
+**Why not bind-mount the profile over `~/.gemini`?** A private mount can preserve ordinary `HOME` even for the TUI, without hiding the rest of the host. But it need not preserve host privileges. On this VM, unprivileged `bwrap` with the host root bound read/write and one disposable directory overlaid could reach the host Docker socket (`/_ping` returned 200). Only the calling UID was mapped and `NoNewPrivs` was set; `sudo -n true` failed. CCP does not wrap normal launches in bubblewrap. The more restrictive namespaces in the native test suite are for offline verification only.
 
 ## Usage and network
 

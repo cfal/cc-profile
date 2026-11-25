@@ -9,15 +9,24 @@ args = sys.argv[1:]
 if args == ["--version"]:
     print("1.5.14")
     sys.exit()
-home = Path(os.environ["HOME"])
+if args[:1] == ["acp"]:
+    assert args[-4] == "--gemini-dir" and args[-2:] == ["--app-data-dir", "antigravity-cli"], args
+    gemini = Path(args[-3])
+    assert gemini.is_absolute() and gemini.name == ".gemini"
+    home = gemini.parent
+    assert os.environ["XDG_CONFIG_HOME"] == str(home / ".config")
+else:
+    assert "--gemini-dir" not in args and "--app-data-dir" not in args, args
+    home = Path(os.environ["HOME"])
+    assert "XDG_CONFIG_HOME" not in os.environ
 rt = Path(os.environ["XDG_RUNTIME_DIR"])
 assert rt.is_dir() and rt.stat().st_mode & 0o077 == 0 and not (rt / "bus").exists()
 assert "DBUS_SESSION_BUS_ADDRESS" not in os.environ
-assert "XDG_CONFIG_HOME" not in os.environ
 assert os.environ["AGY_ACP_FORCE_FILE_STORAGE"] == "1"
+assert os.environ["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"] == "1"
 assert home.is_absolute()
 obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],
-       "runtime": str(rt), "home": str(home), "cwd": os.getcwd()}
+       "runtime": str(rt), "home": os.getenv("HOME"), "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
 if not args or (args[0].startswith("-") and args[0] not in ("--settings","--output-format","-p")):
     if (home/"interactive-test").exists():
@@ -88,7 +97,7 @@ if "/usage" in args:
             {"name":"unused","buckets":{"unknown_schema":"fixture-private"}},
             {"name":"fixture-private","buckets":[{"window":"weekly","remaining_fraction":1}]}]}}}))
     sys.exit()
-assert args[0] == "acp" and args[-4:] == ["--gemini-dir",str(home/".gemini"),"--app-data-dir","antigravity-cli"], args
+assert args[0] == "acp", args
 assert "--for-session" not in args
 if "--login" in args:
     token = home/".gemini/antigravity-cli/antigravity-oauth-token"

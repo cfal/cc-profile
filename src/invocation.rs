@@ -217,7 +217,7 @@ fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
                 .ok_or_else(invalid)
         };
         match flag {
-            "-p" | "--print" if !print => {
+            "-p" | "--print" | "--prompt" if !print => {
                 print = true;
                 let operand = inline.or_else(|| it.next_if(|a| !a.starts_with('-') || *a == "-"));
                 if let Some(p) = operand
@@ -229,12 +229,12 @@ fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
             }
             "--dangerously-skip-permissions" | "--sandbox"
                 if matches!(inline, None | Some("true" | "false")) => {}
-            "--conversation" if resume.is_none() => {
+            "--conversation" | "--resume" | "-r" if resume.is_none() => {
                 let id = value()?;
                 resume = Some(native_id(id).ok().filter(|v| v == id).ok_or_else(|| {
                     Error::bad(
                         "exact_id_required",
-                        "Use the exact lowercase UUID printed by AgY with --conversation.",
+                        "Expected the exact lowercase conversation UUID printed by AgY.",
                     )
                 })?);
             }
@@ -1129,6 +1129,10 @@ mod tests {
             vec!["--conversation="],
             vec!["--conversation", "last"],
             vec!["--conversation", &id.to_uppercase()],
+            vec!["--resume", &id.to_uppercase()],
+            vec!["-r"],
+            vec!["--resume", id, "--conversation", id],
+            vec!["-r", id, "--resume", id],
             vec!["--model"],
             vec!["--mode="],
             vec!["--agent", ""],
@@ -1139,6 +1143,7 @@ mod tests {
             vec!["--dangerously-skip-permissions=maybe"],
             vec!["--sandbox", "false"],
             vec!["--continue"],
+            vec!["-c"],
             vec!["--for-session", id],
             vec!["acp", "--conversation", id],
             vec!["--sandbox", "acp"],

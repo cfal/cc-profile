@@ -35,6 +35,44 @@ class NativeACP(unittest.TestCase):
         s.env["DBUS_SESSION_BUS_ADDRESS"]="unix:path=/run/not-a-real-desktop-bus"
         self.service, self.profile = s, c
 
+    def test_upstream_storage_flags_by_command(self):
+        s = self.service
+        # An upstream flag change is a reason to revisit Runtime::configure,
+        # not a reason to block launches on a new version number.
+        for command in ([], ["models"], ["acp"]):
+            with self.subTest(command=command):
+                p = subprocess.run([s.root/"bin/agy", *command, "--help"], env=s.env, cwd=s.root,
+                                   capture_output=True, text=True, timeout=8)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                help_text = p.stdout + p.stderr
+                for flag in ("--gemini-dir", "--app-data-dir"):
+                    self.assertEqual(flag in help_text, command == ["acp"], flag)
+
+    def test_native_terminal_resume_aliases_select_saved_file_owner(self):
+        s = self.service
+        help_result = subprocess.run([s.root/"bin/agy","--help"], cwd=s.root, env=s.env,
+                                     capture_output=True, text=True, check=True, timeout=8)
+        if "--resume" not in help_result.stdout + help_result.stderr:
+            self.skipTest("native CLI does not advertise the 1.5.16 resume aliases")
+        _, owner, _ = s.api("POST","accounts",{"tool":"agy","label":"owner","create":True})
+        s.api("PATCH", f"accounts/{owner['id']}", {"revision":owner["revision"],"enabled":True})
+        home = Path(owner["home"])
+        conversations = home/".gemini/antigravity-cli/conversations"
+        for d in (conversations.parents[1], conversations.parent, conversations):
+            d.mkdir(mode=0o700, exist_ok=True)
+        sid = str(uuid.uuid4())
+        # Valid metadata for routing, deliberately unreadable as a native conversation.
+        (conversations/f"{sid}.pb").write_bytes(b"not a native conversation")
+        for selector in ("--resume", "-r", "--conversation"):
+            with self.subTest(selector=selector):
+                p = subprocess.run([svc.LAUNCHER,"agy",selector,sid], cwd=s.root, env=s.env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   start_new_session=True, timeout=8)
+                self.assertIn(f'conversation "{sid}" not found', p.stderr)
+                row = s.api("GET","startups?tool=agy")[1]["items"][0]
+                self.assertEqual((row["reason"],row["config_id"],row["native_id"]), ("sticky",owner["id"],sid))
+        self.assertFalse((Path(self.profile["home"])/".gemini/antigravity-cli/log").exists())
+
     def test_models_reaches_signed_out_native_cli(self):
         s, c = self.service, self.profile
         endpoint = f"accounts/{c['id']}/identity"
@@ -71,7 +109,7 @@ class NativeACP(unittest.TestCase):
     def test_mixed_print_options_and_piped_prompt_reach_native_print_mode(self):
         s = self.service
         for args, stdin, code, error in [
-            (["--print", "--sandbox", "/clear", "--output-format=json"], b"", 2, "/clear is not available in print mode"),
+            (["--prompt", "--sandbox", "/clear", "--output-format=json"], b"", 2, "/clear is not available in print mode"),
             (["--output-format", "json", "-p"], b"/clear\n", 2, "/clear is not available in print mode"),
             (["--print", "--output-format=json"], b"", 1, "empty prompt"),
         ]:
@@ -155,8 +193,14 @@ class NativeACP(unittest.TestCase):
                 if p.poll() is None: p.terminate();p.wait(timeout=5)
         root=Path(c["home"])/".gemini/antigravity-cli"
         self.assertTrue((root/"conversations").is_dir())
-        self.assertTrue(any("Using file-based token storage because no D-Bus session bus detected" in log.read_text()
-                            for log in (root/"log").glob("*.log")))
+        logs = "\n".join(log.read_text() for log in (root/"log").glob("*.log"))
+        self.assertIn("Using file-based token storage", logs)
+        plugin_store = Path(c["home"])/".config/antigravity/plugin-secrets.json"
+        for line in logs.splitlines():
+            if "Using file-based secret storage at " in line:
+                self.assertTrue(line.endswith(str(plugin_store)), line)
+        self.assertFalse((s.root/".gemini").exists())
+        self.assertFalse((s.root/".config/antigravity").exists())
         self.assertEqual(s.api("GET","sessions?tool=agy")[1]["items"],[])
         self.assertFalse(list(s.scratch.glob("agy-*")))
 

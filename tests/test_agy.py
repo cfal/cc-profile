@@ -26,7 +26,7 @@ class Antigravity(unittest.TestCase):
         self.addCleanup(self.s.doCleanups)
         self.s.setUp()
         self.s.env.update(DBUS_SESSION_BUS_ADDRESS="unix:path=/dummy", XDG_CONFIG_HOME="/not-the-profile",
-                          AGY_ACP_FORCE_FILE_STORAGE="0")
+                          AGY_ACP_FORCE_FILE_STORAGE="0", AGY_CLI_FORCE_FILE_TOKEN_STORAGE="0")
 
     def profile(self, name, enable=True):
         status, c, _ = self.s.api("POST","accounts",{"tool":"agy","label":name,"create":True,
@@ -95,6 +95,8 @@ class Antigravity(unittest.TestCase):
         self.assertNotEqual(self.s.cli("login",cid,"--status").returncode,0)
         self.assertNotEqual(self.s.cli("usage",cid).returncode,0)
         self.assertEqual(self.s.cli("login",cid).returncode,0)
+        self.assertEqual(json.loads((home/"last-run").read_text())["home"], self.s.env["HOME"])
+        self.assertFalse((Path(self.s.env["HOME"])/".gemini").exists())
         self.assertEqual(identity(), (200, {"state":"saved_login","email":None}))
         self.assertIn("validity not checked",self.s.cli("login",cid,"--status").stdout)
         self.assertEqual((home/".gemini/antigravity-cli/antigravity-oauth-token").stat().st_mode & 0o777,0o600)
@@ -109,6 +111,7 @@ class Antigravity(unittest.TestCase):
         self.assertEqual((home/"usage-calls").read_text().splitlines(),
                          [json.dumps(["--settings",'{"disableSlashCommands":false}',"-p","/usage"])])
         obs=json.loads((home/"last-run").read_text())
+        self.assertEqual(obs["home"], str(home))
         self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
         self.assertFalse(Path(obs["runtime"]).exists())
         self.assertFalse(self.s.api("GET","sessions?tool=agy")[1]["items"])
@@ -380,6 +383,7 @@ class Antigravity(unittest.TestCase):
             self.assertNotEqual(run().returncode, 0)
             saved.write_bytes(b"fixture: native saved conversation")
             for args in (["--conversation", uid], ["--conversation=" + uid, "--dangerously-skip-permissions"],
+                         ["--resume", uid, "-i", "follow up"], ["-r", uid], ["--resume="+uid],
                          ["--dangerously-skip-permissions", "--conversation", uid],
                          ["--mode=plan","--effort","high","--conversation",uid,"--agent=acp",
                           "--dangerously-skip-permissions=false"]):
@@ -398,7 +402,7 @@ class Antigravity(unittest.TestCase):
             self.assertNotEqual(run().returncode, 0)
             duplicate.unlink()
             duplicate.write_bytes(b"copy")
-            self.assertIn("Conflicting", run().stderr)
+            self.assertIn("Conflicting", run("-r",uid).stderr)
             config_dir = Path(a["home"])/".config"
             config_dir.mkdir(mode=0o700, exist_ok=True)
             config_dir.chmod(0o755)
@@ -419,7 +423,7 @@ class Antigravity(unittest.TestCase):
         uid = str(uuid.uuid4())
         (q/f"{uid}.db").write_bytes(b"other fixture")
         self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"enabled":False})
-        self.assertIn("disabled", run().stderr)
+        self.assertIn("disabled", run("--resume",uid).stderr)
         # Discovery may already have recorded its file, never an ACP observation.
         self.assertNotEqual(self.s.cli("agy","acp","--for-session",uid).returncode,0)
         self.assertEqual(self.s.cli("agy").returncode, 0)
@@ -728,6 +732,10 @@ class Antigravity(unittest.TestCase):
 
     def test_unbound_browse_aggregates_pages_without_routing_and_restores_listed_owner(self):
         a,b,off = self.profile("a"),self.profile("b"),self.profile("disabled",False)
+        daemon_home = self.s.env["HOME"]
+        launcher_home = self.s.root/"client-home"
+        launcher_home.mkdir()
+        self.s.env["HOME"] = str(launcher_home)
         self.login_markers(a,b)
         ha,hb = Path(a["home"]), Path(b["home"])
         row = lambda sid,cwd: {"sessionId":sid,"cwd":cwd,"additionalDirectories":["/extra a","/extra-b"],
@@ -751,10 +759,14 @@ class Antigravity(unittest.TestCase):
                               (hb,["initialize","session/list"]*2)]:
             self.assertEqual((home/"calls").read_text().splitlines(),expected)
             seen=json.loads((home/"last-run").read_text())
+            self.assertEqual(seen["home"], daemon_home)
             self.assertEqual(seen["proxy"],["https://proxy.invalid:8443/"]*4)
             self.assertFalse(Path(seen["runtime"]).exists())
         restored, = self.bridge([], (1,"session/resume",{"sessionId":"b1","cwd":"/work"}))
         self.assertEqual(restored["result"]["home"],b["home"])
+        self.assertEqual(json.loads((hb/"last-run").read_text())["home"], str(launcher_home))
+        for home in (Path(daemon_home), launcher_home):
+            self.assertFalse((home/".gemini").exists())
         self.assertEqual([json.loads(s) for s in (hb/"acp-wire").read_text().splitlines()][-3:-1],[INIT,INITIALIZED])
         browse, selected = self.bridge([], (1,"session/list",{}),(2,"session/load",{"sessionId":"b1","cwd":"/work"}))
         self.assertIn("sessions",browse["result"])
