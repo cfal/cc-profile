@@ -24,6 +24,75 @@ class Panel(unittest.TestCase):
         service.setUp()
         return service
 
+    def test_tab_navigation_shows_loading_until_the_selected_view_is_ready(self):
+        service = self.start_service()
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{service.port}/#settings")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            expect(page.get_by_label("Routing mode")).to_be_visible()
+
+            sessions, startups = [], []
+            page.route("**/api/v1/sessions?*", lambda route: sessions.append(route))
+            page.route("**/api/v1/startups?*", lambda route: startups.append(route), times=1)
+            with page.expect_request("**/api/v1/sessions?*"):
+                page.get_by_role("link", name="Sessions", exact=True).click()
+            spinner = page.get_by_role("status", name="Loading Sessions")
+            for width in (1240, 390):
+                page.set_viewport_size({"width":width, "height":844})
+                expect(spinner).to_be_visible()
+                box = spinner.bounding_box()
+                self.assertAlmostEqual(box["x"] + box["width"] / 2, width / 2, delta=1)
+            expect(page.get_by_label("Routing mode")).to_have_count(0)
+
+            with page.expect_request("**/api/v1/startups?*"):
+                page.get_by_role("link", name="Dashboard", exact=True).click()
+            with page.expect_response("**/api/v1/sessions?*"):
+                sessions[0].continue_()
+            expect(page.get_by_role("status", name="Loading Dashboard")).to_be_visible()
+            startups[0].fulfill(status=503, json={"message":"Router busy"})
+            expect(page.get_by_role("main")).to_contain_text("Router busy")
+            page.get_by_role("button", name="Retry").click()
+            expect(page.get_by_role("region", name="Account quotas")).to_be_visible()
+            expect(page.locator(".router-loading")).to_have_count(0)
+
+            settings = []
+            page.route("**/api/v1/settings", lambda route: settings.append(route), times=1)
+            with page.expect_request("**/api/v1/settings"):
+                page.get_by_role("link", name="Settings", exact=True).click()
+            expect(page.get_by_role("status", name="Loading Settings")).to_be_visible()
+            expect(page.get_by_role("region", name="Account quotas")).to_have_count(0)
+            settings[0].continue_()
+            expect(page.get_by_label("Routing mode")).to_be_visible()
+
+    def test_accounts_provider_change_shows_loading_but_not_on_refresh(self):
+        service = self.start_service()
+        service.account("claude", "Previous profile")
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{service.port}/#accounts?tool=claude")
+            page.get_by_label("Password", exact=True).fill(service.password)
+            page.get_by_role("button", name="Sign in").click()
+            expect(page.locator(".account-row", has_text="Previous profile")).to_be_visible()
+            held = []
+            endpoint = "**/api/v1/accounts?tool=codex"
+            page.route(endpoint, lambda route: held.append(route), times=1)
+            with page.expect_request(endpoint):
+                page.get_by_role("button", name="Codex", exact=True).click()
+            expect(page.get_by_role("status", name="Loading Codex accounts")).to_be_visible()
+            expect(page.get_by_role("button", name="Codex", exact=True)).to_have_attribute("aria-pressed", "true")
+            expect(page.locator(".account-row")).to_have_count(0)
+            held.pop().continue_()
+            empty = page.get_by_role("heading", name="No Codex profiles")
+            expect(empty).to_be_visible()
+            page.route(endpoint, lambda route: held.append(route), times=1)
+            with page.expect_request(endpoint):
+                page.get_by_role("button", name="Refresh enabled quotas").click()
+            expect(empty).to_be_visible()
+            expect(page.locator(".router-loading")).to_have_count(0)
+            held.pop().continue_()
+
     def test_accounts_pagination_and_mobile(self):
         service = self.start_service(claim=False)
         port = service.port

@@ -1,5 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const main = $("#main"),
+  loadingIndicator = $(".router-loading"),
   dialog = $("#dialog"),
   form = $("#form");
 const names = { claude: "Claude", codex: "Codex", agy: "Antigravity" };
@@ -399,13 +400,14 @@ function binaryVersions() {
   return el("section", {"aria-labelledby": "versions-heading"},
     el("div", {class: "sectionhead"}, el("h2", {id: "versions-heading"}, "Binary versions"), refresh.button), list, status);
 }
-function settings() {
+async function settings(ver) {
   const routing = el("div");
-  main.replaceChildren(el("div", {class: "settings"},
+  const content = el("div", {class: "settings"},
     el("section", {}, el("h2", {}, "New chats"), routing),
     binaryVersions(),
-    el("section", {}, el("h2", {}, "Panel password"), changePasswordForm())));
-  return loadRouting(routing);
+    el("section", {}, el("h2", {}, "Panel password"), changePasswordForm()));
+  await loadRouting(routing);
+  if (ver === version) main.replaceChildren(content);
 }
 function empty(heading, description, action) {
   return el(
@@ -1217,16 +1219,9 @@ function signInPanel(c, initial) {
   update(initial);
   return section;
 }
-let accountQuota, accountRefresh;
+let accountQuota, accountRefresh, lastProvider;
 async function accounts(params, ver, enter) {
-  const filter = Object.hasOwn(names, params.get("tool")) ? params.get("tool") : "",
-    items = await loadProfiles(filter);
-  if (ver !== version) return;
-  const c = items.find((c) => String(c.id) === params.get("id")) || items[0];
-  checkResetProfile(c ? [c] : []);
-  if (!c) selectedIdentity = null;
-  const login = c?.tool === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
-  if (ver !== version) return;
+  const filter = Object.hasOwn(names, params.get("tool")) ? params.get("tool") : "";
   const tabs = el(
     "div",
     { class: "segments", role: "group", "aria-label": "Provider" },
@@ -1242,6 +1237,17 @@ async function accounts(params, ver, enter) {
       ),
     ),
   );
+  if (!enter && filter !== lastProvider) {
+    showLoading("Loading " + (names[filter] || "all") + " accounts", el("div", {class: "account-toolbar"}, tabs));
+  }
+  lastProvider = filter;
+  const items = await loadProfiles(filter);
+  if (ver !== version) return;
+  const c = items.find((c) => String(c.id) === params.get("id")) || items[0];
+  checkResetProfile(c ? [c] : []);
+  if (!c) selectedIdentity = null;
+  const login = c?.tool === "codex" ? await readLogin("accounts/" + c.id + "/device-login") : null;
+  if (ver !== version) return;
   const list = el("div", { class: "account-list", "aria-label": "Registered configs" });
   for (const a of items) {
     const q = a.quota;
@@ -1399,9 +1405,16 @@ async function render() {
   const viewName = view[0].toUpperCase() + view.slice(1);
   main.setAttribute("aria-label", viewName);
   document.title = viewName + " | cc-profile";
-  if (view === "accounts") await accounts(params, ver, enter);
-  else if (view === "settings") await settings();
-  else await logs(view, params, ver, enter);
+  if (enter) showLoading("Loading " + viewName);
+  try {
+    if (view === "accounts") await accounts(params, ver, enter);
+    else if (view === "settings") await settings(ver);
+    else await logs(view, params, ver, enter);
+  } catch (err) {
+    if (ver !== version || !main.contains(loadingIndicator)) throw err;
+    lastView = "";
+    main.replaceChildren(empty("Could not load " + viewName, err.message, btn("Retry", render, "refresh-cw")));
+  }
 }
 window.onhashchange = guard(async () => {
   resetDialog?.close();
@@ -1409,9 +1422,12 @@ window.onhashchange = guard(async () => {
   expanded = null;
   await render();
 });
-const loadingIndicator = $(".router-loading");
+function showLoading(label, ...controls) {
+  loadingIndicator.setAttribute("aria-label", label);
+  main.replaceChildren(...controls, loadingIndicator);
+}
 async function connect() {
-  main.replaceChildren(loadingIndicator);
+  showLoading("Connecting to router");
   let session;
   try {
     session = await api("session");

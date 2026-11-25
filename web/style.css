@@ -193,6 +193,9 @@ main {
   border-top-color: var(--green);
   border-radius: 50%;
 }
+.account-toolbar + .router-loading {
+  margin-block-start: 14px;
+}
 @media (prefers-reduced-motion: no-preference) {
   .router-loading, button[aria-busy="true"] > svg {
     animation: router-spin 0.9s linear infinite;
