@@ -173,9 +173,29 @@ function go(view, obj = {}) {
   const q = new URLSearchParams(Object.entries(obj).filter(([, v]) => v != null && v !== ""));
   location.hash = view + (q.size ? "?" + q : "");
 }
-const title = (s, ...actions) =>
-  el("div", { class: "titleline" }, el("h1", {}, s), el("div", { class: "actions" }, actions));
 const field = (label, control) => el("label", { class: "field" }, label, control);
+function refreshControl(label, action) {
+  let pending = false, checking = false, blocked = false;
+  const button = ib(label, "refresh-cw", () => run());
+  function sync() {
+    button.setAttribute("aria-busy", String(pending || checking));
+    button.setAttribute("aria-disabled", String(pending || blocked));
+  }
+  async function run(...args) {
+    if (pending || blocked) return;
+    pending = true;
+    sync();
+    try { await action(...args); }
+    finally { pending = false; sync(); }
+  }
+  // A queued quota check can outlive the HTTP request that started it.
+  function update(isChecking, isBlocked = isChecking) {
+    checking = isChecking;
+    blocked = isBlocked;
+    sync();
+  }
+  return {button, run, update};
+}
 function select(items, val, props = {}) {
   const box = el("select", props, ...items.map(([v, name]) => el("option", { value: v }, name)));
   box.value = val;
@@ -249,12 +269,15 @@ function passwordForm() {
   resetAttempts.clear();
   readDashboardQuotas = null;
   selectedIdentity = null;
+  accountQuota = null;
+  accountRefresh = null;
   clearTimeout(timer);
   version++;
   $("nav").hidden = true;
   $(".logout").hidden = true;
   if (dialog.open) dialog.close();
   const setup = needsSetup, heading = setup ? "Set panel password" : "Sign in";
+  main.removeAttribute("aria-label");
   document.title = heading + " | cc-profile";
   const input = (name) => passwordInput(name, setup ? "new-password" : "current-password");
   const password = input("password"), confirm = setup ? input("confirmation") : null;
@@ -359,10 +382,8 @@ async function loadRouting(container) {
 function binaryVersions() {
   const list = el("dl", {class: "facts"});
   const status = el("p", {class: "caption", role: "status"});
-  const button = ib("Refresh binary versions", "refresh-cw", () => load(true));
-  async function load(force) {
-    button.disabled = true;
-    status.textContent = "Checking versions…";
+  const refresh = refreshControl("Refresh binary versions", async (force = true) => {
+    if (!list.childElementCount) status.textContent = "Checking versions…";
     try {
       const data = force ? await api("versions", "POST", {}) : await api("versions");
       list.replaceChildren(...Object.entries(names).flatMap(([tool, label]) => {
@@ -372,17 +393,15 @@ function binaryVersions() {
       status.textContent = "";
     } catch {
       status.textContent = "Could not check binary versions.";
-    } finally {
-      button.disabled = false;
     }
-  }
-  load(false);
+  });
+  refresh.run(false);
   return el("section", {"aria-labelledby": "versions-heading"},
-    el("div", {class: "sectionhead"}, el("h2", {id: "versions-heading"}, "Binary versions"), button), list, status);
+    el("div", {class: "sectionhead"}, el("h2", {id: "versions-heading"}, "Binary versions"), refresh.button), list, status);
 }
 function settings() {
   const routing = el("div");
-  main.replaceChildren(title("Settings"), el("div", {class: "settings"},
+  main.replaceChildren(el("div", {class: "settings"},
     el("section", {}, el("h2", {}, "New chats"), routing),
     binaryVersions(),
     el("section", {}, el("h2", {}, "Panel password"), changePasswordForm())));
@@ -476,6 +495,7 @@ async function logs(view, params, ver, enter) {
     !sessions &&
       chooser("state", "Result", [["", "All"], ...Object.entries(states)], result),
     el("label", {}, icon("search"), search),
+    sessions && refreshControl("Refresh", render).button,
   );
   const table = el("table", {class: "records", role: "table"}),
     head = el("tr"),
@@ -579,9 +599,9 @@ async function logs(view, params, ver, enter) {
     : empty("No startup requests", "Only launches through ccp appear here.");
 
   const root = sessions ? main : ((!enter && $("#startup-logs")) || openDashboard(profiles));
-  root.replaceChildren(sessions ? title("Sessions", ib("Refresh", "refresh-cw", render)) :
-    el("div", {class: "sectionhead"}, el("h2", {id: "logs-heading"}, "Startup logs"),
-      ib("Refresh startup logs", "refresh-cw", render)), filters, records);
+  root.replaceChildren(filters, records);
+  if (!sessions) root.prepend(el("div", {class: "sectionhead"},
+    el("h2", {id: "logs-heading"}, "Startup logs"), refreshControl("Refresh startup logs", render).button));
   const paginated = cursors.length > 1 || page.next_cursor != null;
   if (!page.items.length && !paginated) return;
   root.append(el(
@@ -970,24 +990,14 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
   const link = showProfile && el("a", {class: "quota-link", href: "#accounts?tool=" + c.tool + "&id=" + c.id},
     text(names[c.tool], "provider-name"), accountName);
   const badge = showProfile && pill("Disabled");
-  let submitting = false, loading = false;
-  // Keep keyboard focus while either the request or the daemon's quota check is pending.
-  const syncButton = () => button.setAttribute("aria-disabled", String(submitting || loading));
-  const button = ib("Refresh quota", "refresh-cw", async () => {
-    if (submitting || loading) return;
-    submitting = true;
-    syncButton();
-    try {
-      await api("accounts/" + c.id + "/quota/refresh", "POST", {});
-      await refreshed();
-    } finally {
-      submitting = false;
-      syncButton();
-    }
+  let displayedQuota;
+  const refresh = refreshControl("Refresh quota", async () => {
+    await api("accounts/" + c.id + "/quota/refresh", "POST", {});
+    await refreshed();
   });
   const body = el("div");
   const section = el("section", {class: "quota-card"}, el("div", {class: "sectionhead"},
-    el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), button), body,
+    el("h3", {}, showProfile ? [link, badge] : "Quota & resets"), refresh.button), body,
     c.tool === "codex" && btn("List reset grants", () => {
       if (section.isConnected && (showProfile ? locationState().view === "dashboard" : location.hash === route))
         openResetGrants(c);
@@ -1001,9 +1011,14 @@ function quotaCard(c, {showProfile = false, refreshed = render} = {}) {
       }
       badge.hidden = profile.enabled;
     }
-    loading = !!profile.quota.loading;
-    syncButton();
-    body.replaceChildren(quotaDetails(profile.quota, profile.tool));
+    const q = profile.quota;
+    refresh.update(!!q.loading);
+    const reading = q.loading && q.snapshot ? {...q, loading: false} : q;
+    // Keep the previous reading (including a text selection) intact during background polls.
+    const signature = JSON.stringify(reading);
+    if (q.loading && signature === displayedQuota) return;
+    body.replaceChildren(quotaDetails(reading, profile.tool));
+    displayedQuota = signature;
   }
   update(c);
   return {section, update};
@@ -1012,15 +1027,14 @@ function openDashboard(profiles) {
   const grid = el("div", {class: "quota-grid"});
   const cards = new Map();
   const empty = el("p", {}, "No profiles yet. ", el("a", {href: "#accounts"}, "Add a profile"));
-  const refresh = async (staleOnly) => {
+  const all = refreshControl("Refresh enabled quotas", async (staleOnly = false) => {
     await api("quota/refresh", "POST", {stale_only: staleOnly});
     await read();
-  };
-  const all = ib("Refresh enabled quotas", "refresh-cw", () => refresh(false));
+  });
   const overview = el("section", {"aria-labelledby": "quota-heading"},
-    el("div", {class: "sectionhead"}, el("h2", {id: "quota-heading"}, "Account quotas"), all), grid, empty);
+    el("div", {class: "sectionhead"}, el("h2", {id: "quota-heading"}, "Account quotas"), all.button), grid, empty);
   const log = el("section", {id: "startup-logs", "aria-labelledby": "logs-heading"});
-  main.replaceChildren(title("Dashboard"), overview, log);
+  main.replaceChildren(overview, log);
 
   // Quota polling replaces only the meters, never a log filter being edited.
   let seq = 0, poll;
@@ -1033,7 +1047,7 @@ function openDashboard(profiles) {
   }
   function draw(rows) {
     checkResetProfile(rows);
-    all.disabled = !rows.some((c) => c.enabled);
+    all.update(rows.some((c) => c.enabled && c.quota.loading), !rows.some((c) => c.enabled));
     empty.hidden = rows.length > 0;
     const ids = new Set(rows.map((c) => c.id));
     for (const [id, card] of cards) {
@@ -1055,7 +1069,7 @@ function openDashboard(profiles) {
   }
   readDashboardQuotas = read;
   draw(profiles);
-  if (profiles.some((c) => c.enabled)) guard(() => refresh(true))();
+  if (profiles.some((c) => c.enabled)) guard(() => all.run(true))();
   return log;
 }
 // A poll or full Accounts refresh may overlap a cancel/retry. Only use a
@@ -1091,8 +1105,9 @@ function identityView(c, login) {
   async function refresh(verifyCatalog = false) {
     const attempt = ++seq;
     button.disabled = true;
+    button.setAttribute("aria-busy", "true");
     if (verifyCatalog) view.catalogChecked = true;
-    summary.textContent = verifyCatalog ? "Checking catalog access…" : "Checking sign-in…";
+    if (!summary.hasChildNodes()) summary.textContent = verifyCatalog ? "Checking catalog access…" : "Checking sign-in…";
     try {
       const endpoint = "accounts/" + c.id + "/identity";
       const v = verifyCatalog ? await api(endpoint, "POST", {}) : await api(endpoint);
@@ -1114,7 +1129,12 @@ function identityView(c, login) {
       if (attempt === seq) summary.textContent = err.code === "busy"
         ? "Other sign-in checks are running. Refresh to try again." :
           verifyCatalog ? "Couldn’t verify catalog access" : "Sign-in status unavailable";
-    } finally { if (attempt === seq) button.disabled = false; }
+    } finally {
+      if (attempt === seq) {
+        button.disabled = false;
+        button.setAttribute("aria-busy", "false");
+      }
+    }
   }
   refresh();
   return view;
@@ -1197,6 +1217,7 @@ function signInPanel(c, initial) {
   update(initial);
   return section;
 }
+let accountQuota, accountRefresh;
 async function accounts(params, ver, enter) {
   const filter = Object.hasOwn(names, params.get("tool")) ? params.get("tool") : "",
     items = await loadProfiles(filter);
@@ -1259,6 +1280,11 @@ async function accounts(params, ver, enter) {
   }
   const detail = el("div", { class: "detail" });
   if (c) {
+    if (accountQuota?.id === c.id && accountQuota.route === location.hash) {
+      accountQuota.card.update(c);
+    } else {
+      accountQuota = {id: c.id, route: location.hash, card: quotaCard(c)};
+    }
     const enabled = el("input", { type: "checkbox", checked: c.enabled, "aria-describedby": "routing-note" });
     enabled.onchange = guard(async () => {
       const next = enabled.checked;
@@ -1318,22 +1344,23 @@ async function accounts(params, ver, enter) {
         datum("Routing checks", text(ready[c.readiness] || c.readiness, c.readiness === "ready" ? "" : "warn")),
         datum("Priority", c.priority ?? 0),
         datum("Maintenance commands", defaultAccountControl),
-        datum("Directory", el("div", {class: "row"}, code(c.home),
-          ib("Edit directory", "pencil", () => editDirectory(c)))),
+        datum("Directory", el("div", {class: "actions"}, code(c.home),
+          el("div", {class: "row"}, ib("Copy directory", "copy", () => copy(c.home)),
+            ib("Edit directory", "pencil", () => editDirectory(c))))),
         datum("Proxy", c.proxy_mode === "custom"
           ? c.proxy_url?.url
-          : simple(c.proxy_mode)))), quotaCard(c).section);
+          : simple(c.proxy_mode)))), accountQuota.card.section);
   }
+  accountRefresh ??= refreshControl("Refresh enabled quotas", async () => {
+    await api("quota/refresh", "POST", {});
+    await render();
+  });
+  accountRefresh.update(items.some((a) => a.enabled && a.quota.loading), false);
   main.replaceChildren(
-    title(
-      "Accounts",
-      ib("Refresh enabled quotas", "refresh-cw", async () => {
-        await api("quota/refresh", "POST", {});
-        await render();
-      }),
+    el("div", {class: "account-toolbar"}, tabs, el("div", {class: "actions"},
+      accountRefresh.button,
       btn("Add profile", () => accountForm(filter, null), "plus", "primary"),
-    ),
-    el("div", { class: "titleline" }, tabs),
+    )),
     c
       ? el("div", { class: "account-grid" }, list, detail)
       : empty(
@@ -1356,7 +1383,11 @@ async function render() {
   const ver = ++version,
     { view, params } = locationState(),
     enter = lastView !== view;
-  if (view !== "accounts") selectedIdentity = null;
+  if (view !== "accounts") {
+    selectedIdentity = null;
+    accountQuota = null;
+    accountRefresh = null;
+  }
   if (view !== "dashboard") readDashboardQuotas = null;
   lastView = view;
   $("nav").hidden = false;
@@ -1365,7 +1396,9 @@ async function render() {
     a.getAttribute("href") === "#" + view
       ? a.setAttribute("aria-current", "page")
       : a.removeAttribute("aria-current");
-  document.title = view[0].toUpperCase() + view.slice(1) + " | cc-profile";
+  const viewName = view[0].toUpperCase() + view.slice(1);
+  main.setAttribute("aria-label", viewName);
+  document.title = viewName + " | cc-profile";
   if (view === "accounts") await accounts(params, ver, enter);
   else if (view === "settings") await settings();
   else await logs(view, params, ver, enter);
@@ -1376,7 +1409,9 @@ window.onhashchange = guard(async () => {
   expanded = null;
   await render();
 });
+const loadingIndicator = $(".router-loading");
 async function connect() {
+  main.replaceChildren(loadingIndicator);
   let session;
   try {
     session = await api("session");

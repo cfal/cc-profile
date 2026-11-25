@@ -65,6 +65,10 @@ button:disabled,
 button[aria-disabled="true"] > svg {
   opacity: 0.5;
 }
+button[aria-busy="true"] {
+  color: var(--blue);
+  background: var(--wash);
+}
 button:where(:hover:not(:disabled):not([aria-disabled="true"])) {
   background: var(--wash);
   border-color: var(--muted);
@@ -163,7 +167,7 @@ nav a[aria-current="page"] {
 .segments,
 .toolbar,
 .pages,
-.titleline,
+.account-toolbar,
 .row {
   display: flex;
   align-items: center;
@@ -181,15 +185,27 @@ nav a[aria-current="page"] {
 main {
   padding-block: 32px 60px;
 }
-.titleline,
+.router-loading {
+  width: 24px;
+  height: 24px;
+  margin-inline: auto;
+  border: 3px solid var(--line);
+  border-top-color: var(--green);
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .router-loading, button[aria-busy="true"] > svg {
+    animation: router-spin 0.9s linear infinite;
+  }
+}
+@keyframes router-spin {
+  to { transform: rotate(1turn); }
+}
+.account-toolbar,
 .pages {
   justify-content: space-between;
   flex-wrap: wrap;
 }
-.titleline {
-  margin-bottom: 24px;
-}
-.titleline h1,
 h2,
 h3 {
   margin: 0;
@@ -804,10 +820,6 @@ dialog .error {
   }
   .tablewrap table {
     min-width: 630px;
-  }
-  .titleline {
-    gap: 14px;
-    margin-bottom: 16px;
   }
   .toolbar > label:has(input) {
     width: 100%;
