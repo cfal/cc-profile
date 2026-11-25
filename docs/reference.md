@@ -89,7 +89,7 @@ Run `ccp agy` to open the native terminal UI in the current workspace with the s
 
 On AgY 1.5.16+, `ccp agy --resume <uuid>` and `ccp agy -r <uuid>` are equivalent to `--conversation`. CCP does not guess which account to use for `--continue`.
 
-Use `ccp login <profile-id>` for native Google sign-in, then configure the harness to launch `ccp agy acp`. ACP (including login) keeps the caller's `HOME`: CCP supplies the selected profile's native storage flags and sets `XDG_CONFIG_HOME` for plugin secrets. Plain terminal chats, print, models and quota do not accept those flags on 1.5.17, so CCP sets their `HOME` to the account directory instead. Both paths use file credentials, not the desktop keyring. See [Antigravity setup and verification limits](antigravity.md).
+Use `ccp login <profile-id>` for native Google sign-in, then configure the harness to launch `ccp agy acp`. ACP (including login) preserves the caller's `HOME` and `XDG_CONFIG_HOME` for tools. CCP supplies the selected profile's native storage flags for Google login and history; the separate plugin secret file can be shared. Plain terminal chats, print, models and quota do not accept those flags on 1.5.17, so CCP sets their `HOME` to the account directory and unsets `XDG_CONFIG_HOME`. Both paths use file credentials, not the desktop keyring. See [Antigravity setup and verification limits](antigravity.md).
 
 ### Codex launches
 

@@ -114,7 +114,7 @@ Overrides must be absolute paths. Set them consistently in your shell and servic
 | Native binary missing or wrong after an upgrade | Open **Settings → Binary versions** and refresh. Check both PATHs, including `node` for npm installs. The real executable must not be a link back to CCP. |
 | New chats work, but status or model discovery fails | Set an enabled **Default** account for that provider. For AgY, **Refresh sign-in status** checks the selected profile's catalog; a local login file alone does not prove access. |
 | A resume is refused | Check the exact ID in **Sessions**, that the owner is enabled and still points to the original directory, and that the native saved session still exists. Don't register a replacement account to fix a sticky session. |
-| Commands see a different home under AgY | Plain AgY chats, print, models and quota use the account's `HOME`. ACP and ACP login keep the caller's `HOME` and select the account with storage flags. See [Antigravity on Linux](docs/antigravity.md). |
+| Commands see a different home under AgY | Plain AgY chats, print, models and quota use the account's `HOME`. ACP and ACP login preserve the caller's `HOME` and `XDG_CONFIG_HOME` for tools; storage flags select the Google account. ACP profiles can share plugin credentials. See [Antigravity on Linux](docs/antigravity.md). |
 | Forgot the panel password | Run `ccpd set-password` as the daemon user with the same data path. This signs out browsers, not native agents. |
 
 See the [full reference](docs/reference.md) for supported invocation forms, protocol browse limits, provider-specific behavior, and [verification commands](docs/reference.md#verification).

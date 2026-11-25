@@ -48,10 +48,12 @@ Tested 2026-11-22 with Google's [Linux x86-64 1.5.14 archive](https://storage.go
 
 On Linux 1.5.17, `agy acp` accepts the two storage flags; terminal chats, print, models and quota do not. CCP does not mount or switch any directories. The rule is the same for every client:
 
-- **ACP, including login and list workers:** pass `--gemini-dir <profile>/.gemini --app-data-dir antigravity-cli`. The first selects the root, including shared native settings under its `config/`; the second is a **relative name** for this app's token, settings, logs and conversations. Set `XDG_CONFIG_HOME=<profile>/.config` because ACP's plugin secret store lives under `antigravity/plugin-secrets.json`, outside the Gemini root. Keep the spawning process's `HOME` (launcher for chats/login, daemon for browse workers).
+- **ACP, including login and list workers:** pass `--gemini-dir <profile>/.gemini --app-data-dir antigravity-cli`. The first selects the root, including shared native settings under its `config/`; the second is a **relative name** for this app's token, settings, logs and conversations. Tools inherit `HOME` and `XDG_CONFIG_HOME` unchanged from the launcher for chats/login, or from the daemon for browse workers.
 - **Terminal UI, exact terminal resume, print, models and quota:** set `HOME=<profile>` on the native child. These commands find the same native state under `$HOME/.gemini`. Passing the ACP flags on a bare 1.5.17 chat is a native argument error.
 
-This selects AgY's storage; it is not a filesystem sandbox. A shell or Git process started by ACP sees the ordinary `~` and can find `~/.gitconfig`. Tools following `XDG_CONFIG_HOME` see the profile's config directory. A helper that opens `~/.gemini` directly sees the caller's tree, not the ACP flags. The account's Google login file is:
+ACP's **plugin credentials** are separate from the Google login. On Linux 1.5.17 the plugin secret file is `$XDG_CONFIG_HOME/antigravity/plugin-secrets.json` (normally `~/.config/antigravity/plugin-secrets.json` when unset). Profiles using the same caller config directory can share that file. CCP does not copy or merge previously saved plugin secrets; a plugin configured under the old profile-local path may ask you to sign in again.
+
+This selects AgY's storage; it is not a filesystem sandbox. A shell or Git process started by ACP sees the ordinary `~` and can find `~/.gitconfig`. A helper that opens `~/.gemini` directly sees the caller's tree, not the ACP flags. The account's Google login file is:
 
     <profile>/.gemini/antigravity-cli/antigravity-oauth-token
 

@@ -87,6 +87,27 @@ class Antigravity(unittest.TestCase):
                 conn.request("POST",path,json.dumps(body),{"Content-Type":"application/json"})
                 return conn.getresponse().status
 
+    def test_acp_preserves_spawning_process_xdg_config_home(self):
+        c = self.profile("work")
+        home = Path(c["home"])
+        for xdg in (None, "", str(self.s.root/"caller config")):
+            with self.subTest(xdg=xdg):
+                if xdg is None:
+                    self.s.env.pop("XDG_CONFIG_HOME", None)
+                else:
+                    self.s.env["XDG_CONFIG_HOME"] = xdg
+                self.assertEqual(self.s.cli("login",str(c["id"])).returncode,0)
+                seen = json.loads((home/"last-run").read_text())
+                self.assertEqual((seen["home"], seen["xdg_config_home"]), (self.s.env["HOME"], xdg))
+        self.s.stop()
+        daemon_config = str(self.s.root/"daemon config")
+        self.s.env["XDG_CONFIG_HOME"] = daemon_config
+        self.s.start()
+        del self.s.env["XDG_CONFIG_HOME"]
+        listed, = self.bridge([], (1, "session/list", {}))
+        self.assertEqual(listed["result"]["sessions"], [])
+        self.assertEqual(json.loads((home/"last-run").read_text())["xdg_config_home"], daemon_config)
+
     def test_disabled_named_login_status_and_native_usage(self):
         c = self.profile("work", enable=False)
         cid, home = str(c["id"]), Path(c["home"])
@@ -760,11 +781,13 @@ class Antigravity(unittest.TestCase):
             self.assertEqual((home/"calls").read_text().splitlines(),expected)
             seen=json.loads((home/"last-run").read_text())
             self.assertEqual(seen["home"], daemon_home)
+            self.assertIsNone(seen["xdg_config_home"])
             self.assertEqual(seen["proxy"],["https://proxy.invalid:8443/"]*4)
             self.assertFalse(Path(seen["runtime"]).exists())
         restored, = self.bridge([], (1,"session/resume",{"sessionId":"b1","cwd":"/work"}))
         self.assertEqual(restored["result"]["home"],b["home"])
-        self.assertEqual(json.loads((hb/"last-run").read_text())["home"], str(launcher_home))
+        seen = json.loads((hb/"last-run").read_text())
+        self.assertEqual((seen["home"], seen["xdg_config_home"]), (str(launcher_home), self.s.env["XDG_CONFIG_HOME"]))
         for home in (Path(daemon_home), launcher_home):
             self.assertFalse((home/".gemini").exists())
         self.assertEqual([json.loads(s) for s in (hb/"acp-wire").read_text().splitlines()][-3:-1],[INIT,INITIALIZED])

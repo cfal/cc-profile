@@ -14,7 +14,6 @@ if args[:1] == ["acp"]:
     gemini = Path(args[-3])
     assert gemini.is_absolute() and gemini.name == ".gemini"
     home = gemini.parent
-    assert os.environ["XDG_CONFIG_HOME"] == str(home / ".config")
 else:
     assert "--gemini-dir" not in args and "--app-data-dir" not in args, args
     home = Path(os.environ["HOME"])
@@ -26,7 +25,8 @@ assert os.environ["AGY_ACP_FORCE_FILE_STORAGE"] == "1"
 assert os.environ["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"] == "1"
 assert home.is_absolute()
 obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")],
-       "runtime": str(rt), "home": os.getenv("HOME"), "cwd": os.getcwd()}
+       "runtime": str(rt), "home": os.getenv("HOME"), "xdg_config_home": os.getenv("XDG_CONFIG_HOME"),
+       "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
 if not args or (args[0].startswith("-") and args[0] not in ("--settings","--output-format","-p")):
     if (home/"interactive-test").exists():

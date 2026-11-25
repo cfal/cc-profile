@@ -10,7 +10,7 @@ CCP routes installed native CLIs; it does not implement their login or inference
 
 ## Integration rules
 
-- Select storage by native command, not by client name. Keep the decision in `agy::Runtime::configure` so ACP login, interactive clients and daemon browse workers agree. On 1.5.17, ACP takes an absolute `--gemini-dir` and a relative `--app-data-dir`; it also needs a profile-local `XDG_CONFIG_HOME` for plugin secrets. Preserve ordinary `HOME` there. For TUI, print, models and quota, select the profile via child `HOME`. Keep the bus-less runtime in both cases. Do not globally switch symlinks, inherit a desktop keyring, or retry against the developer's account.
+- Select storage by native command, not by client name. Keep the decision in `agy::Runtime::configure` so ACP login, interactive clients and daemon browse workers agree. On 1.5.17, ACP takes an absolute `--gemini-dir` and a relative `--app-data-dir`. Preserve the spawning process's `HOME` and `XDG_CONFIG_HOME` (including unset) for its tools; the ACP plugin secret file can therefore be shared across profiles, unlike the Google login. For TUI, print, models and quota, select the profile via child `HOME` and unset `XDG_CONFIG_HOME`. Keep the bus-less runtime in both cases. Do not globally switch symlinks, inherit a desktop keyring, or retry against the developer's account.
 - Parse aliases as options, not by searching argv strings: a prompt or an option operand can contain a flag name. AgY terminal `--conversation`, `--resume` and `-r` select an exact saved UUID; ACP session IDs are opaque. A saved file establishes account ownership, not which startup created it. Never read transcript or credential contents to infer ownership.
 
 ## Verification

@@ -159,7 +159,6 @@ impl Runtime {
             "DBUS_SESSION_BUS_ADDRESS",
             "DBUS_STARTER_ADDRESS",
             "DBUS_STARTER_BUS_TYPE",
-            "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
             "XDG_CACHE_HOME",
@@ -179,9 +178,7 @@ impl Runtime {
                 Some(home) => cmd.env("HOME", home),
                 None => cmd.env_remove("HOME"),
             };
-            // ACP's separate plugin secret store follows XDG_CONFIG_HOME, not --gemini-dir.
-            cmd.env("XDG_CONFIG_HOME", profile.join(".config"))
-                .arg("--gemini-dir")
+            cmd.arg("--gemini-dir")
                 .arg(profile.join(".gemini"))
                 .arg("--app-data-dir")
                 .arg(APP_DIR);
@@ -190,7 +187,7 @@ impl Runtime {
             // TUI/print when https://github.com/google-antigravity/antigravity-cli/issues/1784 lands.
             // https://github.com/google-antigravity/antigravity-cli/issues/1815 proposes a shared
             // environment for AgY and its tools, not a separate HOME for spawned commands.
-            cmd.env("HOME", profile);
+            cmd.env("HOME", profile).env_remove("XDG_CONFIG_HOME");
         }
         let parent = std::process::id();
         unsafe {

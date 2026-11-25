@@ -158,8 +158,11 @@ class NativeACP(unittest.TestCase):
             self.assertNotIn(malformed, p.stderr)
         self.assertEqual(saved.read_bytes(), original)
 
-    def test_initialize_and_unauthenticated_new_use_isolated_file_storage(self):
+    def test_initialize_and_unauthenticated_new_use_profile_login_and_caller_plugin_store(self):
         s, c = self.service, self.profile
+        caller_config = s.root/"caller config"
+        caller_config.mkdir()
+        s.env["XDG_CONFIG_HOME"] = str(caller_config)
         p=subprocess.Popen([svc.LAUNCHER,"agy","acp","--stdio","--disable-telemetry"],cwd=s.root,env=s.env,
                            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         with p:
@@ -195,7 +198,7 @@ class NativeACP(unittest.TestCase):
         self.assertTrue((root/"conversations").is_dir())
         logs = "\n".join(log.read_text() for log in (root/"log").glob("*.log"))
         self.assertIn("Using file-based token storage", logs)
-        plugin_store = Path(c["home"])/".config/antigravity/plugin-secrets.json"
+        plugin_store = caller_config/"antigravity/plugin-secrets.json"
         for line in logs.splitlines():
             if "Using file-based secret storage at " in line:
                 self.assertTrue(line.endswith(str(plugin_store)), line)
