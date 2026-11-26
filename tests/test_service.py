@@ -1348,6 +1348,9 @@ class Service(unittest.TestCase):
     def test_codex_quota_follows_verified_store_not_a_leftover_auth_file(self):
         import sqlite3
         c = self.account("codex","bound")
+        fallback = self.account("codex", "fallback")
+        self.assertEqual(self.api("PATCH", f"accounts/{c['id']}", {"revision":c["revision"], "priority":100})[0], 200)
+        self.assertEqual(self.api("PUT", "settings", {"routing_mode":"priority"})[0], 200)
         home = Path(c["home"])
         (home/"auth.json").write_text("{}")
         (home/"empty-quota").touch()
@@ -1367,11 +1370,8 @@ class Service(unittest.TestCase):
             self.assertNotIn("file_auth_verified",q["snapshot"])
         def launch(exhausted):
             p = self.cli("codex")
-            if exhausted:
-                self.assertNotEqual(p.returncode,0)
-                self.assertIn("exhausted",p.stderr)
-            else:
-                self.assertEqual(p.returncode,0,p.stderr)
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertEqual(json.loads(p.stdout)["home"], (fallback if exhausted else c)["home"])
         refresh()
         launch(True)
         for mode in ["keyring","auto","ephemeral"]:

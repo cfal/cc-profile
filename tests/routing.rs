@@ -383,10 +383,58 @@ fn split_expiry_prefers_the_earliest_window_then_capacity_then_rotation() {
 }
 
 #[test]
+fn sole_eligible_account_skips_quota_in_every_mode() {
+    let f = Fixture::new();
+    let exe = build();
+    let only = f.add("codex", "only");
+    let disabled = f.add("codex", "disabled");
+    f.store
+        .edit(
+            disabled.id,
+            &json!({"enabled":false,"revision":disabled.revision}),
+        )
+        .unwrap();
+    let missing = f.add("codex", "missing");
+    std::fs::remove_dir(missing.home).unwrap();
+    f.add("claude", "other-provider");
+    std::fs::write(only.home.join("auth.json"), "{}").unwrap();
+    cache(&f, &only, window(100.), now());
+    for mode in [
+        RoundRobin,
+        Priority,
+        MostRemaining,
+        LeastRemaining,
+        EarliestExpiryMostRemaining,
+        EarliestExpiryLeastRemaining,
+    ] {
+        f.store.set_routing_mode(mode).unwrap();
+        let request = req(&f, "codex", &[], &exe);
+        assert!(!should_refresh_quota(&f.store, &exe, &request).unwrap());
+        let plan = launch(&f.store, &exe, &request).unwrap();
+        assert_eq!(
+            (plan.config_id, plan.decision.as_str()),
+            (only.id, mode.name())
+        );
+    }
+    f.store
+        .edit(only.id, &json!({"enabled":false,"revision":only.revision}))
+        .unwrap();
+    assert_eq!(
+        launch(&f.store, &exe, &req(&f, "codex", &[], &exe))
+            .unwrap_err()
+            .1,
+        "no_ready_config"
+    );
+}
+
+#[test]
 fn only_unreplayed_rotating_quota_admissions_request_refresh() {
     let f = Fixture::new();
     let exe = build();
     let c = f.add("codex", "one");
+    let other = f.add("codex", "exhausted");
+    std::fs::write(other.home.join("auth.json"), "{}").unwrap();
+    cache(&f, &other, window(100.), now());
     f.store.set_default_account("codex", Some(c.id)).unwrap();
     std::fs::write(c.home.join("auth.json"), "{}").unwrap();
     f.store

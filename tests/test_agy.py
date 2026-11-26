@@ -1055,6 +1055,26 @@ class Antigravity(unittest.TestCase):
             self.assertFalse(self.wait_quota(c, "fresh")["stale"])
             self.assertEqual(len((Path(c["home"])/"usage-calls").read_text().splitlines()), 2)
 
+    def test_single_enabled_profile_launches_without_probing_or_joining_quota(self):
+        c = self.profile("only")
+        self.profile("disabled", enable=False)
+        self.login_markers(c)
+        home = Path(c["home"])
+        hold = home/"hold-report"
+        hold.touch()
+        try:
+            launch = self.s.cli("agy", "--model", "gemini-test")
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertEqual(json.loads(launch.stdout)["home"], str(home))
+            self.assertFalse((home/"usage-calls").exists())
+            self.assertEqual(self.refresh_quota(c), 1)
+            reply, = self.bridge([], (1, "session/new", {"fixtureId":"solo", "cwd":"/work"}))
+            self.assertEqual(reply["result"]["sessionId"], "solo")
+        finally:
+            hold.unlink()
+        self.wait_quota(c, "fresh")
+        self.assertEqual(len((home/"usage-calls").read_text().splitlines()), 1)
+
     @unittest.skipUnless(os.environ.get("CCP_TEST_SLOW_QUOTA"), "two-minute quota deadline test")
     def test_new_launch_uses_partial_results_at_the_shared_quota_deadline(self):
         a, b = self.profile("stalled"), self.profile("slow")

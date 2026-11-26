@@ -196,6 +196,10 @@ enum Selection {
     Refuse(Option<Config>, Error),
 }
 
+fn eligible_accounts(accounts: Vec<Config>) -> impl Iterator<Item = Config> {
+    accounts.into_iter().filter(|c| c.enabled && c.present())
+}
+
 // Lower keys win. In expiry modes an unknown expiry rotates without a quota tie-break.
 fn routing_rank(
     mode: RoutingMode,
@@ -259,6 +263,13 @@ fn choose(
             if !all.iter().any(|c| c.enabled) {
                 return Ok(reject("no_enabled_config"));
             }
+            let mut eligible = eligible_accounts(all).peekable();
+            let Some(first) = eligible.next() else {
+                return Ok(reject("no_ready_config"));
+            };
+            if eligible.peek().is_none() {
+                return Ok(Selection::Allow(first, mode.name()));
+            }
             let cursor: i64 =
                 db.query_row("SELECT cursor FROM tools WHERE tool=?", [&req.tool], |r| {
                     r.get(0)
@@ -269,10 +280,8 @@ fn choose(
             } else {
                 mode.uses_remaining()
             };
-            let mut exhausted = false;
-            let next = all
-                .into_iter()
-                .filter(|c| c.enabled && c.present())
+            let next = std::iter::once(first)
+                .chain(eligible)
                 .filter_map(|c| {
                     let allowance = if check_quota {
                         cached_allowance(db, &c, ms, i.agy_pool)
@@ -280,7 +289,6 @@ fn choose(
                         None
                     };
                     if allowance.is_some_and(|q| q.remaining == 0.) {
-                        exhausted = true;
                         return None;
                     }
                     let (expiry, rank) = routing_rank(mode, c.priority, allowance);
@@ -293,8 +301,7 @@ fn choose(
                 });
             Ok(match next {
                 Some((c, _, _)) => Selection::Allow(c, mode.name()),
-                None if exhausted => reject("quota_exhausted"),
-                None => reject("no_ready_config"),
+                None => reject("quota_exhausted"),
             })
         }
         Intent::Resume(uid) => {
@@ -503,7 +510,7 @@ pub fn should_refresh_quota(store: &Store, build: &Build, req: &Request) -> Resu
     if validate_binary(build, req.binary.as_deref()).is_err() {
         return Ok(false);
     }
-    {
+    let accounts = {
         let db = store.db()?;
         if !routing_mode(&db)?.uses_remaining() || Prior::find(&db, &req.request_id)?.is_some() {
             return Ok(false);
@@ -513,6 +520,10 @@ pub fn should_refresh_quota(store: &Store, build: &Build, req: &Request) -> Resu
         {
             return Ok(false);
         }
+        configs(&db, &req.tool)?
+    };
+    if eligible_accounts(accounts).nth(1).is_none() {
+        return Ok(false);
     }
     Ok(match req.tool.as_str() {
         "codex" => crate::quota::no_codex_project_config(&i.workspace),
