@@ -28,6 +28,8 @@ obs = {"proxy": [os.getenv(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy",
        "runtime": str(rt), "home": os.getenv("HOME"), "xdg_config_home": os.getenv("XDG_CONFIG_HOME"),
        "cwd": os.getcwd()}
 (home / "last-run").write_text(json.dumps(obs))
+if args[:1] == ["acp"]:
+    (home / "last-acp-run").write_text(json.dumps(obs))
 if not args or (args[0].startswith("-") and args[0] not in ("--settings","--output-format","-p")):
     if (home/"interactive-test").exists():
         import signal

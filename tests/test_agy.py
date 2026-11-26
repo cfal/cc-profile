@@ -97,7 +97,7 @@ class Antigravity(unittest.TestCase):
                 else:
                     self.s.env["XDG_CONFIG_HOME"] = xdg
                 self.assertEqual(self.s.cli("login",str(c["id"])).returncode,0)
-                seen = json.loads((home/"last-run").read_text())
+                seen = json.loads((home/"last-acp-run").read_text())
                 self.assertEqual((seen["home"], seen["xdg_config_home"]), (self.s.env["HOME"], xdg))
         self.s.stop()
         daemon_config = str(self.s.root/"daemon config")
@@ -106,7 +106,7 @@ class Antigravity(unittest.TestCase):
         del self.s.env["XDG_CONFIG_HOME"]
         listed, = self.bridge([], (1, "session/list", {}))
         self.assertEqual(listed["result"]["sessions"], [])
-        self.assertEqual(json.loads((home/"last-run").read_text())["xdg_config_home"], daemon_config)
+        self.assertEqual(json.loads((home/"last-acp-run").read_text())["xdg_config_home"], daemon_config)
 
     def test_disabled_named_login_status_and_native_usage(self):
         c = self.profile("work", enable=False)
