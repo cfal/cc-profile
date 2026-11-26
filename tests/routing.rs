@@ -3,7 +3,7 @@ use ccpd::{
     native::{Build, stamp},
     protocol::RoutingMode::*,
     quota::{FRESH_MS, cached_remaining, inputs},
-    routing::{Observation, Request, admit, launch, observe},
+    routing::{Observation, Request, launch, observe, should_refresh_quota},
     store::{Config, Page, config},
     types::now,
 };
@@ -383,7 +383,7 @@ fn split_expiry_prefers_the_earliest_window_then_capacity_then_rotation() {
 }
 
 #[test]
-fn only_new_admissions_consult_quota_or_request_background_refresh() {
+fn only_unreplayed_rotating_quota_admissions_request_refresh() {
     let f = Fixture::new();
     let exe = build();
     let c = f.add("codex", "one");
@@ -398,13 +398,12 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         &["exec", "--ephemeral", "private question"],
         &exe,
     );
-    let admission = admit(&f.store, &exe, &print).unwrap();
-    assert!(admission.refresh_quota);
+    assert!(should_refresh_quota(&f.store, &exe, &print).unwrap());
     assert_eq!(
-        admission.plan.unwrap().decision,
+        launch(&f.store, &exe, &print).unwrap().decision,
         "earliest_expiry_least_remaining"
     );
-    assert!(!admit(&f.store, &exe, &print).unwrap().refresh_quota);
+    assert!(!should_refresh_quota(&f.store, &exe, &print).unwrap());
     assert!(
         observe(
             &f.store,
@@ -424,9 +423,8 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         json!([])
     );
     let new = req(&f, "codex", &[], &exe);
-    let first = admit(&f.store, &exe, &new).unwrap();
-    assert!(first.refresh_quota);
-    let plan = first.plan.unwrap();
+    assert!(should_refresh_quota(&f.store, &exe, &new).unwrap());
+    let plan = launch(&f.store, &exe, &new).unwrap();
     let server = req(&f, "codex", &["app-server"], &exe);
     launch(&f.store, &exe, &server).unwrap();
     cache(&f, &c, window(100.), now());
@@ -440,9 +438,8 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         .1,
         "quota_exhausted"
     );
-    let replay = admit(&f.store, &exe, &new).unwrap();
-    assert!(!replay.refresh_quota);
-    assert_eq!(replay.plan.unwrap(), plan);
+    assert!(!should_refresh_quota(&f.store, &exe, &new).unwrap());
+    assert_eq!(launch(&f.store, &exe, &new).unwrap(), plan);
     let uid = Uuid::new_v4().to_string();
     observe(
         &f.store,
@@ -463,9 +460,8 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         (req(&f, "codex", &["--version"], &exe), "current"),
         (setup, "profile_login"),
     ] {
-        let admission = admit(&f.store, &exe, &request).unwrap();
-        assert!(!admission.refresh_quota);
-        assert_eq!(admission.plan.unwrap().decision, reason);
+        assert!(!should_refresh_quota(&f.store, &exe, &request).unwrap());
+        assert_eq!(launch(&f.store, &exe, &request).unwrap().decision, reason);
     }
     for mode in [
         RoundRobin,
@@ -478,9 +474,14 @@ fn only_new_admissions_consult_quota_or_request_background_refresh() {
         f.store.set_routing_mode(mode).unwrap();
         let request = req(&f, "codex", &[], &exe);
         for refresh in [mode.uses_remaining(), false] {
-            let admission = admit(&f.store, &exe, &request).unwrap();
-            assert_eq!(admission.plan.unwrap_err().1, "quota_exhausted");
-            assert_eq!(admission.refresh_quota, refresh);
+            assert_eq!(
+                should_refresh_quota(&f.store, &exe, &request).unwrap(),
+                refresh
+            );
+            assert_eq!(
+                launch(&f.store, &exe, &request).unwrap_err().1,
+                "quota_exhausted"
+            );
         }
         let row = &f.store.page(false, &Page::default()).unwrap()["items"][0];
         assert_eq!(row["state"], "denied");
@@ -500,8 +501,8 @@ fn only_recent_successful_identifiable_quota_is_trusted() {
     std::fs::write(&auth, "{}").unwrap();
     cache(&f, &c, window(100.), ms);
     assert_eq!(score(ms - 1), None);
-    assert_eq!(score(ms + FRESH_MS - 1), Some(0.));
-    assert_eq!(score(ms + FRESH_MS), None);
+    assert_eq!(score(ms + 119_999), Some(0.));
+    assert_eq!(score(ms + 120_000), None);
     for change in [
         "status='rate_limited'",
         "failures=1",

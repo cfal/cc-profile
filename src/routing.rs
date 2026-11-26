@@ -145,7 +145,7 @@ fn denial(code: &str, c: Option<&Config>, id: Option<&str>) -> Error {
         ),
         "quota_exhausted" => Error::conflict(
             "quota_exhausted",
-            "All eligible accounts have exhausted their account-wide quota. Wait for a reset or refresh quotas in the Dashboard.",
+            "All eligible accounts report exhausted quota for this request. Wait for a reset or refresh quotas in the Dashboard.",
         ),
         "unsupported_build" => crate::native::unsupported_build(),
         "identity_override" => Error::bad(
@@ -264,15 +264,18 @@ fn choose(
                     r.get(0)
                 })?;
             let ms = now();
-            let check_quota =
-                req.tool != "codex" || crate::quota::no_codex_project_config(&i.workspace);
+            let check_quota = if req.tool == "codex" {
+                crate::quota::no_codex_project_config(&i.workspace)
+            } else {
+                mode.uses_remaining()
+            };
             let mut exhausted = false;
             let next = all
                 .into_iter()
                 .filter(|c| c.enabled && c.present())
                 .filter_map(|c| {
                     let allowance = if check_quota {
-                        cached_allowance(db, &c, ms)
+                        cached_allowance(db, &c, ms, i.agy_pool)
                     } else {
                         None
                     };
@@ -492,12 +495,30 @@ impl Prior {
     }
 }
 
-pub struct Admission {
-    pub plan: Result<Plan>,
-    pub refresh_quota: bool,
-}
-pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
-    admit(store, build, req)?.plan
+pub fn should_refresh_quota(store: &Store, build: &Build, req: &Request) -> Result<bool> {
+    check_req(req)?;
+    let Some(i) = req.rotating_invocation() else {
+        return Ok(false);
+    };
+    if validate_binary(build, req.binary.as_deref()).is_err() {
+        return Ok(false);
+    }
+    {
+        let db = store.db()?;
+        if !routing_mode(&db)?.uses_remaining() || Prior::find(&db, &req.request_id)?.is_some() {
+            return Ok(false);
+        }
+        if let Intent::ClaudeStreamNew(id) = &i.intent
+            && claude_bound(&db, id)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(match req.tool.as_str() {
+        "codex" => crate::quota::no_codex_project_config(&i.workspace),
+        "agy" => i.agy_pool.is_some(),
+        _ => true,
+    })
 }
 pub fn codex_owner(store: &Store, build: &Build, req: &Request) -> Result<i64> {
     check_req(req)?;
@@ -565,13 +586,14 @@ pub fn codex_browse_plans(
     }
     Ok(plans)
 }
-pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
+pub fn launch(store: &Store, build: &Build, req: &Request) -> Result<Plan> {
     check_req(req)?;
     let fingerprint =
         digest(serde_json::to_vec(req).map_err(|_| Error::bad("bad_request", "Invalid request."))?);
     let parsed = if req.login_profile.is_some() {
         Ok(Invocation {
             intent: Intent::Misc,
+            agy_pool: None,
             agy_tui: false,
             agy_text_stdin: false,
             workspace: req.cwd.clone(),
@@ -593,10 +615,7 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
     };
     store.write(|db| {
         if let Some(prior) = Prior::find(db, &req.request_id)? {
-            return Ok(Admission {
-                plan: prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone), rollout.as_ref()),
-                refresh_quota: false,
-            });
+            return Ok(prior.replay(db, build, req, &fingerprint, parsed.as_ref().map_err(Clone::clone), rollout.as_ref()));
         }
         let invocation = parsed.as_ref().ok();
         let workspace = invocation.map(|i| &i.workspace).unwrap_or(&req.cwd).to_string_lossy();
@@ -653,12 +672,8 @@ pub fn admit(store: &Store, build: &Build, req: &Request) -> Result<Admission> {
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             params![req.request_id,req.tool,intent,state,reason,id,config_id,revision,workspace,fingerprint,digest(&req.ticket),ms],
         )?;
-        Ok(Admission {
-            refresh_quota: req.tool == "codex" && mode.uses_remaining()
-                && (response.is_ok() || reason == "quota_exhausted"),
-            plan: response,
-        })
-    })
+        Ok(response)
+    })?
 }
 #[derive(Deserialize)]
 pub struct Observation {

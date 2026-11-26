@@ -289,12 +289,12 @@ sys.exit(17)
             self.assertEqual((p.returncode,p.stdout),(1,""))
             self.assertIn("Invalid launch plan",p.stderr)
 
-    def test_slow_router_does_not_trigger_a_second_launch(self):
+    def test_slow_router_does_not_retry_or_extend_a_non_rotating_request(self):
         def slow(path,r):
             time.sleep(5.3)
             return None
         self.respond=slow
-        p=self.run_ccp("claude")
+        p=self.run_ccp("claude", "--version")
         self.assertEqual((p.returncode,p.stdout),(1,""))
         self.assertIn("Timed out waiting",p.stderr)
         self.assertEqual(len(self.calls),1)

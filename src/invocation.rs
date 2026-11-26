@@ -38,6 +38,7 @@ impl Intent {
 }
 pub struct Invocation {
     pub intent: Intent,
+    pub agy_pool: Option<&'static str>,
     pub agy_tui: bool,
     pub agy_text_stdin: bool,
     pub workspace: PathBuf,
@@ -159,7 +160,7 @@ fn compact_window(s: &str) -> bool {
         .and_then(|v| v.parse::<u16>().ok())
         .is_some_and(|n| (100..=1000).contains(&n) && s == format!("{n}k"))
 }
-fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
+fn agy_terminal(args: &[String]) -> Result<(Intent, bool, Option<&'static str>)> {
     let invalid = || {
         Error::bad(
             "unsupported_invocation",
@@ -174,6 +175,7 @@ fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
     let mut prompt = None;
     let mut tail = false;
     let mut options = Vec::new();
+    let mut pool = Some(crate::agy::GEMINI_POOL);
     let mut it = args.iter().map(String::as_str).peekable();
     while let Some(arg) = it.next() {
         if tail || !arg.starts_with('-') || arg == "-" {
@@ -238,7 +240,8 @@ fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
                     )
                 })?);
             }
-            "--model" | "--effort" | "--mode" | "--agent" | "--add-dir" => {
+            "--model" => pool = crate::agy::model_pool(value()?),
+            "--effort" | "--mode" | "--agent" | "--add-dir" => {
                 value()?;
             }
             "-i" | "--prompt-interactive" => {
@@ -285,19 +288,27 @@ fn agy_terminal(args: &[String]) -> Result<(Intent, bool)> {
         }
         // Native AgY takes its prompt on the flag, not as an interspersed positional.
         options.push(format!("--print={}", prompt.unwrap_or_default()));
-        return Ok((Intent::Print(options), prompt.is_none() && !stream_json));
+        return Ok((
+            Intent::Print(options),
+            prompt.is_none() && !stream_json,
+            pool,
+        ));
     }
     if tail || prompt.is_some() || print_options {
         return Err(invalid());
     }
-    Ok((resume.map(Intent::Resume).unwrap_or(Intent::New), false))
+    Ok((
+        resume.map(Intent::Resume).unwrap_or(Intent::New),
+        false,
+        pool,
+    ))
 }
 pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     if tool == "agy" {
-        let (intent, agy_tui, agy_text_stdin) = if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
+        let (intent, agy_tui, agy_text_stdin, agy_pool) = if matches!(args, [a] if matches!(a.as_str(), "--version" | "--help" | "models"))
             || matches!(args, [a,b] if a=="acp" && b=="--help")
         {
-            (Intent::Misc, false, false)
+            (Intent::Misc, false, false, None)
         } else if args.first().is_some_and(|a| a == "acp") {
             let mut intent = Intent::New;
             let mut it = args[1..].iter();
@@ -313,14 +324,15 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
                     _ => return Err(unsupported()),
                 }
             }
-            (intent, false, false)
+            (intent, false, false, Some(crate::agy::GEMINI_POOL))
         } else {
-            let (i, text_stdin) = agy_terminal(args)?;
+            let (i, text_stdin, pool) = agy_terminal(args)?;
             let tui = !matches!(i, Intent::Print(_));
-            (i, tui, text_stdin)
+            (i, tui, text_stdin, pool)
         };
         return Ok(Invocation {
             intent,
+            agy_pool,
             agy_tui,
             agy_text_stdin,
             workspace: cwd.into(),
@@ -333,6 +345,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     {
         return Ok(Invocation {
             intent: codex_stdio_command(args)?.0,
+            agy_pool: None,
             agy_tui: false,
             agy_text_stdin: false,
             workspace: cwd.into(),
@@ -710,6 +723,7 @@ pub fn classify(tool: &str, args: &[String], cwd: &Path) -> Result<Invocation> {
     }
     Ok(Invocation {
         intent,
+        agy_pool: None,
         agy_tui: false,
         agy_text_stdin: false,
         workspace,
@@ -1072,6 +1086,19 @@ mod tests {
             ],
         ] {
             assert!(parse(&args).is_err());
+        }
+    }
+    #[test]
+    fn agy_quota_pool_follows_only_the_model_flag() {
+        use crate::agy::{ARGON_POOL, GEMINI_POOL, THIRD_PARTY_POOL};
+        for (args, want) in [
+            (vec!["acp"], Some(GEMINI_POOL)),
+            (vec!["--print=--model=claude-test"], Some(GEMINI_POOL)),
+            (vec!["--model", "gpt-test"], Some(THIRD_PARTY_POOL)),
+            (vec!["--model=gemini-4-argon-high"], Some(ARGON_POOL)),
+            (vec!["--model=unknown"], None),
+        ] {
+            assert_eq!(parse("agy", &args).unwrap().agy_pool, want);
         }
     }
     #[test]

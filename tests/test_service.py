@@ -796,27 +796,31 @@ class Service(unittest.TestCase):
         row = self.api("GET","startups")[1]["items"][0]
         self.assertEqual((row["config_id"], row["reason"]), (high["id"], "priority"))
 
-    def test_only_codex_admission_refreshes_quota_by_default(self):
-        codex = Path(self.account("codex","codex")["home"])
-        claude = Path(self.account("claude","claude")["home"])
-        (claude/".credentials.json").write_text("fixture login")
-        (codex/"hold-old-quota").touch()
-        try:
-            self.assertEqual(self.cli("claude","chat").returncode,0)
-            self.assertEqual(self.cli("codex").returncode,0)
-            for _ in range(200):
-                if (codex/"held-old-pid").exists(): break
-                time.sleep(.02)
-            self.assertTrue((codex/"held-old-pid").exists())
-            self.assertEqual(self.api("PUT","settings",{"routing_mode":"earliest_expiry_least_remaining"})[0],200)
-            p = self.cli("codex")
-            self.assertEqual(p.returncode,0,p.stderr)
-            self.assertEqual(self.api("GET","startups?tool=codex")[1]["items"][0]["reason"],"earliest_expiry_least_remaining")
-            self.assertFalse((claude/"quota-count").exists())
-            q = self.api("GET","accounts?tool=claude")[1]["items"][0]["quota"]
-            self.assertEqual(q,{"loading":False,"status":"not_checked"})
-        finally:
-            (codex/"hold-old-quota").unlink()
+    def test_concurrent_codex_launches_wait_for_one_refresh_before_choosing(self):
+        from concurrent.futures import ThreadPoolExecutor
+        empty, ready = [Path(self.account("codex", n)["home"]) for n in ("empty", "ready")]
+        for home in (empty, ready):
+            (home/"auth.json").write_text("{}")
+        (empty/"empty-quota").touch()
+        hold = empty/"hold-old-quota"
+        hold.touch()
+        with ThreadPoolExecutor(2) as pool:
+            launches = [pool.submit(self.cli, "codex") for _ in range(2)]
+            try:
+                for _ in range(200):
+                    if (empty/"held-old-pid").exists(): break
+                    time.sleep(.02)
+                self.assertTrue((empty/"held-old-pid").exists())
+                self.assertEqual(self.api("GET", "startups")[1]["items"], [])
+                self.assertFalse(any(p.done() for p in launches))
+            finally:
+                hold.unlink()
+            for p in launches:
+                result = p.result()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["home"], str(ready))
+        for home in (empty, ready):
+            self.assertEqual((home/"quota-count").read_text(), "fetch\n")
 
     def test_split_expiry_settings_choose_different_codex_profiles_on_launch(self):
         early = int(time.time()) + 600
@@ -844,24 +848,40 @@ class Service(unittest.TestCase):
             row = self.api("GET","startups?tool=codex")[1]["items"][0]
             self.assertEqual((row["reason"],row["config_id"]),(mode,profile["id"]))
 
-    def test_native_claude_usage_is_display_only_in_all_routing_modes(self):
-        profiles = [Path(self.account("claude", n)["home"]) for n in ("full", "empty")]
-        for home, used in zip(profiles, (0, 100)):
+    def test_native_claude_account_usage_guides_quota_modes(self):
+        profiles = [Path(self.account("claude", n)["home"]) for n in ("roomy", "scarce")]
+        for home, used in zip(profiles, (20, 90)):
             # Opaque to ccpd: only the native process interprets the credential store.
             (home/".credentials.json").write_text("not JSON")
             (home/"usage.json").write_text(json.dumps({"five_hour":{"utilization":used}}))
-        self.assertEqual(self.api("POST","quota/refresh",{})[1]["queued"],2)
-        for _ in range(200):
-            rows = self.api("GET","accounts?tool=claude")[1]["items"]
-            if all(r["quota"]["status"]=="fresh" for r in rows): break
-            time.sleep(.02)
-        self.assertEqual([r["quota"]["snapshot"]["windows"][0]["used_pct"] for r in rows],[0,100])
-        for mode in ["most_remaining","least_remaining","earliest_expiry_most_remaining","earliest_expiry_least_remaining","round_robin","priority"]:
+        for mode, expected in [("least_remaining", [1]), ("most_remaining", [0]),
+                               ("earliest_expiry_least_remaining", [1]), ("earliest_expiry_most_remaining", [0]),
+                               ("round_robin", [1, 0]), ("priority", [1, 0])]:
             self.assertEqual(self.api("PUT","settings",{"routing_mode":mode})[0],200)
-            for home in profiles:
-                self.assertEqual(Path(json.loads(self.cli("claude","chat").stdout)["home"]),home)
+            for i in expected:
+                self.assertEqual(Path(json.loads(self.cli("claude","chat").stdout)["home"]),profiles[i])
         for home in profiles:
             self.assertEqual((home/"quota-count").read_text(),"fetch\n")
+
+    def test_failed_quota_checks_rotate_without_retrying_or_reusing_stale_scores(self):
+        import sqlite3
+        a, b = [Path(self.account("claude", n)["home"]) for n in ("a", "b")]
+        for home, used in [(a, 10), (b, 90)]:
+            (home/".credentials.json").write_text("disposable")
+            (home/"usage.json").write_text(json.dumps({"five_hour": {"utilization": used}}))
+        self.api("PUT", "settings", {"routing_mode": "least_remaining"})
+        def launch():
+            result = self.cli("claude", "chat")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return Path(json.loads(result.stdout)["home"])
+        self.assertEqual(launch(), b)
+        for home in (a, b):
+            (home/"raw-output").write_text("unavailable")
+        with closing(sqlite3.connect(self.root/"state/cc-profile/router.sqlite3")) as db, db:
+            db.execute("UPDATE quota_cache SET success_ms=success_ms-120000, retry_ms=0")
+        self.assertEqual([launch(), launch()], [a, b])
+        for home in (a, b):
+            self.assertEqual((home/"quota-count").read_text(), "fetch\n" * 2)
 
     def reset_fixture(self, name="reset-profile"):
         c = self.account("codex", name)

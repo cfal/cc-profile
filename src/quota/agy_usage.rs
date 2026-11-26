@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{process::Stdio, time::Duration};
+use std::process::Stdio;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::AsyncReadExt;
 
@@ -58,7 +58,7 @@ fn snapshot(bytes: &[u8]) -> Option<Value> {
         if group.disabled {
             continue;
         }
-        let Some(label) = ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"]
+        let Some(label) = [agy::GEMINI_POOL, agy::THIRD_PARTY_POOL, agy::ARGON_POOL]
             .into_iter()
             .find(|name| name.eq_ignore_ascii_case(&group.name))
         else {
@@ -86,14 +86,19 @@ fn snapshot(bytes: &[u8]) -> Option<Value> {
                 | (None, "Claude and GPT models", Some("3p-5h")) => "5 hours",
                 _ => continue,
             };
-            let reset_at_ms = b
-                .reset_time
-                .as_deref()
-                .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
-                .map(|t| (t.unix_timestamp_nanos() / 1_000_000) as i64)
-                .filter(|ms| *ms > 0);
+            let reset_at_ms = match b.reset_time {
+                None => None,
+                Some(raw) => {
+                    let Ok(time) = OffsetDateTime::parse(&raw, &Rfc3339) else {
+                        continue;
+                    };
+                    let ms = (time.unix_timestamp_nanos() / 1_000_000) as i64;
+                    // AgY uses the Unix epoch for a window without a reset time.
+                    (ms != 0).then_some(ms)
+                }
+            };
             windows.push(json!({
-                "kind": "model", "label": format!("{label}, {window}"),
+                "kind": "model", "pool": label, "label": format!("{label}, {window}"),
                 "used_pct": 100. - fraction * 100., "reset_at_ms": reset_at_ms,
             }));
         }
@@ -116,7 +121,7 @@ pub(super) async fn fetch(c: &Config, build: &Build) -> Result<Value> {
         .env("BROWSER", "/bin/false")
         .stdout(Stdio::piped())
         .spawn()?;
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(crate::protocol::QUOTA_WAIT, async {
         const LIMIT: usize = 64 * 1024;
         let mut bytes = Vec::new();
         child

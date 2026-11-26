@@ -436,6 +436,11 @@ async fn run() -> Result<ExitCode> {
     }))
 }
 async fn launch(req: &Request, deadline: Instant) -> Result<Plan> {
+    let deadline = if req.rotating_invocation().is_some() {
+        deadline + ccpd::protocol::QUOTA_WAIT
+    } else {
+        deadline
+    };
     request(
         if req.managed_agy_acp() {
             ccpd::protocol::ACP_LAUNCH

@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 pub const VERSION: u8 = 3;
 pub const PRIVATE_REQUEST_MAX_BYTES: usize = 256 * 1024;
+pub const QUOTA_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 // Keep this value compatible with existing launchers and startup history.
 pub const DEFAULT_ACCOUNT_DECISION: &str = "current";
 pub const ACP_LAUNCH: &str = "/v4/agy-acp/launch";
@@ -85,6 +86,14 @@ pub struct Request {
     pub override_names: Vec<String>,
 }
 impl Request {
+    pub fn rotating_invocation(&self) -> Option<crate::invocation::Invocation> {
+        if self.login_profile.is_some() || !self.override_names.is_empty() {
+            return None;
+        }
+        crate::invocation::classify(&self.tool, &self.argv, &self.cwd)
+            .ok()
+            .filter(|i| i.intent.rotates())
+    }
     pub fn managed_codex_stdio(&self) -> bool {
         self.tool == "codex"
             && self.login_profile.is_none()

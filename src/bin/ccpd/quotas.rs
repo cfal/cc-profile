@@ -13,24 +13,43 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
 pub struct Jobs {
     active: Mutex<HashMap<i64, Uuid>>,
     slots: Semaphore,
+    changed: Notify,
 }
 impl Jobs {
     // Called under the store transaction: a superseded fetch cannot restore the old observation.
     pub fn invalidate(&self, db: &Connection, id: i64) -> Result<()> {
         db.execute("DELETE FROM quota_cache WHERE config_id=?", [id])?;
         self.active.lock().unwrap().remove(&id);
+        self.changed.notify_waiters();
         Ok(())
     }
     pub fn new() -> Self {
         Self {
             active: Mutex::default(),
             slots: Semaphore::new(2),
+            changed: Notify::new(),
+        }
+    }
+
+    async fn wait_for(&self, tickets: &[(i64, Uuid)]) {
+        loop {
+            let changed = self.changed.notified();
+            let pending = {
+                let active = self.active.lock().unwrap();
+                tickets
+                    .iter()
+                    .any(|(id, ticket)| active.get(id) == Some(ticket))
+            };
+            if !pending {
+                return;
+            }
+            changed.await;
         }
     }
 }
@@ -154,7 +173,7 @@ enum Scope {
         enabled_only: bool,
         expected: Option<String>,
     },
-    Provider(String),
+    Routing(String),
     All,
 }
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -183,6 +202,7 @@ impl Refresh {
 struct Queued {
     count: usize,
     next_check_ms: i64,
+    tickets: Vec<(i64, Uuid)>,
 }
 struct Job {
     config: Config,
@@ -245,6 +265,7 @@ impl Job {
         let mut active = s.quotas.active.lock().unwrap();
         if active.get(&id) == Some(&ticket) {
             active.remove(&id);
+            s.quotas.changed.notify_waiters();
         }
     }
 }
@@ -257,11 +278,11 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
             ..
         }
     );
-    let (candidates, next_check_ms) = blocking(move || {
+    let (candidates, next_check_ms, tickets) = blocking(move || {
         let db = a.store.db()?;
         let cs = match &scope {
             Scope::Account { id, .. } => vec![config(&db, *id)?],
-            Scope::Provider(t) => configs(&db, t)?,
+            Scope::Routing(t) => configs(&db, t)?,
             Scope::All => configs(&db, "claude")?
                 .into_iter()
                 .chain(configs(&db, "codex")?)
@@ -271,6 +292,7 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
         drop(db);
         // A slow profile directory must not hold the store lock during a roster sweep.
         let stamped: Vec<_> = cs.into_iter().filter(|c| !enabled_only || c.enabled)
+            .filter(|c| !matches!(scope, Scope::Routing(_)) || quota::routing_quota_possible(c))
             .filter_map(|c| inputs(&c).map(|stamp| (c, stamp))).collect();
         let db = a.store.db()?;
         let ms = now();
@@ -290,15 +312,14 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
         }
         // Do not mark any jobs active until candidate enumeration succeeds.
         let mut active = a.quotas.active.lock().unwrap();
+        let mut tickets = Vec::new();
         jobs.retain(|job| {
-            if let std::collections::hash_map::Entry::Vacant(slot) = active.entry(job.config.id) {
-                slot.insert(job.ticket);
-                true
-            } else {
-                false
-            }
+            let id = job.config.id;
+            let ticket = *active.entry(id).or_insert(job.ticket);
+            tickets.push((id, ticket));
+            ticket == job.ticket
         });
-        Ok((jobs, next))
+        Ok((jobs, next, tickets))
     })
     .await?;
     let n = candidates.len();
@@ -308,6 +329,7 @@ async fn queue(s: Shared, scope: Scope, refresh: Refresh) -> Result<Queued> {
     Ok(Queued {
         count: n,
         next_check_ms,
+        tickets,
     })
 }
 pub async fn run_daily(s: Shared) {
@@ -337,13 +359,16 @@ pub async fn after_reset(s: Shared, selected: i64, refresh: Vec<(i64, String)>) 
         }
     }
 }
-pub async fn refresh_provider(s: Shared, tool: String) {
-    if queue(s, Scope::Provider(tool), Refresh::Stale)
-        .await
-        .is_err()
-    {
-        eprintln!("ccpd: could not queue stale routing quota checks");
-    }
+pub async fn before_launch(s: Shared, tool: String) {
+    // Finish scheduling even if the caller disconnects or the wait expires.
+    let queued = tokio::spawn(queue(s.clone(), Scope::Routing(tool), Refresh::Stale));
+    let wait = async {
+        match queued.await {
+            Ok(Ok(q)) => s.quotas.wait_for(&q.tickets).await,
+            _ => eprintln!("ccpd: could not queue stale routing quota checks"),
+        }
+    };
+    let _ = tokio::time::timeout(ccpd::protocol::QUOTA_WAIT, wait).await;
 }
 #[derive(Deserialize)]
 pub struct Options {

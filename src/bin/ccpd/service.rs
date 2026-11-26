@@ -180,14 +180,19 @@ async fn launch(
                 .into(),
         ));
     }
+    let build = s.build(&r.tool).await;
     let app = s.clone();
-    let tool = r.tool.clone();
-    let build = s.build(&tool).await;
-    let admission = blocking(move || routing::admit(&app.store, &build, &r)).await?;
-    if admission.refresh_quota {
-        tokio::spawn(super::quotas::refresh_provider(s, tool));
+    let (r, build, refresh) = blocking(move || {
+        let refresh = routing::should_refresh_quota(&app.store, &build, &r)?;
+        Ok((r, build, refresh))
+    })
+    .await?;
+    if refresh {
+        super::quotas::before_launch(s.clone(), r.tool.clone()).await;
     }
-    admission.plan.map(Json)
+    blocking(move || routing::launch(&s.store, &build, &r))
+        .await
+        .map(Json)
 }
 #[derive(Deserialize)]
 pub struct Filter {

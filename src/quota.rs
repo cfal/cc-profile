@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{path::Path, time::Duration};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const FRESH_MS: i64 = 300_000;
+pub const FRESH_MS: i64 = 2 * 60 * 1_000;
 
 pub fn auth_stamp(c: &Config) -> String {
     let path = match c.tool.as_str() {
@@ -58,7 +58,7 @@ pub fn inputs(c: &Config) -> Option<String> {
     }
     let auth = if c.tool == "agy" {
         let login = crate::agy::login_stamp(&c.home).ok()?;
-        json!(["agy-usage-v1", c.revision, login]).to_string()
+        json!(["agy-usage-v2", c.revision, login]).to_string()
     } else {
         auth_stamp(c)
     };
@@ -98,6 +98,19 @@ fn unmanaged_file(c: &Config) -> bool {
             .iter()
             .all(|name| absent(&Path::new("/etc/codex").join(name)))
 }
+
+pub fn routing_quota_possible(c: &Config) -> bool {
+    match c.tool.as_str() {
+        "codex" => unmanaged_file(c),
+        "claude" => c
+            .home
+            .join(".credentials.json")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file()),
+        "agy" => crate::agy::has_login(&c.home).unwrap_or(false),
+        _ => false,
+    }
+}
 // Ordering for expiry routing: spend caps can exclude a profile, but only a
 // positive account window can promote it out of Unknown.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -113,7 +126,7 @@ pub(crate) struct Allowance {
     pub expiry: WindowExpiry,
 }
 
-fn allowance(snapshot: &Value, ms: i64) -> Option<Allowance> {
+fn allowance(snapshot: &Value, ms: i64, pool: Option<&str>) -> Option<Allowance> {
     let live =
         |w: &Value| w["reset_at_ms"].is_null() || w["reset_at_ms"].as_i64().is_some_and(|t| t > ms);
     let spend = &snapshot["spend_control"];
@@ -126,7 +139,11 @@ fn allowance(snapshot: &Value, ms: i64) -> Option<Allowance> {
     };
     let mut expiry = WindowExpiry::Unknown;
     for w in snapshot["windows"].as_array().into_iter().flatten() {
-        if w["kind"] == "account"
+        let applicable = match pool {
+            Some(pool) => w["kind"] == "model" && w["pool"] == pool,
+            None => w["kind"] == "account",
+        };
+        if applicable
             && live(w)
             && let Some(used) = percent(&w["used_pct"])
         {
@@ -145,9 +162,13 @@ fn allowance(snapshot: &Value, ms: i64) -> Option<Allowance> {
 }
 
 // Only called for present profiles. Cache failures or unidentifiable logins cannot deny a launch.
-pub(crate) fn cached_allowance(db: &Connection, c: &Config, ms: i64) -> Option<Allowance> {
-    if c.tool != "codex" {
-        // Claude can return undated cached usage; Antigravity reports model pools only.
+pub(crate) fn cached_allowance(
+    db: &Connection,
+    c: &Config,
+    ms: i64,
+    pool: Option<&str>,
+) -> Option<Allowance> {
+    if c.tool == "agy" && pool.is_none() {
         return None;
     }
     let (stamp, snapshot): (String, String) = db
@@ -159,19 +180,24 @@ pub(crate) fn cached_allowance(db: &Connection, c: &Config, ms: i64) -> Option<A
         .ok()?
         .query_row(params![c.id, ms.saturating_sub(FRESH_MS), ms], |r| Ok((r.get(0)?, r.get(1)?)))
         .ok()?;
-    let (current, identifiable) = input_stamp(c, &auth_stamp(c));
-    if !identifiable || current != stamp {
+    let matches = if c.tool == "agy" {
+        inputs(c).as_ref() == Some(&stamp)
+    } else {
+        let (current, identifiable) = input_stamp(c, &auth_stamp(c));
+        identifiable && current == stamp
+    };
+    if !matches {
         return None;
     }
     let snapshot: Value = serde_json::from_str(&snapshot).ok()?;
-    if snapshot["file_auth_verified"] != true {
+    if c.tool == "codex" && snapshot["file_auth_verified"] != true {
         return None;
     }
-    allowance(&snapshot, ms)
+    allowance(&snapshot, ms, pool)
 }
 
 pub fn cached_remaining(db: &Connection, c: &Config, ms: i64) -> Option<f64> {
-    cached_allowance(db, c, ms).map(|a| a.remaining)
+    cached_allowance(db, c, ms, None).map(|a| a.remaining)
 }
 fn unavailable() -> Error {
     Error::unavailable("unavailable", "Quota unavailable.")
@@ -323,7 +349,7 @@ pub async fn fetch(c: &Config, build: &Build, cwd: &Path) -> Result<Value> {
         return agy_usage::fetch(c, build).await;
     }
     if c.tool == "codex" {
-        let (mut client, quota) = tokio::time::timeout(Duration::from_secs(12), async {
+        let (mut client, quota) = tokio::time::timeout(crate::protocol::QUOTA_WAIT, async {
             let mut client = rpc::Codex::open(build, c, cwd).await?;
             let quota = client
                 .call(
@@ -357,7 +383,7 @@ pub async fn fetch(c: &Config, build: &Build, cwd: &Path) -> Result<Value> {
 mod tests {
     use super::*;
     fn remaining(snapshot: &Value, ms: i64) -> Option<f64> {
-        allowance(snapshot, ms).map(|a| a.remaining)
+        allowance(snapshot, ms, None).map(|a| a.remaining)
     }
     #[test]
     fn quota_is_not_inferred_and_zero_is_a_value() {

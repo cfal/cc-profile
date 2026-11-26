@@ -214,6 +214,7 @@ class Antigravity(unittest.TestCase):
 
     def test_model_discovery_requires_a_default_account_and_preserves_native_streams_and_rotation(self):
         a, b = self.profile("first"), self.profile("catalog")
+        self.assertEqual(self.s.api("PUT", "settings", {"routing_mode":"round_robin"})[0], 200)
         alias = self.s.root / "agy"
         alias.symlink_to(svc.LAUNCHER)
         def models(*extra):
@@ -608,9 +609,9 @@ class Antigravity(unittest.TestCase):
         good = self.wait_quota(c, "fresh")
         self.assertFalse(good["stale"])
         self.assertEqual(good["snapshot"], {"windows":[
-            {"kind":"model","label":"Gemini Models, Weekly","used_pct":24,"reset_at_ms":1893456000000},
-            {"kind":"model","label":"Gemini Models, 5 hours","used_pct":0,"reset_at_ms":None},
-            {"kind":"model","label":"Claude and GPT models, Weekly","used_pct":100,"reset_at_ms":None},
+            {"kind":"model","pool":"Gemini Models","label":"Gemini Models, Weekly","used_pct":24,"reset_at_ms":1893456000000},
+            {"kind":"model","pool":"Gemini Models","label":"Gemini Models, 5 hours","used_pct":0,"reset_at_ms":None},
+            {"kind":"model","pool":"Claude and GPT models","label":"Claude and GPT models, Weekly","used_pct":100,"reset_at_ms":None},
         ]})
         obs = json.loads((home/"last-run").read_text())
         self.assertEqual(obs["proxy"],["https://proxy.invalid:8443/"]*4)
@@ -1020,14 +1021,15 @@ class Antigravity(unittest.TestCase):
         self.assertEqual((Path(c["home"])/"calls").read_text().splitlines(),["initialize","session/new"])
         self.assertEqual([r["native_id"] for r in self.s.api("GET","sessions?tool=agy")[1]["items"]],["first"])
 
-    def test_acp_priority_pins_connection_and_native_reports_remain_unranked(self):
+    def test_acp_uses_gemini_quota_and_preserves_pinned_owner(self):
         a,b = self.profile("a"),self.profile("b")
         self.assertEqual(self.s.api("PATCH",f"accounts/{b['id']}",{"revision":b["revision"],"priority":90})[0],200)
         for c in (a, b):
             self.assertEqual(self.s.cli("login", str(c["id"])).returncode, 0)
         (Path(a["home"])/"report.json").write_text(json.dumps({
             "status":"SUCCESS", "num_turns":0, "command":{"name":"usage", "data":{"groups":[
-                {"name":"Gemini Models", "buckets":[{"window":"weekly", "remaining_fraction":0}]}]}}}))
+                {"name":"Gemini Models", "buckets":[{"window":"weekly", "remaining_fraction":0}]},
+                {"name":"Claude and GPT models", "buckets":[{"window":"weekly", "remaining_fraction":0.8}]}]}}}))
         self.assertEqual(self.refresh_quota(stale_only=True), 2)
         self.assertEqual(self.wait_quota(a, "fresh")["snapshot"]["windows"][0]["used_pct"], 100)
         self.wait_quota(b, "fresh")
@@ -1037,18 +1039,51 @@ class Antigravity(unittest.TestCase):
         self.assertEqual([r["config_id"] for r in self.s.api("GET","sessions")[1]["items"]],[b["id"]]*2)
         self.assertEqual(self.s.api("PUT","settings",{"routing_mode":"most_remaining"})[0],200)
         self.bridge([],new(3))
-        self.assertEqual(self.s.api("GET","sessions")[1]["items"][0]["config_id"],a["id"])
+        self.assertEqual(self.s.api("GET","sessions")[1]["items"][0]["config_id"],b["id"])
+        result = self.s.cli("agy", "--model=claude-test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["home"], a["home"])
         result, = self.bridge(["--for-session","1"],(1,"session/resume",{"sessionId":"1"}))
         self.assertEqual(result["result"]["home"],b["home"])
         with closing(sqlite3.connect(self.s.root/"state/cc-profile/router.sqlite3")) as db, db:
             db.execute("UPDATE quota_cache SET success_ms=1,attempt_ms=1,retry_ms=0")
-        for n, mode, owner in [(4, "earliest_expiry_most_remaining", b), (5, "earliest_expiry_least_remaining", a)]:
+        for n, mode, owner in [(4, "earliest_expiry_most_remaining", b), (5, "earliest_expiry_least_remaining", b)]:
             self.assertEqual(self.s.api("PUT","settings",{"routing_mode":mode})[0],200)
             self.bridge([], new(n))
             self.assertEqual(self.s.api("GET","sessions")[1]["items"][0]["config_id"],owner["id"])
         for c in (a, b):
-            self.assertTrue(self.wait_quota(c, "fresh")["stale"])
-            self.assertEqual(len((Path(c["home"])/"usage-calls").read_text().splitlines()), 1)
+            self.assertFalse(self.wait_quota(c, "fresh")["stale"])
+            self.assertEqual(len((Path(c["home"])/"usage-calls").read_text().splitlines()), 2)
+
+    @unittest.skipUnless(os.environ.get("CCP_TEST_SLOW_QUOTA"), "two-minute quota deadline test")
+    def test_new_launch_uses_partial_results_at_the_shared_quota_deadline(self):
+        a, b = self.profile("stalled"), self.profile("slow")
+        self.login_markers(a, b)
+        holds = [Path(c["home"])/"hold-report" for c in (a, b)]
+        for hold in holds:
+            hold.touch()
+        start = time.monotonic()
+        with subprocess.Popen([svc.LAUNCHER, "agy", "--model", "gemini-test"], env=self.s.env,
+                              cwd=self.s.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True) as p:
+            try:
+                for _ in range(200):
+                    if all((h.parent/"usage-calls").exists() for h in holds): break
+                    time.sleep(.05)
+                self.assertTrue(all((h.parent/"usage-calls").exists() for h in holds))
+                time.sleep(16)  # Longer than the former launcher and AgY probe deadlines.
+                holds[1].unlink()
+                self.wait_quota(b, "fresh")
+                self.assertIsNone(p.poll())
+                self.assertEqual(self.s.api("GET", "startups")[1]["items"], [])
+                out, err = p.communicate(timeout=115)
+                self.assertEqual(p.returncode, 0, err)
+                self.assertEqual(json.loads(out)["home"], b["home"])
+                self.assertGreaterEqual(time.monotonic() - start, 119)
+            finally:
+                for hold in holds:
+                    hold.unlink(missing_ok=True)
+                if p.poll() is None: p.kill()
 
     def test_conflicting_native_reply_is_not_released_or_rebound(self):
         a = self.profile("a")

@@ -15,6 +15,22 @@ pub mod acp;
 pub mod discovery;
 
 pub const APP_DIR: &str = "antigravity-cli";
+pub const GEMINI_POOL: &str = "Gemini Models";
+pub const THIRD_PARTY_POOL: &str = "Claude and GPT models";
+pub const ARGON_POOL: &str = "Gemini 4 Argon";
+
+pub fn model_pool(model: &str) -> Option<&'static str> {
+    let model = model.to_ascii_lowercase();
+    if model == "gemini-4-argon" || model.starts_with("gemini-4-argon-") {
+        Some(ARGON_POOL)
+    } else if model.starts_with("gemini-") {
+        Some(GEMINI_POOL)
+    } else if model.starts_with("claude-") || model.starts_with("gpt-") {
+        Some(THIRD_PARTY_POOL)
+    } else {
+        None
+    }
+}
 pub const STATUS: &[&str] = &["profile-status"];
 pub const PROFILE_USAGE: &[&str] = &["profile-usage"];
 pub const OVERRIDES: &[&str] = &[

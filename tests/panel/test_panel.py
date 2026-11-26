@@ -393,7 +393,7 @@ class Panel(unittest.TestCase):
             page.set_viewport_size({"width":320, "height":720})
             self.check_layout(page,"agy-quota-mobile")
             with closing(sqlite3.connect(cache)) as db, db:
-                db.execute("UPDATE quota_cache SET success_ms=success_ms-300001,retry_ms=0")
+                db.execute("UPDATE quota_cache SET success_ms=success_ms-120000,retry_ms=0")
             (home/"report.json").write_text("fixture-private, not a usage result")
             page.get_by_role("link",name="Antigravity / ACP work").click()
             expect(card).to_contain_text("Stale · Unavailable")

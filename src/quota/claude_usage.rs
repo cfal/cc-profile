@@ -5,7 +5,7 @@ use crate::{
     types::Result,
 };
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const LIMIT: usize = 1024 * 1024;
@@ -85,7 +85,7 @@ pub(super) async fn fetch(c: &Config, build: &Build, cwd: &Path) -> Result<Value
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(crate::protocol::QUOTA_WAIT, async {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(REQUESTS).await?;
         drop(stdin);
