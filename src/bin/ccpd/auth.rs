@@ -23,13 +23,15 @@ use std::{
 use tokio::sync::Semaphore;
 
 pub struct Auth {
+    pub disabled: bool,
     sessions: Mutex<HashMap<String, (i64, i64)>>,
     slots: Arc<Semaphore>,
     failures: Mutex<Option<(i64, u8, Instant)>>,
 }
 impl Auth {
-    pub fn new() -> Self {
+    pub fn new(disabled: bool) -> Self {
         Self {
+            disabled,
             sessions: Mutex::default(),
             slots: Arc::new(Semaphore::new(2)),
             failures: Mutex::default(),
@@ -175,6 +177,11 @@ pub async fn change_password(
     .await
 }
 pub async fn session(State(s): State<Shared>, h: HeaderMap) -> Result<Json<Value>> {
+    if s.auth.disabled {
+        return Ok(Json(
+            json!({"auth_disabled":true,"setup_required":false,"signed_in":false}),
+        ));
+    }
     let a = s.clone();
     let rev = blocking(move || password::revision(&a.store)).await?;
     Ok(Json(
@@ -203,7 +210,8 @@ async fn check(s: &Shared, method: &Method, path: &str, h: &HeaderMap) -> Result
     {
         return Err(Error::denied());
     }
-    if path.starts_with("/api/")
+    if !s.auth.disabled
+        && path.starts_with("/api/")
         && !matches!(path, "/api/v1/login" | "/api/v1/setup" | "/api/v1/session")
     {
         let a = s.clone();

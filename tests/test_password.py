@@ -41,6 +41,33 @@ class PanelPassword(unittest.TestCase):
             self.assertTrue(verifier.startswith("$argon2id$"))
             self.assertNotIn(passwords[winner],verifier)
 
+    def test_no_auth_needs_no_session_and_does_not_change_the_password(self):
+        s = self.s
+        credentials = {"password": s.password}
+        mode = {"routing_mode": "priority"}
+        for has_password in (False, True):
+            with self.subTest(has_password=has_password):
+                if has_password:
+                    self.assertEqual(s.api("POST", "setup", credentials)[0], 200)
+                s.stop()
+                s.start("--no-auth", warning="WARNING: --no-auth")
+                self.assertEqual(s.api("GET", "session")[1], {
+                    "auth_disabled": True, "setup_required": False, "signed_in": False,
+                })
+                self.assertEqual(s.api("GET", "settings")[0], 200)
+                self.assertEqual(s.api("PUT", "settings", mode)[:2], (200, mode))
+                for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Content-Type": "text/plain"}):
+                    self.assertEqual(s.api("PUT", "settings", mode, headers)[0], 403)
+                for path in ("setup", "password", "login", "logout"):
+                    self.assertEqual(s.api("POST", path, credentials)[0], 404)
+
+                s.stop()
+                s.start()
+                self.assertEqual(s.api("GET", "settings")[0], 403)
+                self.assertEqual(s.api("GET", "session")[1]["setup_required"], not has_password)
+                if has_password:
+                    self.assertEqual(s.api("POST", "login", credentials)[0], 200)
+
     def test_wildcard_listener_allows_first_visit_setup_and_proxied_sign_in(self):
         s = self.s
         s.stop()

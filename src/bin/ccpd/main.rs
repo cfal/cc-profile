@@ -33,24 +33,26 @@ async fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     let mut listen = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let mut port = 8743;
+    let mut no_auth = false;
     let mut claude = None;
     let mut agy = None;
     let mut codex = None;
     let bad = || {
         Error::bad(
             "arguments",
-            "Usage: ccpd [--listen IP] [--port PORT] [--claude-bin PATH] [--codex-bin PATH] [--agy-bin PATH]\n       ccpd set-password",
+            "Usage: ccpd [--listen IP] [--port PORT] [--no-auth] [--claude-bin PATH] [--codex-bin PATH] [--agy-bin PATH]\n       ccpd set-password",
         )
     };
     while let Some(k) = args.next() {
         match k.as_str() {
-            "set-password" if args.len() == 0 => return password::prompt(),
+            "set-password" if args.len() == 0 && !no_auth => return password::prompt(),
             "-V" | "--version" => {
                 println!("ccpd {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "-h" | "--help" => {
                 println!("{}", bad());
+                println!("--no-auth: disable panel password protection for this run.");
                 println!(
                     "CC_PROFILE_DATA_PATH: router data (default ~/.config/cc-profile). CC_PROFILE_ACCOUNTS_PATH: new account homes (default <data>/accounts). CC_PROFILE_RUNTIME_PATH: ccpd.sock and runtime locks (default $XDG_RUNTIME_DIR/cc-profile or <data>/runtime). CC_PROFILE_TEMP_PATH: scratch base (default OS temp). All overrides take absolute paths."
                 );
@@ -58,6 +60,7 @@ async fn run() -> Result<()> {
             }
             "--listen" => listen = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,
             "--port" => port = args.next().ok_or_else(bad)?.parse().map_err(|_| bad())?,
+            "--no-auth" => no_auth = true,
             "--claude-bin" => claude = Some(args.next().ok_or_else(bad)?),
             "--agy-bin" => agy = Some(args.next().ok_or_else(bad)?),
             "--codex-bin" => codex = Some(args.next().ok_or_else(bad)?),
@@ -103,7 +106,7 @@ async fn run() -> Result<()> {
         codex,
         agy,
         state_dir: state,
-        auth: auth::Auth::new(),
+        auth: auth::Auth::new(no_auth),
         quotas: quotas::Jobs::new(),
         logins: device_login::Logins::default(),
         identity_slots: tokio::sync::Semaphore::new(2),
@@ -119,6 +122,11 @@ async fn run() -> Result<()> {
             let _ = service::blocking(move || a.store.prune()).await;
         }
     });
+    if no_auth {
+        eprintln!(
+            "WARNING: --no-auth is active. Anyone who can reach http://{bound} can read and change router settings and accounts without a password."
+        );
+    }
     eprintln!(
         "ccpd {}: http://{bound}\npanel database: {}\nlaunch socket: {}",
         env!("CARGO_PKG_VERSION"),

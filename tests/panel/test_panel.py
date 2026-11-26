@@ -24,6 +24,23 @@ class Panel(unittest.TestCase):
         service.setUp()
         return service
 
+    def test_no_auth_opens_settings_without_password_controls(self):
+        service = self.start_service(claim=False)
+        service.stop()
+        service.start("--no-auth", warning="WARNING: --no-auth")
+        with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{service.port}/#settings")
+            mode = page.get_by_label("Routing mode")
+            expect(mode).to_be_visible()
+            expect(page.locator("input[type=password]")).to_have_count(0)
+            expect(page.get_by_role("button", name="Sign out")).to_be_hidden()
+            mode.select_option("priority")
+            page.get_by_role("button", name="Save routing mode").click()
+            expect(page.get_by_text("Routing mode saved.")).to_be_visible()
+            page.reload()
+            expect(mode).to_have_value("priority")
+
     def test_tab_navigation_shows_loading_until_the_selected_view_is_ready(self):
         service = self.start_service()
         with sync_playwright() as pw, pw.chromium.launch(args=["--disable-dev-shm-usage"]) as browser:

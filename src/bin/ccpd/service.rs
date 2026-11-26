@@ -273,7 +273,15 @@ async fn set_default_account(
     .await
 }
 pub fn web(s: Shared) -> Router {
-    Router::new()
+    let mut router = Router::new();
+    if !s.auth.disabled {
+        router = router
+            .route("/api/v1/setup", post(auth::setup))
+            .route("/api/v1/login", post(auth::login))
+            .route("/api/v1/password", post(auth::change_password))
+            .route("/api/v1/logout", post(auth::logout));
+    }
+    router
         .route(
             "/",
             get(|| async { axum::response::Html(include_str!("../../../web/index.html")) }),
@@ -309,11 +317,7 @@ pub fn web(s: Shared) -> Router {
             "/LUCIDE-LICENSE.txt",
             get(|| async { include_str!("../../../web/LUCIDE-LICENSE.txt") }),
         )
-        .route("/api/v1/setup", post(auth::setup))
-        .route("/api/v1/login", post(auth::login))
-        .route("/api/v1/password", post(auth::change_password))
         .route("/api/v1/session", get(auth::session))
-        .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/settings", get(settings).put(set_settings))
         .route("/api/v1/versions", get(versions).post(versions))
         .route("/api/v1/accounts", get(accounts).post(add))

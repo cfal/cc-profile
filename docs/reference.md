@@ -40,6 +40,8 @@ On the first visit, set a panel password; subsequent visits use **Sign in**. Thi
 
 Sign-in survives reloads in the same tab. A separately opened tab signs in independently. The theme button in the header cycles through system, light, and dark for this browser. In **Settings**, change the panel password using the current one. Changing it signs out all tabs; it does not stop running agents.
 
+`ccpd --no-auth` disables password checks for the entire HTTP panel and API for that run. The daemon prints a startup warning; no setup, sign-in, or browser session is required. Even on loopback, other local users who can reach the port have full panel access. If you rely on a proxy for authentication, restrict direct access to the daemon. Restart without the flag to require the existing password, or first-visit setup if none was set. Provider logins and the private launch socket are unchanged.
+
 ### User service
 
 `ccp` does not start a missing daemon or select a different one. To keep the configured daemon running without a separate terminal on Linux, install the user service:

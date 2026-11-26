@@ -20,6 +20,8 @@ ccpd
 
 Leave `ccpd` running. Open **[http://127.0.0.1:8743](http://127.0.0.1:8743)** and set the panel password. This password protects the router; it is **not** a provider login. If the router is on a VM, run `ssh -L 8743:127.0.0.1:8743 user@your-vm` on your own machine and open the same URL locally. Do not expose an unclaimed panel or send its password over public HTTP.
 
+To skip panel setup and sign-in, start `ccpd --no-auth`. Anyone who can reach the panel can then manage your router and accounts. Use this only on a trusted machine or behind an authenticated proxy. Restart without the flag to restore password protection.
+
 ### 2. Add your first account
 
 1. Open **Accounts → Add profile**. Choose your provider, give it a label such as `Work`, and select **Create new profile**. To use an existing native config directory without copying it, select **Use existing directory** instead.

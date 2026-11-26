@@ -66,6 +66,7 @@ const quotaStates = {
   fresh: "Checked",
 };
 let sessionToken = sessionStorage.getItem("ccp_session") || "",
+  authDisabled = false,
   needsSetup = false,
   version = 0,
   cursors = [null],
@@ -240,7 +241,7 @@ const copy = async (s) => {
   } catch {
     // A browser can expose the clipboard API but deny writes.
   }
-  if (!token || sessionToken !== token || route !== location.hash || dialog.open) return;
+  if ((!token && !authDisabled) || sessionToken !== token || route !== location.hash || dialog.open) return;
   const focus = document.activeElement;
   const box = el("textarea", {readonly: true, class: "clipboard-buffer", "aria-label": "Text to copy", rows: 3});
   box.value = s;
@@ -405,7 +406,7 @@ async function settings(ver) {
   const content = el("div", {class: "settings"},
     el("section", {}, el("h2", {}, "New chats"), routing),
     binaryVersions(),
-    el("section", {}, el("h2", {}, "Panel password"), changePasswordForm()));
+    !authDisabled && el("section", {}, el("h2", {}, "Panel password"), changePasswordForm()));
   await loadRouting(routing);
   if (ver === version) main.replaceChildren(content);
 }
@@ -1381,7 +1382,7 @@ async function accounts(params, ver, enter) {
     timer = setTimeout(() => render().catch((e) => notice(e.message)), 1000);
 }
 async function render() {
-  if (!sessionToken) {
+  if (!authDisabled && !sessionToken) {
     passwordForm();
     return;
   }
@@ -1397,7 +1398,7 @@ async function render() {
   if (view !== "dashboard") readDashboardQuotas = null;
   lastView = view;
   $("nav").hidden = false;
-  $(".logout").hidden = false;
+  $(".logout").hidden = authDisabled;
   for (const a of document.querySelectorAll("nav a"))
     a.getAttribute("href") === "#" + view
       ? a.setAttribute("aria-current", "page")
@@ -1436,6 +1437,7 @@ async function connect() {
       btn("Retry", connect, "refresh-cw")));
     return;
   }
+  authDisabled = session.auth_disabled === true;
   if (!session.signed_in) {
     sessionToken = "";
     sessionStorage.removeItem("ccp_session");
