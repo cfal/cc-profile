@@ -8,7 +8,17 @@ Use multiple Claude Code, Codex, or Antigravity accounts on one Linux machine wi
 
 ### 1. Install and start the router
 
-Install at least one native CLI (`claude`, `codex`, or `agy`) and put it on your `PATH`. Already have matching Linux binaries for your architecture? Put both `ccp` and `ccpd` on your `PATH` and run `ccpd`. Otherwise, use the [Docker static build](#static-build) or build from source below with current stable Rust, a C toolchain, `pkg-config`, and SQLite development headers (`libsqlite3-dev` on Debian/Ubuntu).
+Install at least one native CLI (`claude`, `codex`, or `agy`) and put it on your `PATH`. From the [latest GitHub release](https://github.com/cfal/cc-profile/releases/latest), download `SHA256SUMS` and the Linux archive matching `uname -m` (`x86_64` or `aarch64`) into an empty directory. In that directory:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS &&
+  tar -xzf "cc-profile-$(uname -m)-unknown-linux-musl.tar.gz" &&
+  install -Dt "$HOME/.local/bin" -m 755 ccp ccpd
+export PATH="$HOME/.local/bin:$PATH"
+ccpd
+```
+
+Alternatively, use the [Docker static build](#static-build) or build from source with current stable Rust, a C toolchain, `pkg-config`, and SQLite development headers (`libsqlite3-dev` on Debian/Ubuntu):
 
 ```sh
 git clone https://github.com/cfal/cc-profile.git
@@ -85,13 +95,19 @@ The release profile uses `opt-level = 3`, fat LTO and stripped symbols. Panel as
 For a persistent setup, stop the foreground daemon and install the included systemd user unit. It expects the binaries under `~/.local/bin`:
 
 ```sh
-install -Dm644 packaging/ccpd.service "$HOME/.config/systemd/user/ccpd.service"
+install -Dm644 ccpd.service "$HOME/.config/systemd/user/ccpd.service"
 systemctl --user daemon-reload
 systemctl --user enable --now ccpd
 journalctl --user -u ccpd -n 10
 ```
 
-Run the daemon and launcher as the **same Linux user**. The daemon does not source your shell configuration. See [service PATH and native binary overrides](docs/reference.md#user-service) if your tools come from a version manager. For remote access, prefer the SSH tunnel above or a TLS reverse proxy. [Panel access and password reset](docs/reference.md#panel-access)
+In a source checkout the unit is at `packaging/ccpd.service`. Run the daemon and launcher as the **same Linux user**. The daemon does not source your shell configuration. See [service PATH and native binary overrides](docs/reference.md#user-service) if your tools come from a version manager. For remote access, prefer the SSH tunnel above or a TLS reverse proxy. [Panel access and password reset](docs/reference.md#panel-access)
+
+### Cutting a release
+
+Set the package version in `Cargo.toml` and update the corresponding entry in `Cargo.lock` in a PR. After the PR checks pass and it merges, push an annotated tag on that `main` commit (for example, `git tag -a v0.1.0 <merge-sha> -m v0.1.0`, then `git push origin v0.1.0`). The tag must be exactly `v` followed by the package version.
+
+The [build workflow](.github/workflows/build.yml) tests both native Linux archives before creating a draft with the archives, checksums and generated notes. Review the draft and publish it from GitHub Releases. Do not move a published tag; use a new version for a correction.
 
 ## Storage and recovery
 
