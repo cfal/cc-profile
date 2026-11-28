@@ -395,7 +395,8 @@ fn sole_eligible_account_skips_quota_in_every_mode() {
         )
         .unwrap();
     let missing = f.add("codex", "missing");
-    std::fs::remove_dir(missing.home).unwrap();
+    // Keep its inode allocated while making the registered path unavailable.
+    std::fs::rename(missing.home, f.root.join("moved-account")).unwrap();
     f.add("claude", "other-provider");
     std::fs::write(only.home.join("auth.json"), "{}").unwrap();
     cache(&f, &only, window(100.), now());
